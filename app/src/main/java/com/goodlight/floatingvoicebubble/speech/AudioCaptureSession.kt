@@ -20,6 +20,7 @@ class AudioCaptureSession(
     private val autoEndpoint: Boolean,
     private val mirrorToRecognizerPipe: Boolean = true,
     private val onPcm16: ((ShortArray, Int) -> Unit)? = null,
+    private val onCaptureFailure: (String) -> Unit = {},
     private val onEndpoint: () -> Unit,
 ) : AutoCloseable {
     val sampleRate = 16_000
@@ -29,9 +30,14 @@ class AudioCaptureSession(
     private val appContext = context.applicationContext
     private val running = AtomicBoolean(false)
     private val endpointSent = AtomicBoolean(false)
-    private val pipe: Array<ParcelFileDescriptor>? = if (mirrorToRecognizerPipe) ParcelFileDescriptor.createPipe() else null
+    private val pipe: Array<ParcelFileDescriptor>? = if (mirrorToRecognizerPipe) {
+        ParcelFileDescriptor.createPipe()
+    } else {
+        null
+    }
     private val endpointDetector = VoiceEndpointDetector(sampleRate = sampleRate)
-    private var thread: Thread? = null
+
+    @Volatile
     private var audioRecord: AudioRecord? = null
     private var pcmFile: File? = null
     private var wavFile: File? = null
@@ -52,8 +58,16 @@ class AudioCaptureSession(
         pcmFile = raw
         wavFile = wav
 
-        val minBuffer = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, encoding)
-            .coerceAtLeast(sampleRate / 5 * 2)
+        val queriedMinBuffer = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            encoding,
+        )
+        if (queriedMinBuffer <= 0) {
+            running.set(false)
+            error("AudioRecord does not support 16 kHz mono PCM16 (code=$queriedMinBuffer)")
+        }
+        val minBuffer = queriedMinBuffer.coerceAtLeast(sampleRate / 5 * 2)
         val record = try {
             AudioRecord.Builder()
                 .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
@@ -66,28 +80,33 @@ class AudioCaptureSession(
                 )
                 .setBufferSizeInBytes(minBuffer * 2)
                 .build()
-        } catch (security: SecurityException) {
-            running.set(false)
-            throw security
         } catch (failure: Throwable) {
             running.set(false)
             throw failure
         }
-        check(record.state == AudioRecord.STATE_INITIALIZED) {
+
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
             record.release()
             running.set(false)
-            "AudioRecord initialization failed"
+            error("AudioRecord initialization failed")
         }
         audioRecord = record
         try {
             record.startRecording()
+            check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                "AudioRecord did not enter RECORDSTATE_RECORDING"
+            }
         } catch (failure: Throwable) {
             audioRecord = null
             running.set(false)
-            record.release()
+            runCatching { record.release() }
             throw failure
         }
-        thread = Thread({ captureLoop(record, raw, wav, minBuffer) }, "VoiceBubble-Audio").also { it.start() }
+
+        Thread(
+            { captureLoop(record, raw, wav, minBuffer) },
+            "VoiceBubble-Audio",
+        ).start()
     }
 
     fun stop() {
@@ -109,11 +128,22 @@ class AudioCaptureSession(
         }
         val shorts = ShortArray((minBufferBytes / 2).coerceAtLeast(1_024))
         val bytes = ByteArray(shorts.size * 2)
+        var failureMessage: String? = null
+
         try {
             FileOutputStream(raw).buffered().use { rawOut ->
                 while (running.get()) {
                     val count = record.read(shorts, 0, shorts.size, AudioRecord.READ_BLOCKING)
-                    if (count <= 0) continue
+                    when {
+                        count > 0 -> Unit
+                        count == 0 -> continue
+                        !running.get() -> break
+                        else -> {
+                            failureMessage = audioReadFailureMessage(count)
+                            break
+                        }
+                    }
+
                     shortsToLeBytes(shorts, count, bytes)
                     val byteCount = count * 2
                     rawOut.write(bytes, 0, byteCount)
@@ -133,15 +163,34 @@ class AudioCaptureSession(
                     }
                 }
             }
+        } catch (failure: Throwable) {
+            if (running.get()) {
+                failureMessage = failure.message?.takeIf(String::isNotBlank)
+                    ?: "Audio capture failed: ${failure.javaClass.simpleName}"
+            }
         } finally {
             running.set(false)
             runCatching { recognizerStream?.close() }
             runCatching { record.stop() }
-            record.release()
+            runCatching { record.release() }
             audioRecord = null
-            runCatching { wrapPcmAsWav(raw, wav) }
+            val wavResult = runCatching { wrapPcmAsWav(raw, wav) }
             raw.delete()
+            if (failureMessage == null && wavResult.isFailure) {
+                val failure = wavResult.exceptionOrNull()
+                failureMessage = failure?.message?.takeIf(String::isNotBlank)
+                    ?: "Recorded WAV could not be finalized"
+            }
+            failureMessage?.let(onCaptureFailure)
         }
+    }
+
+    private fun audioReadFailureMessage(code: Int): String = when (code) {
+        AudioRecord.ERROR_DEAD_OBJECT -> "マイクデバイスが切断されました。再度音声入力を開始してください。"
+        AudioRecord.ERROR_INVALID_OPERATION -> "マイクの録音状態が無効になりました。"
+        AudioRecord.ERROR_BAD_VALUE -> "マイクから不正な音声データが返されました。"
+        AudioRecord.ERROR -> "マイクの読み取りでエラーが発生しました。"
+        else -> "マイクの読み取りでエラーが発生しました (code=$code)"
     }
 
     private fun shortsToLeBytes(input: ShortArray, count: Int, output: ByteArray) {
