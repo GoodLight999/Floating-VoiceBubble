@@ -20,7 +20,11 @@ class ModelImporter(private val context: Context) {
         AtomicFileInstaller.recoverBackups(this)
     }
 
-    fun importGemma(uri: Uri): ImportedGemmaModel {
+    /** Backward-compatible entry point used by the settings UI. */
+    fun importGemma(uri: Uri): File = importGemmaVerified(uri).file
+
+    /** Copies once while simultaneously calculating the exact fingerprint. */
+    fun importGemmaVerified(uri: Uri): ImportedGemmaModel {
         val metadata = sourceMetadata(uri)
         require(metadata.displayName.endsWith(".litertlm", ignoreCase = true)) {
             "LiteRT-LM の .litertlm モデルを選択してください。"
