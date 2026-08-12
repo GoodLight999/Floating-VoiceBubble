@@ -22,6 +22,7 @@ internal object AtomicDirectoryInstaller {
 
         try {
             if (destination.exists()) {
+                check(destination.isDirectory) { "$label destination is not a directory" }
                 check(destination.renameTo(backup)) { "旧${label}を安全に退避できませんでした。" }
                 oldMovedAside = true
             }
@@ -45,4 +46,40 @@ internal object AtomicDirectoryInstaller {
             throw failure
         }
     }
+
+    /**
+     * Repairs the only crash window in [replace]: process death after the old directory was
+     * renamed to a backup but before the validated temporary directory became the destination.
+     */
+    fun recoverBackups(parent: File) {
+        if (!parent.isDirectory) return
+        val groups = parent.listFiles()
+            .orEmpty()
+            .filter(File::isDirectory)
+            .mapNotNull { backup ->
+                val match = BACKUP_NAME.matchEntire(backup.name) ?: return@mapNotNull null
+                match.groupValues[1] to backup
+            }
+            .groupBy({ it.first }, { it.second })
+
+        groups.forEach { (destinationName, backups) ->
+            val destination = File(parent, destinationName)
+            if (destination.isDirectory) {
+                backups.forEach { backup -> runCatching { backup.deleteRecursively() } }
+                return@forEach
+            }
+            if (destination.exists()) {
+                // Unexpected non-directory data must not be destroyed automatically.
+                return@forEach
+            }
+
+            val ordered = backups.sortedByDescending(File::lastModified)
+            val candidate = ordered.firstOrNull() ?: return@forEach
+            if (candidate.renameTo(destination)) {
+                ordered.drop(1).forEach { backup -> runCatching { backup.deleteRecursively() } }
+            }
+        }
+    }
+
+    private val BACKUP_NAME = Regex("^\\.([^/\\\\]+)\\.backup-[0-9a-fA-F-]{36}$")
 }
