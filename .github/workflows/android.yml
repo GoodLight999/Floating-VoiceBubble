@@ -13,6 +13,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  model-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+      - name: Probe pinned official model URLs
+        run: bash scripts/verify-model-catalog.sh
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -76,7 +84,7 @@ jobs:
           retention-days: 14
 
   emulator:
-    needs: verify
+    needs: [model-catalog, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
