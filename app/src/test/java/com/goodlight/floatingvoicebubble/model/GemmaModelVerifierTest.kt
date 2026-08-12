@@ -9,14 +9,25 @@ import org.junit.Test
 
 class GemmaModelVerifierTest {
     @Test
-    fun recognizesOfficialE2BExactly() {
+    fun recognizesCurrentOfficialE2BExactly() {
+        val result = GemmaModelVerifier.identify(
+            2_588_147_712L,
+            "181938105E0EEFD105961417E8DA75903EACDA102C4FCE9CE90F50B97139A63C",
+        )
+        assertTrue(result.knownOfficialArtifact)
+        assertEquals(GemmaVariant.E2B, result.detectedVariant)
+        assertTrue(result.artifactId!!.contains("current"))
+    }
+
+    @Test
+    fun recognizesPreviousOfficialE2BRevision() {
         val result = GemmaModelVerifier.identify(
             2_583_085_056L,
             "ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42",
         )
         assertTrue(result.knownOfficialArtifact)
         assertEquals(GemmaVariant.E2B, result.detectedVariant)
-        assertTrue(result.artifactId!!.contains("E2B"))
+        assertTrue(result.artifactId!!.contains("previous"))
     }
 
     @Test
@@ -42,7 +53,7 @@ class GemmaModelVerifierTest {
     @Test
     fun sizeMatchWithoutHashIsOnlyAHint() {
         val result = GemmaModelVerifier.identify(
-            2_583_085_056L,
+            2_588_147_712L,
             "0".repeat(64),
         )
         assertFalse(result.knownOfficialArtifact)
