@@ -81,8 +81,7 @@ class AsrModelStore(context: Context) {
             validateModelFiles(candidate, strictSizes = true)
             writeManifest(candidate)
 
-            if (destination.exists()) check(destination.deleteRecursively()) { "旧ASRモデルを置き換えられませんでした。" }
-            check(temporary.renameTo(destination)) { "ASRモデルを確定保存できませんでした。" }
+            AtomicDirectoryInstaller.replace(temporary, destination, "ASRモデル")
             return loadModel(destination)
         } catch (failure: Throwable) {
             temporary.deleteRecursively()
