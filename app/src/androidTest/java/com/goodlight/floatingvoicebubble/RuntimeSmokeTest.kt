@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.goodlight.floatingvoicebubble.benchmark.BenchmarkReferenceStore
+import com.goodlight.floatingvoicebubble.benchmark.ExternalAsrResultStore
 import com.goodlight.floatingvoicebubble.diagnostics.SelfDiagnostics
 import com.goodlight.floatingvoicebubble.dictionary.DictionaryTerm
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
@@ -13,6 +14,8 @@ import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import com.k2fsa.sherpa.onnx.VersionInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -31,6 +34,18 @@ class RuntimeSmokeTest {
         val activity = instrumentation.startActivitySync(launchIntent)
         try {
             assertTrue(activity is MainActivity)
+            assertFalse(activity.isFinishing)
+        } finally {
+            activity.finish()
+        }
+    }
+
+    @Test
+    fun advancedManagementActivityStarts() {
+        val intent = Intent(context, AdvancedToolsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val activity = instrumentation.startActivitySync(intent)
+        try {
+            assertTrue(activity is AdvancedToolsActivity)
             assertFalse(activity.isFinishing)
         } finally {
             activity.finish()
@@ -82,21 +97,31 @@ class RuntimeSmokeTest {
     }
 
     @Test
-    fun personalDictionaryPersistsAndRetrievesRelevantTerm() {
+    fun personalDictionaryPersistsSearchesExportsAndDeletes() {
         val token = "診断固有名詞${System.nanoTime()}"
         PersonalDictionary(context).use { dictionary ->
             val before = dictionary.count()
-            dictionary.upsert(
-                DictionaryTerm(
-                    term = token,
-                    reading = "しんだんこゆうめいし",
-                    aliases = listOf("診断別名"),
-                    weight = 900,
+            try {
+                dictionary.upsert(
+                    DictionaryTerm(
+                        term = token,
+                        reading = "しんだんこゆうめいし",
+                        aliases = listOf("診断別名$token"),
+                        weight = 900,
+                    )
                 )
-            )
-            assertTrue(dictionary.count() >= before + 1L)
-            assertTrue(dictionary.relevantTerms("今日は${token}について話す").any { it.term == token })
-            assertTrue(dictionary.relevantTerms("今日は診断別名について話す").any { it.term == token })
+                assertTrue(dictionary.count() >= before + 1L)
+                assertTrue(dictionary.relevantTerms("今日は${token}について話す").any { it.term == token })
+                assertTrue(dictionary.search("診断別名$token").any { it.term == token })
+                assertNotNull(dictionary.get(token))
+                val tsv = dictionary.exportTsv()
+                assertTrue(tsv.startsWith("term\treading\taliases\tweight"))
+                assertTrue(tsv.contains(token))
+                assertTrue(dictionary.delete(token))
+                assertNull(dictionary.get(token))
+            } finally {
+                dictionary.delete(token)
+            }
         }
     }
 
@@ -165,6 +190,25 @@ class RuntimeSmokeTest {
         } finally {
             references.set(id, "")
             metadata.delete()
+        }
+    }
+
+    @Test
+    fun externalAsrTranscriptScoresOnlyAgainstHumanGroundTruth() {
+        val references = BenchmarkReferenceStore(context)
+        val external = ExternalAsrResultStore(context)
+        val id = "external-${System.nanoTime()}"
+        val system = "Instrumented-${System.nanoTime()}"
+        try {
+            references.set(id, "今日はガンダムを見る")
+            external.set(id, system, "今日はガンダムを見る")
+            val score = external.scoreAll().first { it.system == system }
+            assertEquals(1, score.labeled)
+            assertEquals(0.0, score.averageContentCer!!, 0.0)
+            assertEquals(0.0, score.averageStrictCer!!, 0.0)
+        } finally {
+            external.set(id, system, "")
+            references.set(id, "")
         }
     }
 }
