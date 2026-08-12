@@ -27,6 +27,15 @@ Minimum Android version is 13 (API 33). API 33 lets the app use an accessibility
 
 `sherpa-onnx` remains an empirical ASR candidate, especially for offline final recognition. A model is only allowed to drive the live partial UI when it is genuinely streaming; chunked/offline re-decodes are not labeled as partial streaming.
 
+## Final text delivery
+
+The app remembers the editor that was focused when dictation started. After recognition/correction:
+
+- if that editor is still active, the completed text is inserted once with `commitText`;
+- if the user changed fields, the field disappeared, or insertion fails, the completed text is copied to the clipboard instead of risking insertion into the wrong place.
+
+The floating UI explicitly reports when clipboard fallback was used, so the user can paste the text wherever desired.
+
 ## Build
 
 CI uses JDK 17, Gradle 9.5, AGP 9.3, and the stable Android API 36 SDK.
