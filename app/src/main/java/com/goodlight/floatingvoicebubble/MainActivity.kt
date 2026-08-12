@@ -246,7 +246,7 @@ class MainActivity : ComponentActivity() {
                         diagnosticReport = null
                         message = "全自動診断を実行しています…"
                         Thread {
-                            runCatching { SelfDiagnostics(this).run(includeExternalProbes = true) }
+                            runCatching { SelfDiagnostics(this@MainActivity).run(includeExternalProbes = true) }
                                 .onSuccess { report -> runOnUiThread {
                                     diagnosticReport = report
                                     busy = false
