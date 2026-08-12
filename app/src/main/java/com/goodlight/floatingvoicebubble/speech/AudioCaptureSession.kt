@@ -18,6 +18,8 @@ class AudioCaptureSession(
     context: Context,
     private val outputDir: File,
     private val autoEndpoint: Boolean,
+    private val mirrorToRecognizerPipe: Boolean = true,
+    private val onPcm16: ((ShortArray, Int) -> Unit)? = null,
     private val onEndpoint: () -> Unit,
 ) : AutoCloseable {
     val sampleRate = 16_000
@@ -27,14 +29,15 @@ class AudioCaptureSession(
     private val appContext = context.applicationContext
     private val running = AtomicBoolean(false)
     private val endpointSent = AtomicBoolean(false)
-    private val pipe = ParcelFileDescriptor.createPipe()
+    private val pipe: Array<ParcelFileDescriptor>? = if (mirrorToRecognizerPipe) ParcelFileDescriptor.createPipe() else null
     private val endpointDetector = VoiceEndpointDetector(sampleRate = sampleRate)
     private var thread: Thread? = null
     private var audioRecord: AudioRecord? = null
     private var pcmFile: File? = null
     private var wavFile: File? = null
 
-    fun detachRecognizerAudioSource(): ParcelFileDescriptor = pipe[0]
+    fun detachRecognizerAudioSource(): ParcelFileDescriptor =
+        pipe?.get(0) ?: error("Recognizer audio pipe is disabled for this session")
 
     fun start(sessionId: String) {
         if (appContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -90,21 +93,20 @@ class AudioCaptureSession(
     fun stop() {
         if (!running.getAndSet(false)) return
         runCatching { audioRecord?.stop() }
-        runCatching { pipe[1].close() }
+        runCatching { pipe?.get(1)?.close() }
     }
 
     fun expectedWavFile(): File? = wavFile
 
     override fun close() {
         stop()
-        runCatching { pipe[0].close() }
-        runCatching { pipe[1].close() }
+        pipe?.forEach { descriptor -> runCatching { descriptor.close() } }
     }
 
     private fun captureLoop(record: AudioRecord, raw: File, wav: File, minBufferBytes: Int) {
-        var recognizerStream: OutputStream? = runCatching {
-            ParcelFileDescriptor.AutoCloseOutputStream(pipe[1])
-        }.getOrNull()
+        var recognizerStream: OutputStream? = pipe?.get(1)?.let { descriptor ->
+            runCatching { ParcelFileDescriptor.AutoCloseOutputStream(descriptor) }.getOrNull()
+        }
         val shorts = ShortArray((minBufferBytes / 2).coerceAtLeast(1_024))
         val bytes = ByteArray(shorts.size * 2)
         try {
@@ -115,6 +117,7 @@ class AudioCaptureSession(
                     shortsToLeBytes(shorts, count, bytes)
                     val byteCount = count * 2
                     rawOut.write(bytes, 0, byteCount)
+                    onPcm16?.invoke(shorts, count)
                     recognizerStream?.let { stream ->
                         runCatching { stream.write(bytes, 0, byteCount) }.onFailure {
                             runCatching { stream.close() }

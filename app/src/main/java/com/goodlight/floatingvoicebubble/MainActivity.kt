@@ -10,8 +10,8 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -53,6 +53,7 @@ import com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityS
 import com.goodlight.floatingvoicebubble.diagnostics.DiagnosticReport
 import com.goodlight.floatingvoicebubble.diagnostics.SelfDiagnostics
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
+import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.ModelImporter
 import java.io.File
 
@@ -90,6 +91,11 @@ class MainActivity : ComponentActivity() {
         var busy by remember { mutableStateOf(false) }
         var diagnosticReport by remember { mutableStateOf<DiagnosticReport?>(null) }
         var dictionaryCount by remember { mutableLongStateOf(PersonalDictionary(this).use { it.count() }) }
+        var asrModels by remember { mutableStateOf(AsrModelStore(this).listInstalled()) }
+        var asrImportChunkMs by remember { mutableStateOf(560) }
+        var gemmaVariantDraft by remember {
+            mutableStateOf(if (settings.gemmaVariant == GemmaVariant.UNKNOWN) GemmaVariant.E2B else settings.gemmaVariant)
+        }
 
         val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refreshRuntimeStatus() }
         val modelLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -99,16 +105,41 @@ class MainActivity : ComponentActivity() {
             Thread {
                 runCatching { ModelImporter(this).importGemma(uri) }
                     .onSuccess { file ->
-                        val updated = settingsStore.update { it.copy(gemmaModelPath = file.absolutePath) }
+                        val updated = settingsStore.update {
+                            it.copy(gemmaModelPath = file.absolutePath, gemmaVariant = gemmaVariantDraft)
+                        }
                         runOnUiThread {
                             settings = updated
                             busy = false
-                            message = "Gemmaモデルを読み込みました: ${file.name}"
+                            message = "Gemma ${gemmaVariantDraft.name} を読み込みました: ${file.name}"
                         }
                     }
                     .onFailure { error -> runOnUiThread {
                         busy = false
                         message = error.message ?: "Gemmaモデルを読み込めませんでした。"
+                    } }
+            }.start()
+        }
+        val asrModelLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri ?: return@rememberLauncherForActivityResult
+            busy = true
+            message = "真のストリーミングASRモデルを検証・コピーしています…"
+            Thread {
+                val store = AsrModelStore(this)
+                runCatching { store.importNemotronTree(uri, asrImportChunkMs) }
+                    .onSuccess { model ->
+                        val updated = settingsStore.update { it.copy(streamingAsrModelId = model.id) }
+                        val installed = store.listInstalled()
+                        runOnUiThread {
+                            settings = updated
+                            asrModels = installed
+                            busy = false
+                            message = "Nemotron ${model.chunkMs}ms streamingモデルを導入しました。"
+                        }
+                    }
+                    .onFailure { error -> runOnUiThread {
+                        busy = false
+                        message = error.message ?: "ASRモデルを読み込めませんでした。"
                     } }
             }.start()
         }
@@ -135,6 +166,8 @@ class MainActivity : ComponentActivity() {
             }.start()
         }
 
+        val selectedAsr = asrModels.firstOrNull { it.id == settings.streamingAsrModelId }
+
         Column(
             modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
                 .verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp),
@@ -159,7 +192,7 @@ class MainActivity : ComponentActivity() {
             Section("動作モード") {
                 SettingSwitch(
                     title = "完全オフライン",
-                    detail = "ネットワークを使わず、端末内認識 + Gemmaで認識から入力まで完結します。クラウドへ黙ってフォールバックしません。",
+                    detail = "通信を使わず、Sherpa/Nemotronの真ストリーミングASR + 端末内Gemmaで認識から入力まで完結します。Android/OEMやクラウドへ黙ってフォールバックしません。",
                     checked = settings.offlineMode,
                     onChecked = { checked -> settings = settingsStore.update { it.copy(offlineMode = checked) } },
                 )
@@ -168,7 +201,14 @@ class MainActivity : ComponentActivity() {
                 ChoiceRow(
                     values = RecognitionMode.entries,
                     selected = settings.recognitionMode,
-                    label = { when (it) { RecognitionMode.AUTO -> "自動"; RecognitionMode.SYSTEM -> "システム"; RecognitionMode.ON_DEVICE -> "端末内" } },
+                    label = {
+                        when (it) {
+                            RecognitionMode.AUTO -> "自動"
+                            RecognitionMode.SYSTEM -> "システム"
+                            RecognitionMode.ON_DEVICE -> "Android端末内"
+                            RecognitionMode.SHERPA_STREAMING -> "自前Streaming"
+                        }
+                    },
                     onSelect = { value -> settings = settingsStore.update { it.copy(recognitionMode = value) } },
                 )
                 SettingSwitch(
@@ -177,6 +217,39 @@ class MainActivity : ComponentActivity() {
                     checked = settings.autoStop,
                     onChecked = { checked -> settings = settingsStore.update { it.copy(autoStop = checked) } },
                 )
+            }
+
+            Section("完全オフラインASR") {
+                Text(
+                    selectedAsr?.let { "${it.family}  •  ${it.chunkMs}ms  •  ${it.totalBytes / (1024 * 1024)} MiB" }
+                        ?: "真のストリーミングASRモデル未設定",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text("Nemotron 3.5 Streamingのint8モデルを端末内へコピーします。ReazonSpeechのVAD+offline再認識はpartial用途には使いません。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("取り込むモデルのchunk幅", fontWeight = FontWeight.SemiBold)
+                ChoiceRow(
+                    values = listOf(80, 160, 560, 1120),
+                    selected = asrImportChunkMs,
+                    label = { "${it}ms" },
+                    onSelect = { asrImportChunkMs = it },
+                )
+                Text("560msは精度寄り、短いchunkは遅延寄りの候補です。最終採用値は同一音声ベンチマークで決めます。", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(
+                    onClick = { asrModelLauncher.launch(null) },
+                    enabled = !busy,
+                ) { Text("展開済みNemotronモデルフォルダを読み込む") }
+                selectedAsr?.let { model ->
+                    OutlinedButton(
+                        onClick = {
+                            if (AsrModelStore(this@MainActivity).remove(model.id)) {
+                                asrModels = AsrModelStore(this@MainActivity).listInstalled()
+                                settings = settingsStore.update { it.copy(streamingAsrModelId = "") }
+                                message = "選択中のASRモデルを削除しました。"
+                            }
+                        },
+                        enabled = !busy,
+                    ) { Text("選択モデルを削除") }
+                }
             }
 
             Section("最終補正") {
@@ -209,34 +282,46 @@ class MainActivity : ComponentActivity() {
                 ) { Text("BYOK設定を保存") }
             }
 
-            Section("端末内Gemma") {
-                Text(if (settings.gemmaModelPath.isBlank()) "モデル未設定" else "${File(settings.gemmaModelPath).name}  •  端末内保存", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Section("端末内Gemma 4") {
+                Text(if (settings.gemmaModelPath.isBlank()) "モデル未設定" else "${settings.gemmaVariant.name}  •  ${File(settings.gemmaModelPath).name}  •  端末内保存", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("モデル系列", fontWeight = FontWeight.SemiBold)
+                ChoiceRow(
+                    values = listOf(GemmaVariant.E2B, GemmaVariant.E4B),
+                    selected = gemmaVariantDraft,
+                    label = { it.name },
+                    onSelect = { value ->
+                        gemmaVariantDraft = value
+                        if (settings.gemmaModelPath.isNotBlank()) {
+                            settings = settingsStore.update { it.copy(gemmaVariant = value) }
+                        }
+                    },
+                )
                 ChoiceRow(
                     values = GemmaBackend.entries,
                     selected = settings.gemmaBackend,
                     label = { when (it) { GemmaBackend.AUTO -> "GPU→CPU"; GemmaBackend.GPU -> "GPU"; GemmaBackend.CPU -> "CPU" } },
                     onSelect = { value -> settings = settingsStore.update { it.copy(gemmaBackend = value) } },
                 )
-                OutlinedButton(onClick = { modelLauncher.launch(arrayOf("application/octet-stream", "*/*")) }, enabled = !busy) { Text(".litertlm モデルを読み込む") }
+                OutlinedButton(onClick = { modelLauncher.launch(arrayOf("application/octet-stream", "*/*")) }, enabled = !busy) { Text("E2B/E4B .litertlm モデルを読み込む") }
             }
 
             Section("個人辞書") {
                 Text("$dictionaryCount 語", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Text("保存件数に小さな上限は設けません。CSV/TSV: term, reading, aliases(|区切り), weight。上位語はASRバイアスにも使います。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("保存件数に小さな上限は設けません。CSV/TSV: term, reading, aliases(|区切り), weight。対応するAndroid ASRでは上位語を認識バイアスにも使い、全経路で最終補正コンテキストへ共有します。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedButton(onClick = { dictionaryLauncher.launch(arrayOf("text/*", "text/csv", "text/tab-separated-values")) }, enabled = !busy) { Text("辞書をインポート") }
             }
 
             Section("診断 / ベンチマーク") {
                 SettingSwitch(
                     title = "セッショントレースを保存",
-                    detail = "同一音声でASRを比較できるよう、WAV・N-best・raw/final・レイテンシを最大30セッション端末内へ残します。",
+                    detail = "同一音声でASRを比較できるよう、WAV・N-best・raw/final・レイテンシを最大30セッション端末内のno-backup領域へ残します。",
                     checked = settings.keepSessionTraces,
                     onChecked = { checked -> settings = settingsStore.update { it.copy(keepSessionTraces = checked) } },
                 )
                 HorizontalDivider()
                 Text("全自動診断", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "1回で権限、Accessibility、SpeechRecognizer、AudioRecord、辞書DB、保存先、Gemma、BYOK、オフライン遮断、補正ガードを検査します。設定済みBYOK/Gemmaには固定テスト文だけを使い、ユーザーの音声・辞書・API keyは診断レポートへ出しません。",
+                    "1回で権限、Accessibility、Android認識、Sherpa JNI/モデル、AudioRecord、辞書DB、保存先、Gemma、BYOK実経路、オフライン遮断、補正ガードを検査します。設定済みBYOK/Gemmaには固定テスト文だけを使い、ユーザーの音声・辞書・API keyは診断レポートへ出しません。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )

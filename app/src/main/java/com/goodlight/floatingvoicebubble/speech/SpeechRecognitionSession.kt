@@ -10,6 +10,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import com.goodlight.floatingvoicebubble.RecognitionMode
+import com.goodlight.floatingvoicebubble.model.StreamingAsrModel
 import java.io.File
 import java.util.Locale
 import java.util.UUID
@@ -32,6 +33,7 @@ class SpeechRecognitionSession(
     private val autoEndpoint: Boolean,
     private val biasTerms: List<String>,
     private val traceAudioDir: File,
+    private val streamingModel: StreamingAsrModel?,
     private val onPartial: (String) -> Unit,
     private val onState: (String) -> Unit,
     private val onComplete: (RecognitionOutcome) -> Unit,
@@ -41,7 +43,9 @@ class SpeechRecognitionSession(
     private val sessionId = UUID.randomUUID().toString()
     private val startedAtMs = System.currentTimeMillis()
     private val delivered = AtomicBoolean(false)
-    private val recognizer: SpeechRecognizer
+    private val backend: RecognitionBackend
+    private val recognizer: SpeechRecognizer?
+    private val sherpaEngine: SherpaStreamingEngine?
     private val recognizerKind: String
     private val capture: AudioCaptureSession
     private var latestAlternatives: List<String> = emptyList()
@@ -101,30 +105,73 @@ class SpeechRecognitionSession(
         check(Looper.myLooper() == Looper.getMainLooper()) {
             "SpeechRecognitionSession must be created on main thread"
         }
-        val onDeviceAvailable = SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
-        val useOnDevice = when {
-            offlineRequired -> true
-            mode == RecognitionMode.ON_DEVICE -> true
-            mode == RecognitionMode.SYSTEM -> false
-            else -> onDeviceAvailable
+        val onDeviceAvailable = runCatching {
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+        }.getOrDefault(false)
+        backend = RecognitionBackendResolver.resolve(
+            mode = mode,
+            offlineRequired = offlineRequired,
+            androidOnDeviceAvailable = onDeviceAvailable,
+            sherpaModelAvailable = streamingModel != null,
+        )
+
+        recognizer = when (backend) {
+            RecognitionBackend.ANDROID_ON_DEVICE -> SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+            RecognitionBackend.ANDROID_SYSTEM -> SpeechRecognizer.createSpeechRecognizer(context)
+            RecognitionBackend.SHERPA_STREAMING -> null
         }
-        if (useOnDevice && !onDeviceAvailable) {
-            error("この端末ではAndroidのオンデバイス音声認識を利用できません。")
+        recognizerKind = when (backend) {
+            RecognitionBackend.ANDROID_ON_DEVICE -> "android-on-device"
+            RecognitionBackend.ANDROID_SYSTEM -> "android-system"
+            RecognitionBackend.SHERPA_STREAMING -> "sherpa-nemotron35-${streamingModel!!.chunkMs}ms"
         }
-        recognizer = if (useOnDevice) {
-            recognizerKind = "android-on-device"
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+
+        sherpaEngine = if (backend == RecognitionBackend.SHERPA_STREAMING) {
+            val model = requireNotNull(streamingModel)
+            SherpaStreamingEngine(
+                model = model,
+                onState = { state -> mainHandler.post { if (!delivered.get()) onState(state) } },
+                onPartial = { partial ->
+                    mainHandler.post {
+                        if (delivered.get()) return@post
+                        latestPartial = partial
+                        latestAlternatives = listOf(partial)
+                        onPartial(partial)
+                    }
+                },
+                onFinal = { finalText ->
+                    mainHandler.post {
+                        latestPartial = finalText
+                        latestAlternatives = listOf(finalText)
+                        deliver(listOf(finalText))
+                    }
+                },
+                onFailure = { message -> mainHandler.post { fail(message) } },
+            )
         } else {
-            recognizerKind = "android-system"
-            SpeechRecognizer.createSpeechRecognizer(context)
+            null
         }
-        capture = AudioCaptureSession(context, traceAudioDir, autoEndpoint) {
+
+        capture = AudioCaptureSession(
+            context = context,
+            outputDir = traceAudioDir,
+            autoEndpoint = autoEndpoint,
+            mirrorToRecognizerPipe = backend != RecognitionBackend.SHERPA_STREAMING,
+            onPcm16 = sherpaEngine?.let { engine -> { samples, count -> engine.acceptPcm16(samples, count) } },
+        ) {
             mainHandler.post { finishInput() }
         }
-        recognizer.setRecognitionListener(listener)
+        recognizer?.setRecognitionListener(listener)
     }
 
     fun start() {
+        onState("準備しています")
+        if (backend == RecognitionBackend.SHERPA_STREAMING) {
+            requireNotNull(sherpaEngine).start()
+            capture.start(sessionId)
+            return
+        }
+
         val source = capture.detachRecognizerAudioSource()
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -142,8 +189,7 @@ class SpeechRecognitionSession(
                 )
             }
         }
-        onState("準備しています")
-        recognizer.startListening(intent)
+        requireNotNull(recognizer).startListening(intent)
         capture.start(sessionId)
     }
 
@@ -152,6 +198,14 @@ class SpeechRecognitionSession(
         inputClosed = true
         onState("認識を確定しています")
         capture.stop()
+        if (backend == RecognitionBackend.SHERPA_STREAMING) {
+            sherpaEngine?.finish()
+        }
+        val timeout = if (backend == RecognitionBackend.SHERPA_STREAMING) {
+            SHERPA_FINAL_RESULT_TIMEOUT_MS
+        } else {
+            ANDROID_FINAL_RESULT_TIMEOUT_MS
+        }
         mainHandler.postDelayed({
             if (!delivered.get()) {
                 val fallback = latestAlternatives.ifEmpty {
@@ -163,14 +217,17 @@ class SpeechRecognitionSession(
                     fail("音声認識の確定がタイムアウトしました。")
                 }
             }
-        }, FINAL_RESULT_TIMEOUT_MS)
+        }, timeout)
     }
 
     override fun close() {
         mainHandler.removeCallbacksAndMessages(null)
         capture.close()
-        recognizer.cancel()
-        recognizer.destroy()
+        sherpaEngine?.close()
+        recognizer?.let { speechRecognizer ->
+            runCatching { speechRecognizer.cancel() }
+            runCatching { speechRecognizer.destroy() }
+        }
     }
 
     private fun deliver(candidates: List<String>) {
@@ -178,10 +235,14 @@ class SpeechRecognitionSession(
         mainHandler.removeCallbacksAndMessages(null)
         capture.stop()
         val normalized = candidates.map(String::trim).filter(String::isNotEmpty).distinct()
+        if (normalized.isEmpty()) {
+            onFailure("音声を文字として認識できませんでした。")
+            return
+        }
         onComplete(
             RecognitionOutcome(
                 sessionId = sessionId,
-                rawTranscript = normalized.firstOrNull().orEmpty(),
+                rawTranscript = normalized.first(),
                 alternatives = normalized,
                 audioFile = capture.expectedWavFile(),
                 startedAtMs = startedAtMs,
@@ -194,6 +255,7 @@ class SpeechRecognitionSession(
     private fun fail(message: String) {
         if (!delivered.compareAndSet(false, true)) return
         mainHandler.removeCallbacksAndMessages(null)
+        capture.stop()
         onFailure(message)
     }
 
@@ -211,6 +273,7 @@ class SpeechRecognitionSession(
     }
 
     companion object {
-        private const val FINAL_RESULT_TIMEOUT_MS = 8_000L
+        private const val ANDROID_FINAL_RESULT_TIMEOUT_MS = 8_000L
+        private const val SHERPA_FINAL_RESULT_TIMEOUT_MS = 20_000L
     }
 }

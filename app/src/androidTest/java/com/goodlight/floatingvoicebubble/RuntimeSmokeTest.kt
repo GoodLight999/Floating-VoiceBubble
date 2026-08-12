@@ -9,6 +9,7 @@ import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
 import com.goodlight.floatingvoicebubble.trace.FinalizationTrace
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
+import com.k2fsa.sherpa.onnx.VersionInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -36,6 +37,12 @@ class RuntimeSmokeTest {
     }
 
     @Test
+    fun sherpaNativeLibraryLoadsOnAndroidRuntime() {
+        assertTrue(VersionInfo.version.isNotBlank())
+        assertTrue(VersionInfo.gitSha1.isNotBlank())
+    }
+
+    @Test
     fun keystoreBackedByokSecretRoundTrips() {
         val store = SettingsStore(context)
         val previous = store.apiKey()
@@ -58,12 +65,14 @@ class RuntimeSmokeTest {
             val report = SelfDiagnostics(context, store).run(includeExternalProbes = false)
             val ids = report.items.map { it.id }.toSet()
             assertTrue("offline-cloud-block" in ids)
+            assertTrue("offline-recognition-policy" in ids)
+            assertTrue("sherpa-jni" in ids)
             assertTrue("correction-guard" in ids)
             assertTrue("dictionary-db" in ids)
             assertTrue("trace-storage" in ids)
             val json = report.toRedactedJson()
             assertFalse(json.contains(sentinel))
-            assertTrue(json.contains("offline-cloud-block"))
+            assertTrue(json.contains("offline-recognition-policy"))
         } finally {
             store.setApiKey(previous)
         }
@@ -82,8 +91,9 @@ class RuntimeSmokeTest {
     }
 
     @Test
-    fun traceStoreWritesSessionMetadataAndAudio() {
+    fun traceStoreUsesNoBackupAndWritesSessionMetadataAndAudio() {
         val store = SessionTraceStore(context)
+        assertTrue(store.audioDir.canonicalPath.startsWith(context.noBackupFilesDir.canonicalPath))
         val id = "instrumented-${System.nanoTime()}"
         val wav = File(store.audioDir, "$id.wav")
         wav.writeBytes(ByteArray(128) { index -> (index and 0xff).toByte() })

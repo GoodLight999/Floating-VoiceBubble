@@ -9,17 +9,20 @@ import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.inputmethod.EditorInfo
 import com.goodlight.floatingvoicebubble.CorrectionMode
+import com.goodlight.floatingvoicebubble.RecognitionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
+import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
 import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
 import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
 import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
-import com.goodlight.floatingvoicebubble.correction.OpenAiCompatibleCorrector
 import com.goodlight.floatingvoicebubble.correction.TextCorrector
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
+import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.overlay.FloatingBubbleController
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
+import com.goodlight.floatingvoicebubble.speech.SherpaStreamingEngine
 import com.goodlight.floatingvoicebubble.speech.SpeechRecognitionSession
 import com.goodlight.floatingvoicebubble.trace.FinalizationTrace
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
@@ -30,9 +33,13 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private lateinit var settingsStore: SettingsStore
     private lateinit var dictionary: PersonalDictionary
     private lateinit var traceStore: SessionTraceStore
+    private lateinit var asrModelStore: AsrModelStore
     private lateinit var overlay: FloatingBubbleController
     private val worker = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "VoiceBubble-Finalizer").apply { priority = Thread.NORM_PRIORITY - 1 }
+    }
+    private val warmupWorker = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "VoiceBubble-ASR-Warmup").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
 
     private var voiceInputMethod: TrackingInputMethod? = null
@@ -47,8 +54,14 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         settingsStore = SettingsStore(this)
         dictionary = PersonalDictionary(this)
         traceStore = SessionTraceStore(this)
+        asrModelStore = AsrModelStore(this)
         overlay = FloatingBubbleController(this, ::toggleRecording)
         overlay.attach()
+
+        val settings = settingsStore.load()
+        asrModelStore.resolve(settings.streamingAsrModelId)?.let { model ->
+            warmupWorker.execute { runCatching { SherpaStreamingEngine.preload(model) } }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -59,6 +72,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         if (::overlay.isInitialized) overlay.detach()
         if (::dictionary.isInitialized) dictionary.close()
         worker.shutdownNow()
+        warmupWorker.shutdownNow()
         super.onDestroy()
     }
 
@@ -85,8 +99,17 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         }
 
         val settings = settingsStore.load()
+        val streamingModel = asrModelStore.resolve(settings.streamingAsrModelId)
+        if (settings.offlineMode && streamingModel == null) {
+            transientError("完全オフラインには真のストリーミングASRモデルが必要です。設定からNemotronモデルを導入してください。")
+            return
+        }
+        if (settings.recognitionMode == RecognitionMode.SHERPA_STREAMING && streamingModel == null) {
+            transientError("自前ストリーミング認識を使うにはNemotronモデルが必要です。")
+            return
+        }
         if (settings.offlineMode && !File(settings.gemmaModelPath).isFile) {
-            transientError("オフラインモードにはGemmaの .litertlm モデルが必要です。アプリ設定から読み込んでください。")
+            transientError("完全オフラインにはGemmaの .litertlm モデルが必要です。アプリ設定から読み込んでください。")
             return
         }
         if (settings.correctionMode == CorrectionMode.GEMMA && !File(settings.gemmaModelPath).isFile) {
@@ -111,6 +134,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 autoEndpoint = settings.autoStop,
                 biasTerms = dictionary.topBiasTerms(),
                 traceAudioDir = traceStore.audioDir,
+                streamingModel = streamingModel,
                 onPartial = { partial ->
                     latestRaw = partial
                     overlay.showListening(partial)
@@ -200,8 +224,8 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     return@execute
                 }
 
-                val connection = voiceInputMethod?.currentInputConnection
-                if (connection == null) {
+                val currentConnection = voiceInputMethod?.currentInputConnection
+                if (currentConnection == null) {
                     activeTarget = null
                     copyToClipboard(finalText)
                     overlay.showFinalizing(finalText, "入力欄が消えたためクリップボードへ保存しました")
@@ -210,7 +234,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 }
 
                 val committed = runCatching {
-                    connection.commitText(finalText, 1, null)
+                    currentConnection.commitText(finalText, 1, null)
                 }.isSuccess
                 activeTarget = null
 
@@ -237,7 +261,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val gemmaAvailable = File(settings.gemmaModelPath).isFile
         return when (CorrectionBackendResolver.resolve(settings, gemmaAvailable)) {
             CorrectionBackend.NONE -> null
-            CorrectionBackend.BYOK -> OpenAiCompatibleCorrector(
+            CorrectionBackend.BYOK -> CloudCorrectorFactory.create(
                 settings.byokEndpoint,
                 settings.byokModel,
                 settingsStore.apiKey(),

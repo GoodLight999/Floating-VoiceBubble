@@ -10,7 +10,13 @@ $GRADLE_CMD --no-daemon :app:lintDebug :app:testDebugUnitTest :app:assembleDebug
 
 test -s "$APK"
 unzip -t "$APK" >/dev/null
+unzip -l "$APK" > /tmp/floating-voicebubble-apk-contents.txt
+grep -F "lib/x86_64/libsherpa-onnx-jni.so" /tmp/floating-voicebubble-apk-contents.txt
+grep -F "lib/arm64-v8a/libsherpa-onnx-jni.so" /tmp/floating-voicebubble-apk-contents.txt
 
+if [[ -n "$SDK_ROOT" && -x "$SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/zipalign" ]]; then
+  "$SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/zipalign" -c -P 16 -v 4 "$APK"
+fi
 if [[ -n "$SDK_ROOT" && -x "$SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/apksigner" ]]; then
   "$SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/apksigner" verify --verbose --print-certs "$APK"
 fi

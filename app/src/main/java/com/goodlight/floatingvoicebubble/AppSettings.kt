@@ -10,9 +10,10 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-enum class RecognitionMode { AUTO, SYSTEM, ON_DEVICE }
+enum class RecognitionMode { AUTO, SYSTEM, ON_DEVICE, SHERPA_STREAMING }
 enum class CorrectionMode { AUTO, BYOK, GEMMA, NONE }
 enum class GemmaBackend { AUTO, GPU, CPU }
+enum class GemmaVariant { UNKNOWN, E2B, E4B }
 
 data class AppSettings(
     val recognitionMode: RecognitionMode = RecognitionMode.AUTO,
@@ -23,6 +24,8 @@ data class AppSettings(
     val byokModel: String = "",
     val gemmaModelPath: String = "",
     val gemmaBackend: GemmaBackend = GemmaBackend.AUTO,
+    val gemmaVariant: GemmaVariant = GemmaVariant.UNKNOWN,
+    val streamingAsrModelId: String = "",
     val keepSessionTraces: Boolean = true,
 )
 
@@ -40,6 +43,8 @@ class SettingsStore(context: Context) {
         byokModel = prefs.getString("byok_model", "").orEmpty(),
         gemmaModelPath = prefs.getString("gemma_model_path", "").orEmpty(),
         gemmaBackend = enumValueOr(prefs.getString("gemma_backend", null), GemmaBackend.AUTO),
+        gemmaVariant = enumValueOr(prefs.getString("gemma_variant", null), GemmaVariant.UNKNOWN),
+        streamingAsrModelId = prefs.getString("streaming_asr_model_id", "").orEmpty(),
         keepSessionTraces = prefs.getBoolean("keep_session_traces", true),
     )
 
@@ -54,6 +59,8 @@ class SettingsStore(context: Context) {
             .putString("byok_model", value.byokModel)
             .putString("gemma_model_path", value.gemmaModelPath)
             .putString("gemma_backend", value.gemmaBackend.name)
+            .putString("gemma_variant", value.gemmaVariant.name)
+            .putString("streaming_asr_model_id", value.streamingAsrModelId)
             .putBoolean("keep_session_traces", value.keepSessionTraces)
             .apply()
         return value

@@ -12,16 +12,23 @@ import android.provider.Settings
 import android.speech.SpeechRecognizer
 import com.goodlight.floatingvoicebubble.BuildConfig
 import com.goodlight.floatingvoicebubble.CorrectionMode
+import com.goodlight.floatingvoicebubble.GemmaVariant
+import com.goodlight.floatingvoicebubble.RecognitionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService
+import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
 import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
 import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
 import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
-import com.goodlight.floatingvoicebubble.correction.OpenAiCompatibleCorrector
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
+import com.goodlight.floatingvoicebubble.model.AsrModelStore
+import com.goodlight.floatingvoicebubble.speech.RecognitionBackend
+import com.goodlight.floatingvoicebubble.speech.RecognitionBackendResolver
+import com.goodlight.floatingvoicebubble.speech.SherpaStreamingEngine
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
+import com.k2fsa.sherpa.onnx.VersionInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -49,7 +56,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 1)
+        .put("schema", 2)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -84,6 +91,8 @@ class SelfDiagnostics(
         val started = System.currentTimeMillis()
         val results = mutableListOf<DiagnosticItem>()
         val settings = settingsStore.load()
+        val asrModelStore = AsrModelStore(appContext)
+        val streamingModel = asrModelStore.resolve(settings.streamingAsrModelId)
 
         results += probe("platform") {
             check(Build.VERSION.SDK_INT >= 33) { "Android 13 / API 33 以上が必要です。" }
@@ -108,6 +117,46 @@ class SelfDiagnostics(
                 },
                 onFailure = { warn("speech-recognizer-on-device", "query failed: ${safeMessage(it)}") },
             )
+        results += probe("sherpa-jni") {
+            "version=${VersionInfo.version}; git=${VersionInfo.gitSha1.take(12)}"
+        }
+
+        results += if (settings.streamingAsrModelId.isBlank()) {
+            skip("streaming-asr-model", "not configured")
+        } else if (streamingModel == null) {
+            fail("streaming-asr-model", "configured model is missing or invalid")
+        } else {
+            pass(
+                "streaming-asr-model",
+                "${streamingModel.family}; chunk=${streamingModel.chunkMs}ms; size=${streamingModel.totalBytes} bytes",
+            )
+        }
+
+        results += probe("offline-recognition-policy") {
+            val backend = RecognitionBackendResolver.resolve(
+                mode = RecognitionMode.SYSTEM,
+                offlineRequired = true,
+                androidOnDeviceAvailable = true,
+                sherpaModelAvailable = true,
+            )
+            check(backend == RecognitionBackend.SHERPA_STREAMING) { "forced offline mode selected $backend" }
+            val missingModelRejected = runCatching {
+                RecognitionBackendResolver.resolve(
+                    mode = RecognitionMode.SYSTEM,
+                    offlineRequired = true,
+                    androidOnDeviceAvailable = true,
+                    sherpaModelAvailable = false,
+                )
+            }.isFailure
+            check(missingModelRejected) { "offline mode silently accepted a missing Sherpa model" }
+            "policy verified: offline always resolves to Sherpa and rejects missing model"
+        }
+
+        results += if (settings.offlineMode && streamingModel == null) {
+            fail("offline-asr-readiness", "offline mode is enabled but no valid true-streaming ASR model is selected")
+        } else {
+            pass("offline-asr-readiness", if (settings.offlineMode) "ready" else "offline mode inactive")
+        }
 
         results += probe("dictionary-db") {
             PersonalDictionary(appContext).use { dictionary ->
@@ -121,7 +170,8 @@ class SelfDiagnostics(
             file.writeText("ok", Charsets.UTF_8)
             check(file.readText(Charsets.UTF_8) == "ok") { "trace storage readback mismatch" }
             check(file.delete()) { "temporary diagnostic file could not be deleted" }
-            "actual no-backup trace directory read/write/delete OK"
+            check(dir.canonicalPath.startsWith(appContext.noBackupFilesDir.canonicalPath)) { "trace directory is not under noBackupFilesDir" }
+            "no-backup trace directory read/write/delete OK"
         }
 
         val modelFile = settings.gemmaModelPath.takeIf(String::isNotBlank)?.let(::File)
@@ -129,10 +179,19 @@ class SelfDiagnostics(
             modelFile == null -> skip("gemma-model", "not configured")
             !modelFile.isFile -> fail("gemma-model", "configured path is missing")
             modelFile.length() < 1_000_000L -> fail("gemma-model", "model file is unexpectedly small")
+            settings.gemmaVariant == GemmaVariant.UNKNOWN -> warn(
+                "gemma-model",
+                "present; variant is not declared E2B/E4B; size=${modelFile.length()} bytes; sha256=${sha256Prefix(modelFile)}",
+            )
             else -> pass(
                 "gemma-model",
-                "present; size=${modelFile.length()} bytes; sha256=${sha256Prefix(modelFile)}",
+                "variant=${settings.gemmaVariant}; size=${modelFile.length()} bytes; sha256=${sha256Prefix(modelFile)}",
             )
+        }
+        results += if (settings.offlineMode && modelFile?.isFile != true) {
+            fail("offline-gemma-readiness", "offline mode is enabled but Gemma model is missing")
+        } else {
+            pass("offline-gemma-readiness", if (settings.offlineMode) "ready" else "offline mode inactive")
         }
 
         results += probe("offline-cloud-block") {
@@ -149,6 +208,15 @@ class SelfDiagnostics(
         results += probeCorrectionGuard()
 
         if (includeExternalProbes) {
+            if (streamingModel != null) {
+                results += probe("streaming-asr-model-load") {
+                    SherpaStreamingEngine.preload(streamingModel)
+                    "Sherpa OnlineRecognizer loaded model successfully"
+                }
+            } else {
+                results += skip("streaming-asr-model-load", "model not configured")
+            }
+
             if (modelFile?.isFile == true) {
                 results += probe("gemma-inference") {
                     val raw = "今日はがんだむ見に行く"
@@ -168,14 +236,14 @@ class SelfDiagnostics(
             if (shouldProbeCloud) {
                 results += probe("byok-live-request") {
                     val raw = "今日はがんだむ見に行く"
-                    val output = OpenAiCompatibleCorrector(
+                    val output = CloudCorrectorFactory.create(
                         settings.byokEndpoint,
                         settings.byokModel,
                         settingsStore.apiKey(),
                     ).correct(fixedCorrectionRequest(raw))
                     check(output.isNotBlank()) { "BYOK returned empty output" }
                     val decision = CorrectionGuard.choose(raw, output)
-                    "provider request succeeded; guard=${if (decision.accepted) "accepted" else "rejected"}"
+                    "provider=${CloudCorrectorFactory.protocolFor(settings.byokEndpoint)}; guard=${if (decision.accepted) "accepted" else "rejected"}"
                 }
             } else {
                 val reason = when {
@@ -186,6 +254,7 @@ class SelfDiagnostics(
                 results += skip("byok-live-request", reason)
             }
         } else {
+            results += skip("streaming-asr-model-load", "external probes disabled")
             results += skip("gemma-inference", "external probes disabled")
             results += skip("byok-live-request", "external probes disabled")
         }
