@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble.benchmark
 
 import android.content.Context
+import com.goodlight.floatingvoicebubble.model.AtomicFileInstaller
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import org.json.JSONObject
 import java.io.File
@@ -9,7 +10,9 @@ data class ReferenceImportResult(val imported: Int, val skipped: Int)
 
 /** Ground-truth labels are stored beside no-backup session traces and never inferred from ASR output. */
 class BenchmarkReferenceStore(context: Context) {
-    private val traceStore = SessionTraceStore(context.applicationContext)
+    private val traceStore = SessionTraceStore(context.applicationContext).also {
+        AtomicFileInstaller.recoverBackups(it.audioDir)
+    }
 
     fun get(sessionId: String): String? {
         val id = validatedSessionId(sessionId)
@@ -35,8 +38,7 @@ class BenchmarkReferenceStore(context: Context) {
         }
         val temp = File(traceStore.audioDir, ".$id.reference.txt.part")
         temp.writeText(normalized, Charsets.UTF_8)
-        if (file.exists()) file.delete()
-        check(temp.renameTo(file)) { "reference transcript could not be committed" }
+        AtomicFileInstaller.replace(temp, file, "ASR正解ラベル")
     }
 
     /**
