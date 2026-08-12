@@ -4,6 +4,11 @@ $AppId = 'com.goodlight.floatingvoicebubble'
 $Activity = "$AppId/.MainActivity"
 $Apk = 'app\build\outputs\apk\debug\app-debug.apk'
 
+if ($env:VOICEBUBBLE_SKIP_REMOTE_PROBES -ne '1') {
+    & .\scripts\verify-model-catalog.ps1
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
 & .\gradlew.bat --no-daemon :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
