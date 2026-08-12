@@ -73,23 +73,38 @@ class AsrModelStore(context: Context) {
         val reportedBytes = sources.values.sumOf { it.length().coerceAtLeast(0L) }
         if (reportedBytes > 0L) ensureDiskSpace(reportedBytes)
 
-        val id = "nemotron35-${chunkMs}ms-int8"
-        val temporary = File(rootDir, ".$id.part-${UUID.randomUUID()}")
-        val destination = File(rootDir, id)
-        temporary.mkdirs()
-
+        val temporary = createStagingDirectory(chunkMs)
         try {
             sources.forEach { (name, document) -> copyDocument(document, File(temporary, name)) }
-            val candidate = modelFromDirectory(id, chunkMs, temporary)
-            validateModelFiles(candidate, strictSizes = true)
-            writeManifest(candidate)
-
-            AtomicDirectoryInstaller.replace(temporary, destination, "ASRモデル")
-            return loadModel(destination)
+            return installPreparedDirectory(chunkMs, temporary)
         } catch (failure: Throwable) {
             temporary.deleteRecursively()
             throw failure
         }
+    }
+
+    internal fun createStagingDirectory(chunkMs: Int): File {
+        require(chunkMs in SUPPORTED_CHUNKS) { "未対応のchunk幅です: ${chunkMs}ms" }
+        val id = modelId(chunkMs)
+        return File(rootDir, ".$id.part-${UUID.randomUUID()}").also {
+            check(it.mkdirs()) { "ASRモデルの一時保存先を作成できませんでした。" }
+        }
+    }
+
+    internal fun ensureImportSpace(requiredBytes: Long) = ensureDiskSpace(requiredBytes)
+
+    internal fun installPreparedDirectory(chunkMs: Int, temporary: File): StreamingAsrModel {
+        require(chunkMs in SUPPORTED_CHUNKS) { "未対応のchunk幅です: ${chunkMs}ms" }
+        require(temporary.parentFile?.canonicalFile == rootDir.canonicalFile) {
+            "ASRモデルの一時保存先が不正です。"
+        }
+        val id = modelId(chunkMs)
+        val destination = File(rootDir, id)
+        val candidate = modelFromDirectory(id, chunkMs, temporary)
+        validateModelFiles(candidate, strictSizes = true)
+        writeManifest(candidate)
+        AtomicDirectoryInstaller.replace(temporary, destination, "ASRモデル")
+        return loadModel(destination)
     }
 
     fun remove(id: String): Boolean {
@@ -183,6 +198,7 @@ class AsrModelStore(context: Context) {
     }
 
     private fun ensureDiskSpace(requiredBytes: Long) {
+        require(requiredBytes >= 0L) { "ASRモデルの必要容量が不正です。" }
         val available = StatFs(rootDir.absolutePath).availableBytes
         require(available >= requiredBytes + DISK_HEADROOM_BYTES) {
             "ASRモデル用の空き容量が不足しています。必要約 ${requiredBytes / (1024 * 1024)} MiB + 予備128 MiB、空き ${available / (1024 * 1024)} MiB。"
@@ -207,7 +223,7 @@ class AsrModelStore(context: Context) {
     companion object {
         const val FAMILY = "nemotron-3.5-asr-streaming-0.6b"
         val SUPPORTED_CHUNKS = setOf(80, 160, 560, 1120)
-        private val REQUIRED_FILES = setOf("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
+        internal val REQUIRED_FILES = setOf("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
         private val CHUNK_REGEX = Regex("(?:^|[-_])(80|160|560|1120)ms(?:[-_]|$)", RegexOption.IGNORE_CASE)
         private const val MANIFEST_NAME = "voicebubble-asr-model.json"
         private const val MAX_SEARCH_DEPTH = 2
@@ -217,5 +233,7 @@ class AsrModelStore(context: Context) {
         private const val MIN_DECODER_BYTES = 1L * 1024 * 1024
         private const val MIN_JOINER_BYTES = 1L * 1024 * 1024
         private const val MIN_TOKENS_BYTES = 1024L
+
+        fun modelId(chunkMs: Int): String = "nemotron35-${chunkMs}ms-int8"
     }
 }
