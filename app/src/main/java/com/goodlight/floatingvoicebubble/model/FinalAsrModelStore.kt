@@ -62,8 +62,7 @@ class FinalAsrModelStore(context: Context) {
             val candidate = modelFromDirectory(temporary)
             validate(candidate, strictSizes = true)
             writeManifest(candidate)
-            if (destination.exists()) check(destination.deleteRecursively()) { "旧ReazonSpeechモデルを置き換えられませんでした。" }
-            check(temporary.renameTo(destination)) { "ReazonSpeechモデルを確定保存できませんでした。" }
+            AtomicDirectoryInstaller.replace(temporary, destination, "ReazonSpeechモデル")
             return loadModel(destination)
         } catch (failure: Throwable) {
             temporary.deleteRecursively()
