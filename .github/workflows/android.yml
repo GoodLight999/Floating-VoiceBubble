@@ -31,7 +31,10 @@ jobs:
         with:
           gradle-version: "9.5.0"
       - name: Lint, JVM tests, debug and release/R8
-        run: gradle --no-daemon :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease 2>&1 | tee gradle-verify.log
       - name: Verify APK archive, signature and manifest
         run: |
           set -euo pipefail
@@ -44,6 +47,17 @@ jobs:
           printf '%s\n' "$BADGING" | grep -F "sdkVersion:'33'"
           printf '%s\n' "$BADGING" | grep -F "targetSdkVersion:'36'"
           printf '%s\n' "$BADGING" | grep -F "launchable-activity: name='com.goodlight.floatingvoicebubble.MainActivity'"
+      - name: Upload CI diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatingVoiceBubble-ci-diagnostics-${{ github.sha }}
+          path: |
+            gradle-verify.log
+            app/build/reports/**
+            app/build/test-results/**
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -89,3 +103,13 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: GRADLE_CMD=gradle bash scripts/verify-emulator.sh
+      - name: Upload emulator reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatingVoiceBubble-emulator-api${{ matrix.api-level }}-${{ github.sha }}
+          path: |
+            app/build/reports/androidTests/**
+            app/build/outputs/androidTest-results/**
+          if-no-files-found: warn
+          retention-days: 14
