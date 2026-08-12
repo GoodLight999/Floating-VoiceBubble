@@ -6,6 +6,10 @@ SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 BUILD_TOOLS_VERSION="${BUILD_TOOLS_VERSION:-36.0.0}"
 APK="app/build/outputs/apk/debug/app-debug.apk"
 
+if [[ "${VOICEBUBBLE_SKIP_REMOTE_PROBES:-0}" != "1" ]]; then
+  bash scripts/verify-model-catalog.sh
+fi
+
 $GRADLE_CMD --no-daemon :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 
 test -s "$APK"
