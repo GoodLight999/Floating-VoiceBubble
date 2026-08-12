@@ -3,6 +3,7 @@ package com.goodlight.floatingvoicebubble
 import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.goodlight.floatingvoicebubble.benchmark.BenchmarkReferenceStore
 import com.goodlight.floatingvoicebubble.diagnostics.SelfDiagnostics
 import com.goodlight.floatingvoicebubble.dictionary.DictionaryTerm
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
@@ -85,7 +86,14 @@ class RuntimeSmokeTest {
         val token = "診断固有名詞${System.nanoTime()}"
         PersonalDictionary(context).use { dictionary ->
             val before = dictionary.count()
-            dictionary.upsert(DictionaryTerm(term = token, reading = "しんだんこゆうめいし", aliases = listOf("診断別名"), weight = 900))
+            dictionary.upsert(
+                DictionaryTerm(
+                    term = token,
+                    reading = "しんだんこゆうめいし",
+                    aliases = listOf("診断別名"),
+                    weight = 900,
+                )
+            )
             assertTrue(dictionary.count() >= before + 1L)
             assertTrue(dictionary.relevantTerms("今日は${token}について話す").any { it.term == token })
             assertTrue(dictionary.relevantTerms("今日は診断別名について話す").any { it.term == token })
@@ -129,6 +137,34 @@ class RuntimeSmokeTest {
         } finally {
             json.delete()
             wav.delete()
+        }
+    }
+
+    @Test
+    fun benchmarkGroundTruthRoundTripsThroughNoBackupStorageAndTemplate() {
+        val traces = SessionTraceStore(context)
+        val references = BenchmarkReferenceStore(context)
+        val id = "reference-${System.nanoTime()}"
+        val metadata = File(traces.audioDir, "$id.json")
+        metadata.writeText(
+            """{"sessionId":"$id","liveRawTranscript":"ライブ誤認識","rawTranscript":"ライブ誤認識"}""",
+            Charsets.UTF_8,
+        )
+        try {
+            val result = references.importText(
+                "sessionId\tliveTranscript\treference\n$id\tライブ誤認識\t正しい文字起こし\n"
+            )
+            assertEquals(1, result.imported)
+            assertEquals(0, result.skipped)
+            assertEquals("正しい文字起こし", references.get(id))
+            assertTrue(references.count() >= 1)
+
+            val template = references.exportTemplate(limit = 30)
+            assertTrue(template.contains("sessionId\tliveTranscript\treference"))
+            assertTrue(template.contains("$id\tライブ誤認識\t正しい文字起こし"))
+        } finally {
+            references.set(id, "")
+            metadata.delete()
         }
     }
 }
