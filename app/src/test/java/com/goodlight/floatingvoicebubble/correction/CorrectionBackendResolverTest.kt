@@ -24,6 +24,39 @@ class CorrectionBackendResolverTest {
     }
 
     @Test
+    fun offlineExplicitNoneStaysNoneEvenWhenGemmaExists() {
+        val settings = AppSettings(
+            offlineMode = true,
+            correctionMode = CorrectionMode.NONE,
+        )
+        assertEquals(
+            CorrectionBackend.NONE,
+            CorrectionBackendResolver.resolve(settings, gemmaAvailable = true),
+        )
+        assertEquals(
+            CorrectionBackend.NONE,
+            CorrectionBackendResolver.resolve(settings, gemmaAvailable = false),
+        )
+    }
+
+    @Test
+    fun offlineAutoUsesGemmaOnlyWhenAvailable() {
+        val settings = AppSettings(
+            offlineMode = true,
+            correctionMode = CorrectionMode.AUTO,
+            byokModel = "configured-cloud-model",
+        )
+        assertEquals(
+            CorrectionBackend.GEMMA,
+            CorrectionBackendResolver.resolve(settings, gemmaAvailable = true),
+        )
+        assertEquals(
+            CorrectionBackend.NONE,
+            CorrectionBackendResolver.resolve(settings, gemmaAvailable = false),
+        )
+    }
+
+    @Test
     fun autoPrefersConfiguredByokThenGemma() {
         assertEquals(
             CorrectionBackend.BYOK,
