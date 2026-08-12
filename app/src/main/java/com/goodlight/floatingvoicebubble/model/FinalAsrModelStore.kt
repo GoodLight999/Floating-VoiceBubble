@@ -40,8 +40,7 @@ class FinalAsrModelStore(context: Context) {
         return runCatching { loadModel(directory) }.getOrNull()
     }
 
-    fun listInstalled(): List<FinalAsrModel> =
-        resolve(MODEL_ID)?.let(::listOf).orEmpty()
+    fun listInstalled(): List<FinalAsrModel> = resolve(MODEL_ID)?.let(::listOf).orEmpty()
 
     fun importReazonSpeechTree(treeUri: Uri): FinalAsrModel {
         val tree = DocumentFile.fromTreeUri(appContext, treeUri)
@@ -54,21 +53,33 @@ class FinalAsrModelStore(context: Context) {
         val reportedBytes = sources.values.sumOf { it.length().coerceAtLeast(0L) }
         if (reportedBytes > 0L) ensureDiskSpace(reportedBytes)
 
-        val id = MODEL_ID
-        val temporary = File(rootDir, ".$id.part-${UUID.randomUUID()}")
-        val destination = File(rootDir, id)
-        temporary.mkdirs()
+        val temporary = createStagingDirectory()
         try {
             sources.forEach { (name, document) -> copyDocument(document, File(temporary, name)) }
-            val candidate = modelFromDirectory(temporary)
-            validate(candidate, strictSizes = true)
-            writeManifest(candidate)
-            AtomicDirectoryInstaller.replace(temporary, destination, "ReazonSpeechモデル")
-            return loadModel(destination)
+            return installPreparedDirectory(temporary)
         } catch (failure: Throwable) {
             temporary.deleteRecursively()
             throw failure
         }
+    }
+
+    internal fun createStagingDirectory(): File =
+        File(rootDir, ".$MODEL_ID.part-${UUID.randomUUID()}").also {
+            check(it.mkdirs()) { "ReazonSpeechモデルの一時保存先を作成できませんでした。" }
+        }
+
+    internal fun ensureImportSpace(requiredBytes: Long) = ensureDiskSpace(requiredBytes)
+
+    internal fun installPreparedDirectory(temporary: File): FinalAsrModel {
+        require(temporary.parentFile?.canonicalFile == rootDir.canonicalFile) {
+            "ReazonSpeechモデルの一時保存先が不正です。"
+        }
+        val destination = File(rootDir, MODEL_ID)
+        val candidate = modelFromDirectory(temporary)
+        validate(candidate, strictSizes = true)
+        writeManifest(candidate)
+        AtomicDirectoryInstaller.replace(temporary, destination, "ReazonSpeechモデル")
+        return loadModel(destination)
     }
 
     fun remove(): Boolean {
@@ -147,6 +158,7 @@ class FinalAsrModelStore(context: Context) {
     }
 
     private fun ensureDiskSpace(requiredBytes: Long) {
+        require(requiredBytes >= 0L) { "最終ASRモデルの必要容量が不正です。" }
         val available = StatFs(rootDir.absolutePath).availableBytes
         require(available >= requiredBytes + 64L * 1024 * 1024) {
             "最終ASRモデル用の空き容量が不足しています。"
@@ -169,11 +181,11 @@ class FinalAsrModelStore(context: Context) {
     companion object {
         const val MODEL_ID = "reazonspeech-v2-int8"
         const val FAMILY = "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
-        private const val ENCODER = "encoder-epoch-99-avg-1.int8.onnx"
-        private const val DECODER = "decoder-epoch-99-avg-1.onnx"
-        private const val JOINER = "joiner-epoch-99-avg-1.int8.onnx"
-        private const val TOKENS = "tokens.txt"
+        internal const val ENCODER = "encoder-epoch-99-avg-1.int8.onnx"
+        internal const val DECODER = "decoder-epoch-99-avg-1.onnx"
+        internal const val JOINER = "joiner-epoch-99-avg-1.int8.onnx"
+        internal const val TOKENS = "tokens.txt"
         private const val MANIFEST_NAME = "voicebubble-final-asr-model.json"
-        private val REQUIRED_FILES = setOf(ENCODER, DECODER, JOINER, TOKENS)
+        internal val REQUIRED_FILES = setOf(ENCODER, DECODER, JOINER, TOKENS)
     }
 }
