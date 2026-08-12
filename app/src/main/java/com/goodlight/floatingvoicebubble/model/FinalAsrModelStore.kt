@@ -32,15 +32,13 @@ class FinalAsrModelStore(context: Context) {
     private val rootDir = File(appContext.noBackupFilesDir, "models/final-asr").apply { mkdirs() }
 
     fun resolve(id: String): FinalAsrModel? {
-        if (id.isBlank()) return null
-        val directory = File(rootDir, id)
+        if (id != MODEL_ID) return null
+        val directory = File(rootDir, MODEL_ID)
         return runCatching { loadModel(directory) }.getOrNull()
     }
 
-    fun listInstalled(): List<FinalAsrModel> = rootDir.listFiles()
-        ?.filter(File::isDirectory)
-        ?.mapNotNull { runCatching { loadModel(it) }.getOrNull() }
-        .orEmpty()
+    fun listInstalled(): List<FinalAsrModel> =
+        resolve(MODEL_ID)?.let(::listOf).orEmpty()
 
     fun importReazonSpeechTree(treeUri: Uri): FinalAsrModel {
         val tree = DocumentFile.fromTreeUri(appContext, treeUri)
@@ -89,11 +87,13 @@ class FinalAsrModelStore(context: Context) {
     }
 
     private fun loadModel(directory: File): FinalAsrModel {
-        require(directory.isDirectory) { "final ASR model directory is missing" }
-        val manifest = JSONObject(File(directory, MANIFEST_NAME).readText(Charsets.UTF_8))
-        require(manifest.optInt("schema") == 1)
-        require(manifest.getString("family") == FAMILY)
-        require(manifest.getString("id") == MODEL_ID)
+        require(directory.isDirectory && directory.name == MODEL_ID) { "final ASR model directory is missing or invalid" }
+        val manifestFile = File(directory, MANIFEST_NAME)
+        require(manifestFile.isFile) { "final ASR model manifest is missing" }
+        val manifest = JSONObject(manifestFile.readText(Charsets.UTF_8))
+        require(manifest.optInt("schema") == 1) { "Unsupported final ASR model manifest" }
+        require(manifest.getString("family") == FAMILY) { "Unsupported final ASR family" }
+        require(manifest.getString("id") == directory.name) { "final ASR model id/path mismatch" }
         return modelFromDirectory(directory).also { validate(it, strictSizes = true) }
     }
 
