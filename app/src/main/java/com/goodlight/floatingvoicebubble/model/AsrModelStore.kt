@@ -30,7 +30,10 @@ data class StreamingAsrModel(
 class AsrModelStore(context: Context) {
     private val appContext = context.applicationContext
     private val contentResolver = appContext.contentResolver
-    private val rootDir = File(appContext.noBackupFilesDir, "models/asr").apply { mkdirs() }
+    private val rootDir = File(appContext.noBackupFilesDir, "models/asr").apply {
+        mkdirs()
+        AtomicDirectoryInstaller.recoverBackups(this)
+    }
 
     fun listInstalled(): List<StreamingAsrModel> = rootDir.listFiles()
         ?.asSequence()
