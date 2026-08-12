@@ -26,6 +26,7 @@ import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
+import com.goodlight.floatingvoicebubble.model.GemmaModelVerifier
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackend
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackendResolver
 import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
@@ -35,7 +36,6 @@ import com.k2fsa.sherpa.onnx.VersionInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.security.MessageDigest
 
 enum class DiagnosticStatus { PASS, WARN, FAIL, SKIP }
 
@@ -59,7 +59,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 4)
+        .put("schema", 5)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -186,19 +186,41 @@ class SelfDiagnostics(
         }
 
         val modelFile = settings.gemmaModelPath.takeIf(String::isNotBlank)?.let(::File)
-        val gemmaAvailable = modelFile?.isFile == true && modelFile.length() >= MIN_GEMMA_BYTES
+        val gemmaStructurallyAvailable = modelFile?.isFile == true && modelFile.length() >= MIN_GEMMA_BYTES
+        val gemmaFingerprint = if (gemmaStructurallyAvailable) {
+            runCatching { GemmaModelVerifier.inspect(requireNotNull(modelFile)) }
+        } else {
+            null
+        }
+        val gemmaAvailable = gemmaStructurallyAvailable
+
         results += when {
             modelFile == null -> skip("gemma-model", "not configured")
             !modelFile.isFile -> fail("gemma-model", "configured path is missing")
             modelFile.length() < MIN_GEMMA_BYTES -> fail("gemma-model", "model file is unexpectedly small")
-            settings.gemmaVariant == GemmaVariant.UNKNOWN -> warn(
+            gemmaFingerprint?.isFailure == true -> warn(
                 "gemma-model",
-                "present; variant is not declared E2B/E4B; size=${modelFile.length()} bytes; sha256=${sha256Prefix(modelFile)}",
+                "model is present but fingerprinting failed: ${safeMessage(gemmaFingerprint.exceptionOrNull()!!)}",
             )
-            else -> pass(
-                "gemma-model",
-                "variant=${settings.gemmaVariant}; size=${modelFile.length()} bytes; sha256=${sha256Prefix(modelFile)}",
-            )
+            else -> {
+                val fingerprint = requireNotNull(gemmaFingerprint).getOrThrow()
+                when {
+                    fingerprint.knownOfficialArtifact &&
+                        settings.gemmaVariant != GemmaVariant.UNKNOWN &&
+                        settings.gemmaVariant != fingerprint.detectedVariant -> fail(
+                            "gemma-model",
+                            "declared=${settings.gemmaVariant} but verified artifact=${fingerprint.detectedVariant}; sha256=${fingerprint.sha256.take(12)}",
+                        )
+                    fingerprint.knownOfficialArtifact -> pass(
+                        "gemma-model",
+                        "official artifact verified; variant=${fingerprint.detectedVariant}; size=${fingerprint.bytes}; sha256=${fingerprint.sha256.take(12)}",
+                    )
+                    else -> warn(
+                        "gemma-model",
+                        "unrecognized artifact; declared=${settings.gemmaVariant}; sizeHint=${fingerprint.detectedVariant}; size=${fingerprint.bytes}; sha256=${fingerprint.sha256.take(12)}",
+                    )
+                }
+            }
         }
 
         val selectedOfflineCorrection = CorrectionBackendResolver.resolve(settings.copy(offlineMode = true), gemmaAvailable)
@@ -381,20 +403,10 @@ class SelfDiagnostics(
     private fun skip(id: String, detail: String) = DiagnosticItem(id, DiagnosticStatus.SKIP, detail)
 
     private fun safeMessage(error: Throwable): String =
-        (error.message ?: error.javaClass.simpleName).replace(Regex("(?i)(api[_ -]?key|bearer)\\s*[:=]?\\s*\\S+"), "$1 <redacted>")
-
-    private fun sha256Prefix(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().buffered().use { input ->
-            val buffer = ByteArray(128 * 1024)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
-            }
-        }
-        return digest.digest().take(6).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-    }
+        (error.message ?: error.javaClass.simpleName).replace(
+            Regex("(?i)(api[_ -]?key|bearer)\\s*[:=]?\\s*\\S+"),
+            "$1 <redacted>",
+        )
 
     companion object {
         private const val MIN_GEMMA_BYTES = 1L * 1024 * 1024
