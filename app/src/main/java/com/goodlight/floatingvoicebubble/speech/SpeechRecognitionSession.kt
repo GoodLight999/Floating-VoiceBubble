@@ -48,8 +48,59 @@ class SpeechRecognitionSession(
     private var latestPartial: String = ""
     private var inputClosed = false
 
+    private val listener = object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) = onState("聴いています")
+        override fun onBeginningOfSpeech() = onState("聴いています")
+        override fun onRmsChanged(rmsdB: Float) = Unit
+        override fun onBufferReceived(buffer: ByteArray?) = Unit
+        override fun onEndOfSpeech() {
+            if (!inputClosed) onState("認識を確定しています")
+        }
+
+        override fun onError(error: Int) {
+            if (delivered.get()) return
+            val fallback = latestAlternatives.ifEmpty {
+                latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty()
+            }
+            if (inputClosed && fallback.isNotEmpty()) {
+                deliver(fallback)
+            } else {
+                capture.stop()
+                fail(errorMessage(error))
+            }
+        }
+
+        override fun onResults(results: Bundle) {
+            val candidates = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.map(String::trim)
+                ?.filter(String::isNotEmpty)
+                .orEmpty()
+            if (candidates.isNotEmpty()) latestAlternatives = candidates
+            if (latestAlternatives.isNotEmpty()) {
+                deliver(latestAlternatives)
+            } else {
+                fail("音声を文字として認識できませんでした。")
+            }
+        }
+
+        override fun onPartialResults(partialResults: Bundle) {
+            val candidates = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                ?.map(String::trim)
+                ?.filter(String::isNotEmpty)
+                .orEmpty()
+            if (candidates.isEmpty()) return
+            latestPartial = candidates.first()
+            latestAlternatives = candidates
+            onPartial(latestPartial)
+        }
+
+        override fun onEvent(eventType: Int, params: Bundle?) = Unit
+    }
+
     init {
-        check(Looper.myLooper() == Looper.getMainLooper()) { "SpeechRecognitionSession must be created on main thread" }
+        check(Looper.myLooper() == Looper.getMainLooper()) {
+            "SpeechRecognitionSession must be created on main thread"
+        }
         val onDeviceAvailable = SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
         val useOnDevice = when {
             offlineRequired -> true
@@ -57,7 +108,9 @@ class SpeechRecognitionSession(
             mode == RecognitionMode.SYSTEM -> false
             else -> onDeviceAvailable
         }
-        if (useOnDevice && !onDeviceAvailable) error("この端末ではAndroidのオンデバイス音声認識を利用できません。")
+        if (useOnDevice && !onDeviceAvailable) {
+            error("この端末ではAndroidのオンデバイス音声認識を利用できません。")
+        }
         recognizer = if (useOnDevice) {
             recognizerKind = "android-on-device"
             SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
@@ -65,7 +118,9 @@ class SpeechRecognitionSession(
             recognizerKind = "android-system"
             SpeechRecognizer.createSpeechRecognizer(context)
         }
-        capture = AudioCaptureSession(traceAudioDir, autoEndpoint) { mainHandler.post { finishInput() } }
+        capture = AudioCaptureSession(traceAudioDir, autoEndpoint) {
+            mainHandler.post { finishInput() }
+        }
         recognizer.setRecognitionListener(listener)
     }
 
@@ -80,7 +135,12 @@ class SpeechRecognitionSession(
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, capture.channelCount)
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, capture.sampleRate)
-            if (biasTerms.isNotEmpty()) putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, ArrayList(biasTerms.take(384)))
+            if (biasTerms.isNotEmpty()) {
+                putStringArrayListExtra(
+                    RecognizerIntent.EXTRA_BIASING_STRINGS,
+                    ArrayList(biasTerms.take(384)),
+                )
+            }
         }
         onState("準備しています")
         recognizer.startListening(intent)
@@ -94,8 +154,14 @@ class SpeechRecognitionSession(
         capture.stop()
         mainHandler.postDelayed({
             if (!delivered.get()) {
-                val fallback = latestAlternatives.ifEmpty { latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty() }
-                if (fallback.isNotEmpty()) deliver(fallback) else fail("音声認識の確定がタイムアウトしました。")
+                val fallback = latestAlternatives.ifEmpty {
+                    latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty()
+                }
+                if (fallback.isNotEmpty()) {
+                    deliver(fallback)
+                } else {
+                    fail("音声認識の確定がタイムアウトしました。")
+                }
             }
         }, FINAL_RESULT_TIMEOUT_MS)
     }
@@ -107,38 +173,22 @@ class SpeechRecognitionSession(
         recognizer.destroy()
     }
 
-    private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) = onState("聴いています")
-        override fun onBeginningOfSpeech() = onState("聴いています")
-        override fun onRmsChanged(rmsdB: Float) = Unit
-        override fun onBufferReceived(buffer: ByteArray?) = Unit
-        override fun onEndOfSpeech() { if (!inputClosed) onState("認識を確定しています") }
-        override fun onError(error: Int) {
-            if (delivered.get()) return
-            val fallback = latestAlternatives.ifEmpty { latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty() }
-            if (inputClosed && fallback.isNotEmpty()) deliver(fallback) else {
-                capture.stop(); fail(errorMessage(error))
-            }
-        }
-        override fun onResults(results: Bundle) {
-            val candidates = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.map(String::trim)?.filter(String::isNotEmpty).orEmpty()
-            if (candidates.isNotEmpty()) latestAlternatives = candidates
-            if (latestAlternatives.isNotEmpty()) deliver(latestAlternatives) else fail("音声を文字として認識できませんでした。")
-        }
-        override fun onPartialResults(partialResults: Bundle) {
-            val candidates = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.map(String::trim)?.filter(String::isNotEmpty).orEmpty()
-            if (candidates.isEmpty()) return
-            latestPartial = candidates.first(); latestAlternatives = candidates; onPartial(latestPartial)
-        }
-        override fun onEvent(eventType: Int, params: Bundle?) = Unit
-    }
-
     private fun deliver(candidates: List<String>) {
         if (!delivered.compareAndSet(false, true)) return
         mainHandler.removeCallbacksAndMessages(null)
         capture.stop()
         val normalized = candidates.map(String::trim).filter(String::isNotEmpty).distinct()
-        onComplete(RecognitionOutcome(sessionId, normalized.firstOrNull().orEmpty(), normalized, capture.expectedWavFile(), startedAtMs, System.currentTimeMillis(), recognizerKind))
+        onComplete(
+            RecognitionOutcome(
+                sessionId = sessionId,
+                rawTranscript = normalized.firstOrNull().orEmpty(),
+                alternatives = normalized,
+                audioFile = capture.expectedWavFile(),
+                startedAtMs = startedAtMs,
+                recognitionFinishedAtMs = System.currentTimeMillis(),
+                recognizerKind = recognizerKind,
+            )
+        )
     }
 
     private fun fail(message: String) {
@@ -150,13 +200,17 @@ class SpeechRecognitionSession(
     private fun errorMessage(code: Int): String = when (code) {
         SpeechRecognizer.ERROR_AUDIO -> "音声入力を開始できませんでした。"
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "マイク権限がありません。"
-        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "音声認識サービスへ接続できませんでした。"
+        SpeechRecognizer.ERROR_NETWORK,
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "音声認識サービスへ接続できませんでした。"
         SpeechRecognizer.ERROR_NO_MATCH -> "音声を文字として認識できませんでした。"
         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "音声認識サービスが使用中です。"
-        SpeechRecognizer.ERROR_SERVER, SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "音声認識サービスでエラーが発生しました。"
+        SpeechRecognizer.ERROR_SERVER,
+        SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "音声認識サービスでエラーが発生しました。"
         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "音声が検出されませんでした。"
         else -> "音声認識エラー ($code)"
     }
 
-    companion object { private const val FINAL_RESULT_TIMEOUT_MS = 8_000L }
+    companion object {
+        private const val FINAL_RESULT_TIMEOUT_MS = 8_000L
+    }
 }
