@@ -7,6 +7,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.inputmethod.EditorInfo
 import com.goodlight.floatingvoicebubble.CorrectionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
@@ -32,12 +33,12 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         Thread(runnable, "VoiceBubble-Finalizer").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
 
-    private var voiceInputMethod: InputMethod? = null
+    private var voiceInputMethod: TrackingInputMethod? = null
     private var activeSession: SpeechRecognitionSession? = null
     private var activeTarget: EditorTarget? = null
     private var latestRaw = ""
 
-    override fun onCreateInputMethod(): InputMethod = InputMethod(this).also { voiceInputMethod = it }
+    override fun onCreateInputMethod(): InputMethod = TrackingInputMethod(this).also { voiceInputMethod = it }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -76,7 +77,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val inputMethod = voiceInputMethod
         val connection = inputMethod?.currentInputConnection
         val editor = inputMethod?.currentInputEditorInfo
-        if (connection == null || editor == null) {
+        if (inputMethod == null || connection == null || editor == null || !inputMethod.currentInputStarted) {
             transientError("文字入力欄へカーソルを置いてから音声入力を開始してください。")
             return
         }
@@ -91,7 +92,12 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             return
         }
 
-        activeTarget = EditorTarget(editor.packageName?.toString().orEmpty(), editor.fieldId)
+        activeTarget = EditorTarget(
+            generation = inputMethod.generation,
+            packageName = editor.packageName?.toString().orEmpty(),
+            fieldId = editor.fieldId,
+            fieldName = editor.fieldName,
+        )
         latestRaw = ""
         overlay.showListening("", "録音を開始しています")
 
@@ -274,13 +280,32 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
     private fun isSameTarget(expected: EditorTarget?): Boolean {
         expected ?: return false
-        val editor = voiceInputMethod?.currentInputEditorInfo ?: return false
-        return expected.packageName == editor.packageName?.toString().orEmpty() && expected.fieldId == editor.fieldId
+        val inputMethod = voiceInputMethod ?: return false
+        if (!inputMethod.currentInputStarted || inputMethod.generation != expected.generation) return false
+        val editor = inputMethod.currentInputEditorInfo ?: return false
+        return expected.packageName == editor.packageName?.toString().orEmpty() &&
+            expected.fieldId == editor.fieldId &&
+            expected.fieldName == editor.fieldName
     }
 
     private val rootViewHandler by lazy { android.os.Handler(mainLooper) }
 
-    private data class EditorTarget(val packageName: String, val fieldId: Int)
+    private data class EditorTarget(
+        val generation: Long,
+        val packageName: String,
+        val fieldId: Int,
+        val fieldName: String?,
+    )
+
+    private class TrackingInputMethod(service: AccessibilityService) : InputMethod(service) {
+        var generation: Long = 0L
+            private set
+
+        override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
+            if (!restarting) generation += 1L
+            super.onStartInput(attribute, restarting)
+        }
+    }
 
     companion object {
         private const val CLIPBOARD_NOTICE_MS = 1_800L
