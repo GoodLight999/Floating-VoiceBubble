@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.goodlight.floatingvoicebubble"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.goodlight.floatingvoicebubble"
