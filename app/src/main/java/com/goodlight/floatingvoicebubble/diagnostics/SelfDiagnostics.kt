@@ -59,7 +59,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 3)
+        .put("schema", 4)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -186,10 +186,11 @@ class SelfDiagnostics(
         }
 
         val modelFile = settings.gemmaModelPath.takeIf(String::isNotBlank)?.let(::File)
+        val gemmaAvailable = modelFile?.isFile == true && modelFile.length() >= MIN_GEMMA_BYTES
         results += when {
             modelFile == null -> skip("gemma-model", "not configured")
             !modelFile.isFile -> fail("gemma-model", "configured path is missing")
-            modelFile.length() < 1_000_000L -> fail("gemma-model", "model file is unexpectedly small")
+            modelFile.length() < MIN_GEMMA_BYTES -> fail("gemma-model", "model file is unexpectedly small")
             settings.gemmaVariant == GemmaVariant.UNKNOWN -> warn(
                 "gemma-model",
                 "present; variant is not declared E2B/E4B; size=${modelFile.length()} bytes; sha256=${sha256Prefix(modelFile)}",
@@ -199,10 +200,18 @@ class SelfDiagnostics(
                 "variant=${settings.gemmaVariant}; size=${modelFile.length()} bytes; sha256=${sha256Prefix(modelFile)}",
             )
         }
-        results += if (settings.offlineMode && modelFile?.isFile != true) {
-            fail("offline-gemma-readiness", "offline mode is enabled but Gemma model is missing")
-        } else {
-            pass("offline-gemma-readiness", if (settings.offlineMode) "ready" else "offline mode inactive")
+
+        val selectedOfflineCorrection = CorrectionBackendResolver.resolve(settings.copy(offlineMode = true), gemmaAvailable)
+        results += when {
+            !settings.offlineMode -> pass("offline-correction-readiness", "offline mode inactive")
+            settings.correctionMode == CorrectionMode.GEMMA && !gemmaAvailable ->
+                fail("offline-correction-readiness", "Gemma correction is explicitly selected but the model is missing")
+            selectedOfflineCorrection == CorrectionBackend.GEMMA ->
+                pass("offline-correction-readiness", "Gemma available; offline correction ready")
+            settings.correctionMode == CorrectionMode.NONE ->
+                pass("offline-correction-readiness", "correction explicitly disabled; no Gemma model required")
+            else ->
+                pass("offline-correction-readiness", "cloud blocked; no Gemma available, so correction will be disabled")
         }
 
         results += probe("offline-cloud-block") {
@@ -211,9 +220,16 @@ class SelfDiagnostics(
                 correctionMode = CorrectionMode.BYOK,
                 byokModel = "diagnostic-cloud-model",
             )
-            val backend = CorrectionBackendResolver.resolve(forcedOffline, gemmaAvailable = true)
-            check(backend == CorrectionBackend.GEMMA) { "forced offline mode selected $backend" }
-            "policy verified: explicit BYOK resolves to GEMMA when offline"
+            val backendWithGemma = CorrectionBackendResolver.resolve(forcedOffline, gemmaAvailable = true)
+            val backendWithoutGemma = CorrectionBackendResolver.resolve(forcedOffline, gemmaAvailable = false)
+            val explicitNone = CorrectionBackendResolver.resolve(
+                forcedOffline.copy(correctionMode = CorrectionMode.NONE),
+                gemmaAvailable = true,
+            )
+            check(backendWithGemma == CorrectionBackend.GEMMA) { "forced offline mode selected $backendWithGemma with Gemma" }
+            check(backendWithoutGemma == CorrectionBackend.NONE) { "forced offline mode selected $backendWithoutGemma without Gemma" }
+            check(explicitNone == CorrectionBackend.NONE) { "explicit NONE was overridden by $explicitNone" }
+            "policy verified: offline never selects cloud; BYOK→Gemma/NONE and explicit NONE stays NONE"
         }
 
         results += probeCorrectionGuard()
@@ -237,17 +253,17 @@ class SelfDiagnostics(
                 results += skip("final-asr-model-load", "model not configured")
             }
 
-            if (modelFile?.isFile == true) {
+            if (gemmaAvailable) {
                 results += probe("gemma-inference") {
                     val raw = "今日はがんだむ見に行く"
-                    val output = GemmaCorrector(appContext, modelFile.absolutePath, settings.gemmaBackend)
+                    val output = GemmaCorrector(appContext, requireNotNull(modelFile).absolutePath, settings.gemmaBackend)
                         .correct(fixedCorrectionRequest(raw))
                     check(output.isNotBlank()) { "Gemma returned empty output" }
                     val decision = CorrectionGuard.choose(raw, output)
                     "response received; guard=${if (decision.accepted) "accepted" else "rejected"}"
                 }
             } else {
-                results += skip("gemma-inference", "model not configured")
+                results += skip("gemma-inference", "model not configured or invalid")
             }
 
             val shouldProbeCloud = !settings.offlineMode &&
@@ -378,5 +394,9 @@ class SelfDiagnostics(
             }
         }
         return digest.digest().take(6).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    companion object {
+        private const val MIN_GEMMA_BYTES = 1L * 1024 * 1024
     }
 }
