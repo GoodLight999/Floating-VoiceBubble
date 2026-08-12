@@ -29,7 +29,10 @@ data class FinalAsrModel(
 class FinalAsrModelStore(context: Context) {
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
-    private val rootDir = File(appContext.noBackupFilesDir, "models/final-asr").apply { mkdirs() }
+    private val rootDir = File(appContext.noBackupFilesDir, "models/final-asr").apply {
+        mkdirs()
+        AtomicDirectoryInstaller.recoverBackups(this)
+    }
 
     fun resolve(id: String): FinalAsrModel? {
         if (id != MODEL_ID) return null
