@@ -118,7 +118,7 @@ class SpeechRecognitionSession(
             recognizerKind = "android-system"
             SpeechRecognizer.createSpeechRecognizer(context)
         }
-        capture = AudioCaptureSession(traceAudioDir, autoEndpoint) {
+        capture = AudioCaptureSession(context, traceAudioDir, autoEndpoint) {
             mainHandler.post { finishInput() }
         }
         recognizer.setRecognitionListener(listener)
