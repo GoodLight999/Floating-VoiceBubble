@@ -18,9 +18,10 @@ class GemmaCorrector(context: Context, private val modelPath: String, private va
         val config = ConversationConfig(
             systemInstruction = Contents.of(CorrectionPrompt.SYSTEM.trim()),
             samplerConfig = SamplerConfig(topK = 1, topP = 1.0, temperature = 0.0),
-            maxOutputToken = 768,
         )
-        engine.createConversation(config).use { conversation -> conversation.sendMessage(CorrectionPrompt.user(request)).text.trim() }
+        engine.createConversation(config).use { conversation ->
+            conversation.sendMessage(CorrectionPrompt.user(request)).toString().trim()
+        }
     }
 }
 
@@ -42,14 +43,24 @@ private object GemmaEnginePool {
             try {
                 val engine = if (loaded?.key == key) loaded!!.engine else {
                     loaded?.engine?.close()
-                    Engine(EngineConfig(modelPath = modelPath, backend = backend, cacheDir = File(context.cacheDir, "litertlm").apply { mkdirs() }.absolutePath)).also {
-                        it.initialize(); loaded = Loaded(key, it)
+                    Engine(
+                        EngineConfig(
+                            modelPath = modelPath,
+                            backend = backend,
+                            cacheDir = File(context.cacheDir, "litertlm").apply { mkdirs() }.absolutePath,
+                        )
+                    ).also {
+                        it.initialize()
+                        loaded = Loaded(key, it)
                     }
                 }
                 return block(engine)
             } catch (failure: Throwable) {
                 lastFailure = failure
-                if (loaded?.key == key) { runCatching { loaded?.engine?.close() }; loaded = null }
+                if (loaded?.key == key) {
+                    runCatching { loaded?.engine?.close() }
+                    loaded = null
+                }
             }
         }
         throw IllegalStateException("Gemma initialization/inference failed", lastFailure)
