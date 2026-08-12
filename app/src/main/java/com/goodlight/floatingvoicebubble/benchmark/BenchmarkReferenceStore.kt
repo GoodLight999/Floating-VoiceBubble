@@ -35,21 +35,33 @@ class BenchmarkReferenceStore(context: Context) {
     }
 
     /**
-     * TSV/CSV columns: sessionId, reference. A header is optional. Quoted CSV fields are supported.
+     * Accepted layouts:
+     * - sessionId, reference
+     * - sessionId, liveTranscript, reference (the format emitted by [exportTemplate])
+     *
+     * TSV/CSV are both accepted, a header is optional, and quoted CSV fields are supported.
      */
     fun importText(text: String): ReferenceImportResult {
         var imported = 0
         var skipped = 0
+        var headerReferenceColumn: Int? = null
+
         text.lineSequence().forEachIndexed { index, rawLine ->
             val line = rawLine.trimEnd()
             if (line.isBlank() || line.trimStart().startsWith("#")) return@forEachIndexed
             val delimiter = if ('\t' in line) '\t' else ','
             val fields = parseDelimited(line, delimiter)
+
             if (index == 0 && fields.firstOrNull()?.trim()?.equals("sessionId", ignoreCase = true) == true) {
+                headerReferenceColumn = fields.indexOfFirst { it.trim().equals("reference", ignoreCase = true) }
+                    .takeIf { it >= 0 }
+                    ?: error("reference column is missing")
                 return@forEachIndexed
             }
+
             val sessionId = fields.getOrNull(0)?.trim().orEmpty()
-            val reference = fields.drop(1).joinToString(delimiter.toString()).trim()
+            val referenceColumn = referenceColumnFor(fields, headerReferenceColumn)
+            val reference = fields.getOrNull(referenceColumn)?.trim().orEmpty()
             val valid = runCatching {
                 set(sessionId, reference)
                 reference.isNotBlank()
@@ -59,7 +71,7 @@ class BenchmarkReferenceStore(context: Context) {
         return ReferenceImportResult(imported, skipped)
     }
 
-    /** Returns a TSV template with the live transcript for orientation and an empty reference column. */
+    /** Returns a TSV template with the live transcript for orientation and an editable reference column. */
     fun exportTemplate(limit: Int = 30): String = buildString {
         append("sessionId\tliveTranscript\treference\n")
         traceStore.recentSessionMetadata(limit).forEach { metadataFile ->
@@ -84,6 +96,9 @@ class BenchmarkReferenceStore(context: Context) {
 
     companion object {
         private val SESSION_ID = Regex("[A-Za-z0-9._-]{1,128}")
+
+        internal fun referenceColumnFor(fields: List<String>, headerReferenceColumn: Int?): Int =
+            headerReferenceColumn ?: if (fields.size >= 3) fields.lastIndex else 1
 
         internal fun parseDelimited(line: String, delimiter: Char): List<String> {
             val fields = mutableListOf<String>()
