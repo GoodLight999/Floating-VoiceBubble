@@ -20,6 +20,11 @@ class BenchmarkReferenceStore(context: Context) {
             ?.takeIf(String::isNotBlank)
     }
 
+    fun count(): Int = traceStore.audioDir
+        .listFiles { file -> file.isFile && file.name.endsWith(REFERENCE_SUFFIX) }
+        ?.size
+        ?: 0
+
     fun set(sessionId: String, reference: String) {
         val id = validatedSessionId(sessionId)
         val normalized = reference.trim()
@@ -86,7 +91,7 @@ class BenchmarkReferenceStore(context: Context) {
         }
     }
 
-    private fun referenceFile(sessionId: String): File = File(traceStore.audioDir, "$sessionId.reference.txt")
+    private fun referenceFile(sessionId: String): File = File(traceStore.audioDir, "$sessionId$REFERENCE_SUFFIX")
 
     private fun validatedSessionId(value: String): String {
         val trimmed = value.trim()
@@ -96,6 +101,7 @@ class BenchmarkReferenceStore(context: Context) {
 
     companion object {
         private val SESSION_ID = Regex("[A-Za-z0-9._-]{1,128}")
+        private const val REFERENCE_SUFFIX = ".reference.txt"
 
         internal fun referenceColumnFor(fields: List<String>, headerReferenceColumn: Int?): Int =
             headerReferenceColumn ?: if (fields.size >= 3) fields.lastIndex else 1
