@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Floating VoiceBubble</string>
+    <string name="accessibility_service_name">Floating VoiceBubble</string>
+    <string name="accessibility_service_description">音声入力バブルを表示し、完成した文字列だけを現在の入力欄へ挿入します。</string>
+</resources>
