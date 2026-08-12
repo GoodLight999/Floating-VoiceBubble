@@ -8,7 +8,12 @@ enum class CorrectionBackend { NONE, BYOK, GEMMA }
 object CorrectionBackendResolver {
     fun resolve(settings: AppSettings, gemmaAvailable: Boolean): CorrectionBackend {
         if (settings.offlineMode) {
-            return if (gemmaAvailable) CorrectionBackend.GEMMA else CorrectionBackend.NONE
+            return when (settings.correctionMode) {
+                CorrectionMode.NONE -> CorrectionBackend.NONE
+                CorrectionMode.GEMMA -> if (gemmaAvailable) CorrectionBackend.GEMMA else CorrectionBackend.NONE
+                CorrectionMode.BYOK,
+                CorrectionMode.AUTO -> if (gemmaAvailable) CorrectionBackend.GEMMA else CorrectionBackend.NONE
+            }
         }
         return when (settings.correctionMode) {
             CorrectionMode.NONE -> CorrectionBackend.NONE
