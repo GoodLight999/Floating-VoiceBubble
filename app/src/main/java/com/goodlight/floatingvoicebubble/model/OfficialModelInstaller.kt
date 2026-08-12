@@ -1,15 +1,10 @@
 package com.goodlight.floatingvoicebubble.model
 
 import android.content.Context
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
-import java.io.File
-import java.io.FileOutputStream
 import java.io.FilterInputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
-import java.net.URL
 
 data class ModelInstallProgress(
     val phase: String,
@@ -47,17 +42,18 @@ class OfficialModelInstaller(context: Context) {
         val staging = streamingStore.createStagingDirectory(chunkMs)
         try {
             openCatalogStream(entry).use { source ->
-                extractSelectedTarBz2(
-                    source = source,
+                ModelArchiveExtractor.extractTarBz2(
+                    source = source.stream,
                     destination = staging,
                     requiredNames = AsrModelStore.REQUIRED_FILES,
-                    onProgress = onProgress,
-                )
+                ) {
+                    onProgress?.invoke(
+                        ModelInstallProgress("ダウンロード・展開", source.stream.count, source.totalBytes)
+                    )
+                }
             }
             onProgress?.invoke(ModelInstallProgress("検証・確定", 1L, 1L))
-            return InstalledOfficialModel.Streaming(
-                streamingStore.installPreparedDirectory(chunkMs, staging),
-            )
+            return InstalledOfficialModel.Streaming(streamingStore.installPreparedDirectory(chunkMs, staging))
         } catch (failure: Throwable) {
             staging.deleteRecursively()
             throw failure
@@ -72,12 +68,15 @@ class OfficialModelInstaller(context: Context) {
         val staging = finalStore.createStagingDirectory()
         try {
             openCatalogStream(entry).use { source ->
-                extractSelectedTarBz2(
-                    source = source,
+                ModelArchiveExtractor.extractTarBz2(
+                    source = source.stream,
                     destination = staging,
                     requiredNames = FinalAsrModelStore.REQUIRED_FILES,
-                    onProgress = onProgress,
-                )
+                ) {
+                    onProgress?.invoke(
+                        ModelInstallProgress("ダウンロード・展開", source.stream.count, source.totalBytes)
+                    )
+                }
             }
             onProgress?.invoke(ModelInstallProgress("検証・確定", 1L, 1L))
             return InstalledOfficialModel.Final(finalStore.installPreparedDirectory(staging))
@@ -149,61 +148,20 @@ class OfficialModelInstaller(context: Context) {
                 error("モデル取得に失敗しました: HTTP $status ${errorText.replace(Regex("\\s+"), " ")}")
             }
             val total = connection.contentLengthLong.takeIf { it > 0L }
-            val counting = ProgressInputStream(connection.inputStream.buffered(), total)
-            return NetworkStream(connection, counting, total)
+            return NetworkStream(
+                connection,
+                ProgressInputStream(connection.inputStream.buffered()),
+                total,
+            )
         }
         error("モデル取得先を解決できませんでした。")
     }
 
-    private fun extractSelectedTarBz2(
-        source: NetworkStream,
-        destination: File,
-        requiredNames: Set<String>,
-        onProgress: ((ModelInstallProgress) -> Unit)?,
-    ) {
-        val progressSource = source.stream
-        BZip2CompressorInputStream(progressSource, true).use { bzip ->
-            TarArchiveInputStream(bzip).use { tar ->
-                val found = mutableSetOf<String>()
-                while (true) {
-                    val entry = tar.nextEntry ?: break
-                    if (!entry.isFile) continue
-                    val baseName = entry.name.substringAfterLast('/').substringAfterLast('\\')
-                    if (baseName !in requiredNames) continue
-                    check(found.add(baseName)) { "モデルアーカイブ内で $baseName が重複しています。" }
-                    val outputFile = File(destination, baseName)
-                    FileOutputStream(outputFile).use { output ->
-                        val buffer = ByteArray(COPY_BUFFER_BYTES)
-                        while (true) {
-                            val read = tar.read(buffer)
-                            if (read <= 0) break
-                            output.write(buffer, 0, read)
-                            onProgress?.invoke(
-                                ModelInstallProgress(
-                                    phase = "ダウンロード・展開",
-                                    completedBytes = progressSource.count,
-                                    totalBytes = source.totalBytes,
-                                ),
-                            )
-                        }
-                        output.fd.sync()
-                    }
-                }
-                val missing = requiredNames - found
-                require(missing.isEmpty()) { "モデルアーカイブに必要ファイルがありません: ${missing.sorted().joinToString()}" }
-            }
-        }
-    }
-
-    private class ProgressInputStream(
-        input: InputStream,
-        val totalBytes: Long?,
-    ) : FilterInputStream(input) {
+    private class ProgressInputStream(input: InputStream) : FilterInputStream(input) {
         var count: Long = 0L
             private set
 
         override fun read(): Int = super.read().also { if (it >= 0) count += 1L }
-
         override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
             super.read(buffer, offset, length).also { if (it > 0) count += it.toLong() }
     }
@@ -224,6 +182,5 @@ class OfficialModelInstaller(context: Context) {
         private const val MAX_REDIRECTS = 8
         private const val CONNECT_TIMEOUT_MS = 15_000
         private const val READ_TIMEOUT_MS = 60_000
-        private const val COPY_BUFFER_BYTES = 1024 * 1024
     }
 }
