@@ -67,12 +67,14 @@ class RuntimeSmokeTest {
             assertTrue("offline-cloud-block" in ids)
             assertTrue("offline-recognition-policy" in ids)
             assertTrue("sherpa-jni" in ids)
+            assertTrue("final-asr-readiness" in ids)
             assertTrue("correction-guard" in ids)
             assertTrue("dictionary-db" in ids)
             assertTrue("trace-storage" in ids)
             val json = report.toRedactedJson()
             assertFalse(json.contains(sentinel))
             assertTrue(json.contains("offline-recognition-policy"))
+            assertTrue(json.contains("final-asr-readiness"))
         } finally {
             store.setApiKey(previous)
         }
@@ -123,6 +125,7 @@ class RuntimeSmokeTest {
             val text = json.readText(Charsets.UTF_8)
             assertTrue(text.contains("\"sessionId\": \"$id\"") || text.contains("\"sessionId\":\"$id\""))
             assertTrue(text.contains("instrumentation-fake"))
+            assertTrue(text.contains("finalAsr"))
         } finally {
             json.delete()
             wav.delete()

@@ -12,6 +12,7 @@ import android.provider.Settings
 import android.speech.SpeechRecognizer
 import com.goodlight.floatingvoicebubble.BuildConfig
 import com.goodlight.floatingvoicebubble.CorrectionMode
+import com.goodlight.floatingvoicebubble.FinalAsrMode
 import com.goodlight.floatingvoicebubble.GemmaVariant
 import com.goodlight.floatingvoicebubble.RecognitionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
@@ -24,8 +25,10 @@ import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
 import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
+import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackend
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackendResolver
+import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
 import com.goodlight.floatingvoicebubble.speech.SherpaStreamingEngine
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import com.k2fsa.sherpa.onnx.VersionInfo
@@ -56,7 +59,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 2)
+        .put("schema", 3)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -93,6 +96,8 @@ class SelfDiagnostics(
         val settings = settingsStore.load()
         val asrModelStore = AsrModelStore(appContext)
         val streamingModel = asrModelStore.resolve(settings.streamingAsrModelId)
+        val finalAsrModelStore = FinalAsrModelStore(appContext)
+        val finalAsrModel = finalAsrModelStore.resolve(settings.finalAsrModelId)
 
         results += probe("platform") {
             check(Build.VERSION.SDK_INT >= 33) { "Android 13 / API 33 以上が必要です。" }
@@ -158,6 +163,12 @@ class SelfDiagnostics(
             pass("offline-asr-readiness", if (settings.offlineMode) "ready" else "offline mode inactive")
         }
 
+        results += when {
+            settings.finalAsrMode == FinalAsrMode.LIVE_RESULT -> pass("final-asr-readiness", "live result selected")
+            finalAsrModel == null -> fail("final-asr-readiness", "ReazonSpeech selected but model is missing or invalid")
+            else -> pass("final-asr-readiness", "${finalAsrModel.family}; size=${finalAsrModel.totalBytes} bytes")
+        }
+
         results += probe("dictionary-db") {
             PersonalDictionary(appContext).use { dictionary ->
                 val count = dictionary.count()
@@ -217,6 +228,15 @@ class SelfDiagnostics(
                 results += skip("streaming-asr-model-load", "model not configured")
             }
 
+            if (finalAsrModel != null) {
+                results += probe("final-asr-model-load") {
+                    SherpaFinalAsrEngine.preload(finalAsrModel)
+                    "Sherpa OfflineRecognizer loaded ReazonSpeech successfully"
+                }
+            } else {
+                results += skip("final-asr-model-load", "model not configured")
+            }
+
             if (modelFile?.isFile == true) {
                 results += probe("gemma-inference") {
                     val raw = "今日はがんだむ見に行く"
@@ -255,6 +275,7 @@ class SelfDiagnostics(
             }
         } else {
             results += skip("streaming-asr-model-load", "external probes disabled")
+            results += skip("final-asr-model-load", "external probes disabled")
             results += skip("gemma-inference", "external probes disabled")
             results += skip("byok-live-request", "external probes disabled")
         }

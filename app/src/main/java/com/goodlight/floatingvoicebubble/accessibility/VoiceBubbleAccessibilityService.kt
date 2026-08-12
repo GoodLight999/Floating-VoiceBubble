@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.inputmethod.EditorInfo
 import com.goodlight.floatingvoicebubble.CorrectionMode
+import com.goodlight.floatingvoicebubble.FinalAsrMode
 import com.goodlight.floatingvoicebubble.RecognitionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
@@ -20,8 +21,10 @@ import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
 import com.goodlight.floatingvoicebubble.correction.TextCorrector
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
+import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.overlay.FloatingBubbleController
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
+import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
 import com.goodlight.floatingvoicebubble.speech.SherpaStreamingEngine
 import com.goodlight.floatingvoicebubble.speech.SpeechRecognitionSession
 import com.goodlight.floatingvoicebubble.trace.FinalizationTrace
@@ -34,6 +37,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private lateinit var dictionary: PersonalDictionary
     private lateinit var traceStore: SessionTraceStore
     private lateinit var asrModelStore: AsrModelStore
+    private lateinit var finalAsrModelStore: FinalAsrModelStore
     private lateinit var overlay: FloatingBubbleController
     private val worker = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "VoiceBubble-Finalizer").apply { priority = Thread.NORM_PRIORITY - 1 }
@@ -55,12 +59,18 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         dictionary = PersonalDictionary(this)
         traceStore = SessionTraceStore(this)
         asrModelStore = AsrModelStore(this)
+        finalAsrModelStore = FinalAsrModelStore(this)
         overlay = FloatingBubbleController(this, ::toggleRecording)
         overlay.attach()
 
         val settings = settingsStore.load()
         asrModelStore.resolve(settings.streamingAsrModelId)?.let { model ->
             warmupWorker.execute { runCatching { SherpaStreamingEngine.preload(model) } }
+        }
+        if (settings.finalAsrMode == FinalAsrMode.REAZON_SPEECH) {
+            finalAsrModelStore.resolve(settings.finalAsrModelId)?.let { model ->
+                warmupWorker.execute { runCatching { SherpaFinalAsrEngine.preload(model) } }
+            }
         }
     }
 
@@ -178,25 +188,56 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             ""
         }
         val settings = settingsStore.load()
-        val relevant = dictionary.relevantTerms(outcome.rawTranscript)
-        val request = CorrectionRequest(
-            rawTranscript = outcome.rawTranscript,
-            alternatives = outcome.alternatives,
-            surroundingContext = surrounding,
-            dictionaryTerms = relevant,
-        )
 
         worker.execute {
+            var finalAsrError: String? = null
+            var finalAsrId = "live-result"
+            var finalAsrLatencyMs: Long? = null
+            var finalAsrRtf: Double? = null
+            val correctionInput = when (settings.finalAsrMode) {
+                FinalAsrMode.LIVE_RESULT -> outcome.rawTranscript
+                FinalAsrMode.REAZON_SPEECH -> {
+                    val model = finalAsrModelStore.resolve(settings.finalAsrModelId)
+                    val audio = outcome.audioFile
+                    if (model == null || audio == null) {
+                        finalAsrError = if (model == null) "ReazonSpeech model is missing" else "recorded WAV is missing"
+                        outcome.rawTranscript
+                    } else {
+                        runCatching { SherpaFinalAsrEngine.decode(model, audio) }
+                            .onSuccess { decoded ->
+                                finalAsrId = decoded.engineId
+                                finalAsrLatencyMs = decoded.elapsedMs
+                                finalAsrRtf = decoded.realTimeFactor
+                            }
+                            .onFailure { finalAsrError = it.message ?: it.javaClass.simpleName }
+                            .getOrNull()
+                            ?.text
+                            ?: outcome.rawTranscript
+                    }
+                }
+            }
+
+            val alternatives = buildList {
+                add(correctionInput)
+                addAll(outcome.alternatives)
+            }.map(String::trim).filter(String::isNotEmpty).distinct()
+            val relevant = dictionary.relevantTerms(correctionInput)
+            val request = CorrectionRequest(
+                rawTranscript = correctionInput,
+                alternatives = alternatives,
+                surroundingContext = surrounding,
+                dictionaryTerms = relevant,
+            )
             val corrector = selectCorrector(settings)
             var correctionError: String? = null
             val modelOutput = if (corrector == null) {
-                outcome.rawTranscript
+                correctionInput
             } else {
                 runCatching { corrector.correct(request) }
                     .onFailure { correctionError = it.message ?: it.javaClass.simpleName }
-                    .getOrDefault(outcome.rawTranscript)
+                    .getOrDefault(correctionInput)
             }
-            val decision = CorrectionGuard.choose(outcome.rawTranscript, modelOutput)
+            val decision = CorrectionGuard.choose(correctionInput, modelOutput)
             val finalText = decision.text
             relevant.filter { item -> finalText.contains(item.term) }
                 .map { it.term }
@@ -211,6 +252,11 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     correctionAccepted = decision.accepted,
                     correctionDistance = decision.normalizedDistance,
                     correctionError = correctionError ?: decision.reason,
+                    correctionInputText = correctionInput,
+                    finalAsrId = finalAsrId,
+                    finalAsrLatencyMs = finalAsrLatencyMs,
+                    finalAsrRtf = finalAsrRtf,
+                    finalAsrError = finalAsrError,
                 ),
                 enabled = settings.keepSessionTraces,
             )
@@ -245,12 +291,11 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     return@execute
                 }
 
-                if (correctionError != null) {
-                    overlay.showFinalizing(finalText, "補正を使えず、認識結果を入力しました")
-                } else if (!decision.accepted) {
-                    overlay.showFinalizing(finalText, "語調保護のため過大な補正を破棄しました")
-                } else {
-                    overlay.showFinalizing(finalText, "入力しました")
+                when {
+                    finalAsrError != null -> overlay.showFinalizing(finalText, "最終ASRを使えず、live認識結果で入力しました")
+                    correctionError != null -> overlay.showFinalizing(finalText, "補正を使えず、認識結果を入力しました")
+                    !decision.accepted -> overlay.showFinalizing(finalText, "語調保護のため過大な補正を破棄しました")
+                    else -> overlay.showFinalizing(finalText, "入力しました")
                 }
                 returnToIdleAfter(550L)
             }

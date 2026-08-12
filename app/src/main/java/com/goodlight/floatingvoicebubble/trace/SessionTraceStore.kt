@@ -13,6 +13,11 @@ data class FinalizationTrace(
     val correctionAccepted: Boolean,
     val correctionDistance: Double,
     val correctionError: String? = null,
+    val correctionInputText: String = outcome.rawTranscript,
+    val finalAsrId: String = "live-result",
+    val finalAsrLatencyMs: Long? = null,
+    val finalAsrRtf: Double? = null,
+    val finalAsrError: String? = null,
     val finishedAtMs: Long = System.currentTimeMillis(),
 )
 
@@ -31,17 +36,24 @@ class SessionTraceStore(context: Context) {
             return
         }
         val json = JSONObject()
-            .put("schema", 1)
+            .put("schema", 2)
             .put("sessionId", trace.outcome.sessionId)
-            .put("recognizer", trace.outcome.recognizerKind)
+            .put("liveRecognizer", trace.outcome.recognizerKind)
             .put("corrector", trace.correctorId)
             .put("startedAtMs", trace.outcome.startedAtMs)
             .put("recognitionFinishedAtMs", trace.outcome.recognitionFinishedAtMs)
             .put("finishedAtMs", trace.finishedAtMs)
             .put("recognitionLatencyMs", trace.outcome.recognitionFinishedAtMs - trace.outcome.startedAtMs)
             .put("totalLatencyMs", trace.finishedAtMs - trace.outcome.startedAtMs)
-            .put("rawTranscript", trace.outcome.rawTranscript)
-            .put("alternatives", JSONArray(trace.outcome.alternatives))
+            .put("liveRawTranscript", trace.outcome.rawTranscript)
+            .put("liveAlternatives", JSONArray(trace.outcome.alternatives))
+            .put("finalAsr", trace.finalAsrId)
+            .put("finalAsrText", trace.correctionInputText)
+            .put("finalAsrLatencyMs", trace.finalAsrLatencyMs ?: JSONObject.NULL)
+            .put("finalAsrRtf", trace.finalAsrRtf ?: JSONObject.NULL)
+            .put("finalAsrError", trace.finalAsrError ?: JSONObject.NULL)
+            .put("rawTranscript", trace.correctionInputText)
+            .put("alternatives", JSONArray(listOf(trace.correctionInputText) + trace.outcome.alternatives))
             .put("finalText", trace.finalText)
             .put("correctionAccepted", trace.correctionAccepted)
             .put("correctionDistance", trace.correctionDistance)
@@ -54,6 +66,12 @@ class SessionTraceStore(context: Context) {
         check(temp.renameTo(target)) { "session trace metadata could not be committed" }
         prune()
     }
+
+    fun recentSessionMetadata(limit: Int = 30): List<File> = audioDir
+        .listFiles { file -> file.extension == "json" }
+        ?.sortedByDescending(File::lastModified)
+        ?.take(limit.coerceAtLeast(0))
+        .orEmpty()
 
     private fun migrateLegacyDirectory() {
         val legacy = File(appContext.filesDir, "session-traces")
@@ -89,13 +107,12 @@ class SessionTraceStore(context: Context) {
     }
 
     private fun prune(maxSessions: Int = 30) {
-        val jsonFiles = audioDir.listFiles { file -> file.extension == "json" }
-            ?.sortedByDescending(File::lastModified)
-            .orEmpty()
+        val jsonFiles = recentSessionMetadata(Int.MAX_VALUE)
         jsonFiles.drop(maxSessions).forEach { json ->
             val id = json.nameWithoutExtension
             json.delete()
             File(audioDir, "$id.wav").delete()
+            File(audioDir, "$id.benchmark.json").delete()
         }
     }
 }

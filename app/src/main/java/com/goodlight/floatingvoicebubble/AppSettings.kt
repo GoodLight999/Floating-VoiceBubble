@@ -11,12 +11,14 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 enum class RecognitionMode { AUTO, SYSTEM, ON_DEVICE, SHERPA_STREAMING }
+enum class FinalAsrMode { LIVE_RESULT, REAZON_SPEECH }
 enum class CorrectionMode { AUTO, BYOK, GEMMA, NONE }
 enum class GemmaBackend { AUTO, GPU, CPU }
 enum class GemmaVariant { UNKNOWN, E2B, E4B }
 
 data class AppSettings(
     val recognitionMode: RecognitionMode = RecognitionMode.AUTO,
+    val finalAsrMode: FinalAsrMode = FinalAsrMode.LIVE_RESULT,
     val correctionMode: CorrectionMode = CorrectionMode.AUTO,
     val offlineMode: Boolean = false,
     val autoStop: Boolean = true,
@@ -26,6 +28,7 @@ data class AppSettings(
     val gemmaBackend: GemmaBackend = GemmaBackend.AUTO,
     val gemmaVariant: GemmaVariant = GemmaVariant.UNKNOWN,
     val streamingAsrModelId: String = "",
+    val finalAsrModelId: String = "",
     val keepSessionTraces: Boolean = true,
 )
 
@@ -35,6 +38,7 @@ class SettingsStore(context: Context) {
 
     fun load(): AppSettings = AppSettings(
         recognitionMode = enumValueOr(prefs.getString("recognition_mode", null), RecognitionMode.AUTO),
+        finalAsrMode = enumValueOr(prefs.getString("final_asr_mode", null), FinalAsrMode.LIVE_RESULT),
         correctionMode = enumValueOr(prefs.getString("correction_mode", null), CorrectionMode.AUTO),
         offlineMode = prefs.getBoolean("offline_mode", false),
         autoStop = prefs.getBoolean("auto_stop", true),
@@ -45,6 +49,7 @@ class SettingsStore(context: Context) {
         gemmaBackend = enumValueOr(prefs.getString("gemma_backend", null), GemmaBackend.AUTO),
         gemmaVariant = enumValueOr(prefs.getString("gemma_variant", null), GemmaVariant.UNKNOWN),
         streamingAsrModelId = prefs.getString("streaming_asr_model_id", "").orEmpty(),
+        finalAsrModelId = prefs.getString("final_asr_model_id", "").orEmpty(),
         keepSessionTraces = prefs.getBoolean("keep_session_traces", true),
     )
 
@@ -52,6 +57,7 @@ class SettingsStore(context: Context) {
         val value = transform(load())
         prefs.edit()
             .putString("recognition_mode", value.recognitionMode.name)
+            .putString("final_asr_mode", value.finalAsrMode.name)
             .putString("correction_mode", value.correctionMode.name)
             .putBoolean("offline_mode", value.offlineMode)
             .putBoolean("auto_stop", value.autoStop)
@@ -61,6 +67,7 @@ class SettingsStore(context: Context) {
             .putString("gemma_backend", value.gemmaBackend.name)
             .putString("gemma_variant", value.gemmaVariant.name)
             .putString("streaming_asr_model_id", value.streamingAsrModelId)
+            .putString("final_asr_model_id", value.finalAsrModelId)
             .putBoolean("keep_session_traces", value.keepSessionTraces)
             .apply()
         return value

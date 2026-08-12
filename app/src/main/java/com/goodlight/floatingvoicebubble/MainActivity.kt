@@ -50,10 +50,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService
+import com.goodlight.floatingvoicebubble.benchmark.AsrReplayBenchmarkRunner
 import com.goodlight.floatingvoicebubble.diagnostics.DiagnosticReport
 import com.goodlight.floatingvoicebubble.diagnostics.SelfDiagnostics
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
+import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.model.ModelImporter
 import java.io.File
 
@@ -92,6 +94,7 @@ class MainActivity : ComponentActivity() {
         var diagnosticReport by remember { mutableStateOf<DiagnosticReport?>(null) }
         var dictionaryCount by remember { mutableLongStateOf(PersonalDictionary(this).use { it.count() }) }
         var asrModels by remember { mutableStateOf(AsrModelStore(this).listInstalled()) }
+        var finalAsrModels by remember { mutableStateOf(FinalAsrModelStore(this).listInstalled()) }
         var asrImportChunkMs by remember { mutableStateOf(560) }
         var gemmaVariantDraft by remember {
             mutableStateOf(if (settings.gemmaVariant == GemmaVariant.UNKNOWN) GemmaVariant.E2B else settings.gemmaVariant)
@@ -143,6 +146,31 @@ class MainActivity : ComponentActivity() {
                     } }
             }.start()
         }
+        val finalAsrLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri ?: return@rememberLauncherForActivityResult
+            busy = true
+            message = "ReazonSpeech最終ASRモデルを検証・コピーしています…"
+            Thread {
+                val store = FinalAsrModelStore(this)
+                runCatching { store.importReazonSpeechTree(uri) }
+                    .onSuccess { model ->
+                        val updated = settingsStore.update {
+                            it.copy(finalAsrMode = FinalAsrMode.REAZON_SPEECH, finalAsrModelId = model.id)
+                        }
+                        val installed = store.listInstalled()
+                        runOnUiThread {
+                            settings = updated
+                            finalAsrModels = installed
+                            busy = false
+                            message = "ReazonSpeech最終ASRモデルを導入しました。"
+                        }
+                    }
+                    .onFailure { error -> runOnUiThread {
+                        busy = false
+                        message = error.message ?: "ReazonSpeechモデルを読み込めませんでした。"
+                    } }
+            }.start()
+        }
         val dictionaryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             uri ?: return@rememberLauncherForActivityResult
             busy = true
@@ -167,6 +195,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val selectedAsr = asrModels.firstOrNull { it.id == settings.streamingAsrModelId }
+        val selectedFinalAsr = finalAsrModels.firstOrNull { it.id == settings.finalAsrModelId }
 
         Column(
             modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
@@ -234,10 +263,7 @@ class MainActivity : ComponentActivity() {
                     onSelect = { asrImportChunkMs = it },
                 )
                 Text("560msは精度寄り、短いchunkは遅延寄りの候補です。最終採用値は同一音声ベンチマークで決めます。", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-                OutlinedButton(
-                    onClick = { asrModelLauncher.launch(null) },
-                    enabled = !busy,
-                ) { Text("展開済みNemotronモデルフォルダを読み込む") }
+                OutlinedButton(onClick = { asrModelLauncher.launch(null) }, enabled = !busy) { Text("展開済みNemotronモデルフォルダを読み込む") }
                 selectedAsr?.let { model ->
                     OutlinedButton(
                         onClick = {
@@ -250,6 +276,53 @@ class MainActivity : ComponentActivity() {
                         enabled = !busy,
                     ) { Text("選択モデルを削除") }
                 }
+            }
+
+            Section("最終ASR") {
+                Text("partial表示とは別の認識器を、同じ録音WAVへ適用できます。live経路の速度を維持したまま、確定文だけ精度重視へ差し替えるための層です。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                ChoiceRow(
+                    values = FinalAsrMode.entries,
+                    selected = settings.finalAsrMode,
+                    label = { if (it == FinalAsrMode.LIVE_RESULT) "live結果" else "ReazonSpeech" },
+                    onSelect = { value -> settings = settingsStore.update { it.copy(finalAsrMode = value) } },
+                )
+                Text(
+                    selectedFinalAsr?.let { "${it.family}  •  ${it.totalBytes / (1024 * 1024)} MiB" }
+                        ?: "ReazonSpeech最終ASRモデル未設定",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = { finalAsrLauncher.launch(null) }, enabled = !busy) { Text("展開済みReazonSpeechモデルを読み込む") }
+                selectedFinalAsr?.let {
+                    OutlinedButton(
+                        onClick = {
+                            if (FinalAsrModelStore(this@MainActivity).remove()) {
+                                finalAsrModels = FinalAsrModelStore(this@MainActivity).listInstalled()
+                                settings = settingsStore.update { it.copy(finalAsrMode = FinalAsrMode.LIVE_RESULT, finalAsrModelId = "") }
+                                message = "ReazonSpeechモデルを削除しました。"
+                            }
+                        },
+                        enabled = !busy,
+                    ) { Text("ReazonSpeechモデルを削除") }
+                    Button(
+                        onClick = {
+                            busy = true
+                            message = "保存済みWAVをReazonSpeechへ再投入しています…"
+                            Thread {
+                                runCatching { AsrReplayBenchmarkRunner(this@MainActivity).run(it, limit = 20) }
+                                    .onSuccess { summary -> runOnUiThread {
+                                        busy = false
+                                        message = "同一音声リプレイベンチ: ${summary.oneLine()}。精度判定ではなく、RTFとliveとの差分です。"
+                                    } }
+                                    .onFailure { error -> runOnUiThread {
+                                        busy = false
+                                        message = error.message ?: "リプレイベンチを完了できませんでした。"
+                                    } }
+                            }.start()
+                        },
+                        enabled = !busy,
+                    ) { Text("保存済みWAVでリプレイベンチ") }
+                }
+                Text("正解ラベルなしのlive↔候補差分は精度ではありません。勝者決定は同じWAVへ正解文字列を付けたCER/WERで行います。", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             }
 
             Section("最終補正") {
@@ -314,14 +387,14 @@ class MainActivity : ComponentActivity() {
             Section("診断 / ベンチマーク") {
                 SettingSwitch(
                     title = "セッショントレースを保存",
-                    detail = "同一音声でASRを比較できるよう、WAV・N-best・raw/final・レイテンシを最大30セッション端末内のno-backup領域へ残します。",
+                    detail = "同一音声でASRを比較できるよう、WAV・N-best・live/final ASR・raw/final・レイテンシを最大30セッション端末内のno-backup領域へ残します。",
                     checked = settings.keepSessionTraces,
                     onChecked = { checked -> settings = settingsStore.update { it.copy(keepSessionTraces = checked) } },
                 )
                 HorizontalDivider()
                 Text("全自動診断", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "1回で権限、Accessibility、Android認識、Sherpa JNI/モデル、AudioRecord、辞書DB、保存先、Gemma、BYOK実経路、オフライン遮断、補正ガードを検査します。設定済みBYOK/Gemmaには固定テスト文だけを使い、ユーザーの音声・辞書・API keyは診断レポートへ出しません。",
+                    "1回で権限、Accessibility、Android認識、Sherpa JNI/モデル、最終ASRモデル、AudioRecord、辞書DB、保存先、Gemma、BYOK実経路、オフライン遮断、補正ガードを検査します。設定済みBYOK/Gemmaには固定テスト文だけを使い、ユーザーの音声・辞書・API keyは診断レポートへ出しません。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
