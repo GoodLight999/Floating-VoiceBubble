@@ -108,6 +108,7 @@ Metrics: strict code-point CER, punctuation/symbol-stripped content CER, WER onl
 
 CI must stay green for:
 
+- pinned official-model URL reachability
 - lint
 - JVM tests
 - debug + release/R8 assembly
@@ -150,16 +151,17 @@ Typical device-only outputs:
 Before ending a development session:
 
 1. Ensure working branch/PR head contains all intended changes.
-2. Run the full GitHub Actions workflow and wait for verify + API33 + API36.
-3. Update PR body with the exact validated head/run/artifact.
-4. Update the validation block below.
-5. If requirements/architecture materially changed, append an implementation-status note to Notion without rewriting the authoritative requirements.
+2. Run the full GitHub Actions workflow and wait for model-catalog + verify + API33 + API36.
+3. Update PR #1 body with the exact validated head/run/artifact.
+4. Append a concise implementation-status note to Notion without rewriting the authoritative requirements.
+5. Stop adding software work when `docs/REQUIREMENTS_MATRIX.md` has no non-device gap; proceed with `docs/REAL_DEVICE_VALIDATION.md` instead.
 
-## Last validated state
+## Validation pointer
 
-This block is intentionally updated only after the final CI run of a development session.
+Do **not** pin a supposedly “current head” in this tracked file: editing the SHA here would create a new commit and immediately make that SHA stale. The durable validation snapshot is therefore:
 
-- Head: _pending final validation_
-- GitHub Actions: _pending final validation_
-- Debug APK artifact: _pending final validation_
-- Status: implementation work in progress; do not use this placeholder as a release claim.
+- **PR #1 body:** exact validated head, GitHub Actions run, APK artifact and digest.
+- **GitHub Actions for the current PR head:** source of truth for model-catalog / verify / API33 / API36 status.
+- **`docs/REQUIREMENTS_MATRIX.md`:** source of truth for the software-vs-device boundary.
+
+At a proper handoff closeout, the software-completable requirement rows are closed and the only remaining actions are those in `docs/REAL_DEVICE_VALIDATION.md`. If a later CI run is red, that red run overrides this readiness statement until fixed.
