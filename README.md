@@ -29,7 +29,7 @@ Minimum Android version is 13 (API 33). API 33 lets the app use an accessibility
 
 ## Build
 
-CI uses JDK 17, Gradle 9.5, AGP 9.3, and Android API 37.
+CI uses JDK 17, Gradle 9.5, AGP 9.3, and the stable Android API 36 SDK.
 
 ```bash
 gradle :app:lintDebug :app:testDebugUnitTest :app:assembleDebug
