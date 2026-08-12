@@ -53,6 +53,66 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
         }
     }
 
+    fun get(term: String): DictionaryTerm? {
+        val key = term.trim()
+        if (key.isEmpty()) return null
+        return readableDatabase.query(
+            "dictionary_terms",
+            arrayOf("term", "reading", "aliases", "weight", "use_count"),
+            "term = ?",
+            arrayOf(key),
+            null,
+            null,
+            null,
+            "1",
+        ).use(::readTerms).firstOrNull()
+    }
+
+    fun delete(term: String): Boolean {
+        val key = term.trim()
+        if (key.isEmpty()) return false
+        return writableDatabase.delete("dictionary_terms", "term = ?", arrayOf(key)) > 0
+    }
+
+    /** Search terms/readings/aliases without loading the unbounded dictionary into memory. */
+    fun search(query: String = "", limit: Int = 50, offset: Int = 0): List<DictionaryTerm> {
+        val boundedLimit = limit.coerceIn(1, 500)
+        val boundedOffset = offset.coerceAtLeast(0)
+        if (query.isBlank()) return topTerms(boundedLimit, boundedOffset)
+        val escaped = escapeLike(query.trim())
+        val pattern = "%$escaped%"
+        return readableDatabase.rawQuery(
+            """
+            SELECT DISTINCT t.term, t.reading, t.aliases, t.weight, t.use_count
+            FROM dictionary_terms t
+            LEFT JOIN dictionary_aliases a ON a.term_id = t.id
+            WHERE t.term LIKE ? ESCAPE '\\'
+               OR t.reading LIKE ? ESCAPE '\\'
+               OR a.alias LIKE ? ESCAPE '\\'
+            ORDER BY t.weight DESC, t.use_count DESC, t.updated_at DESC
+            LIMIT ? OFFSET ?
+            """.trimIndent(),
+            arrayOf(pattern, pattern, pattern, boundedLimit.toString(), boundedOffset.toString()),
+        ).use(::readTerms)
+    }
+
+    /** Portable TSV accepted by [importText]. Runtime use_count is intentionally not exported. */
+    fun exportTsv(): String = buildString {
+        append("term\treading\taliases\tweight\n")
+        var offset = 0
+        while (true) {
+            val batch = topTerms(EXPORT_BATCH, offset)
+            if (batch.isEmpty()) break
+            batch.forEach { entry ->
+                append(tsv(entry.term)).append('\t')
+                    .append(tsv(entry.reading)).append('\t')
+                    .append(tsv(entry.aliases.joinToString("|"))).append('\t')
+                    .append(entry.weight).append('\n')
+            }
+            offset += batch.size
+        }
+    }
+
     fun importText(text: String): DictionaryImportResult {
         var imported = 0
         var skipped = 0
@@ -181,15 +241,14 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
         }
     }
 
-    private fun topTerms(limit: Int): List<DictionaryTerm> = readableDatabase.query(
-        "dictionary_terms",
-        arrayOf("term", "reading", "aliases", "weight", "use_count"),
-        null,
-        null,
-        null,
-        null,
-        "weight DESC, use_count DESC, updated_at DESC",
-        limit.coerceAtLeast(1).toString(),
+    private fun topTerms(limit: Int, offset: Int = 0): List<DictionaryTerm> = readableDatabase.rawQuery(
+        """
+        SELECT term, reading, aliases, weight, use_count
+        FROM dictionary_terms
+        ORDER BY weight DESC, use_count DESC, updated_at DESC
+        LIMIT ? OFFSET ?
+        """.trimIndent(),
+        arrayOf(limit.coerceAtLeast(1).toString(), offset.coerceAtLeast(0).toString()),
     ).use(::readTerms)
 
     private fun readTerms(cursor: android.database.Cursor): List<DictionaryTerm> = buildList {
@@ -289,12 +348,24 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
             }
             i++
         }
+        require(!quoted) { "unterminated quoted field" }
         output += current.toString()
         return output
     }
 
+    private fun escapeLike(value: String): String = value
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+
+    private fun tsv(value: String): String = value
+        .replace('\t', ' ')
+        .replace('\r', ' ')
+        .replace('\n', ' ')
+
     companion object {
         private const val DB_NAME = "personal_dictionary.db"
         private const val DB_VERSION = 2
+        private const val EXPORT_BATCH = 500
     }
 }
