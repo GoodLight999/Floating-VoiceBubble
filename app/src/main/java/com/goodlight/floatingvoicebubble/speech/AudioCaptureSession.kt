@@ -39,7 +39,6 @@ class AudioCaptureSession(
 
     @Volatile
     private var audioRecord: AudioRecord? = null
-    private var pcmFile: File? = null
     private var wavFile: File? = null
 
     fun detachRecognizerAudioSource(): ParcelFileDescriptor =
@@ -55,7 +54,6 @@ class AudioCaptureSession(
         outputDir.mkdirs()
         val raw = File(outputDir, "$sessionId.pcm")
         val wav = File(outputDir, "$sessionId.wav")
-        pcmFile = raw
         wavFile = wav
 
         val queriedMinBuffer = AudioRecord.getMinBufferSize(
@@ -174,13 +172,10 @@ class AudioCaptureSession(
             runCatching { record.stop() }
             runCatching { record.release() }
             audioRecord = null
-            val wavResult = runCatching { wrapPcmAsWav(raw, wav) }
+            // WAV is diagnostic/final-ASR support data. Failure to persist it must not discard
+            // a transcript that the live recognizer may still be able to finalize.
+            runCatching { wrapPcmAsWav(raw, wav) }
             raw.delete()
-            if (failureMessage == null && wavResult.isFailure) {
-                val failure = wavResult.exceptionOrNull()
-                failureMessage = failure?.message?.takeIf(String::isNotBlank)
-                    ?: "Recorded WAV could not be finalized"
-            }
             failureMessage?.let(onCaptureFailure)
         }
     }
