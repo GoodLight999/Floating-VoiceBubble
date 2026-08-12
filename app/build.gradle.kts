@@ -14,6 +14,13 @@ android {
         versionCode = 1
         versionName = "0.1.0-dev"
 
+        // LiteRT-LM 0.14.0 provides the Android runtime used by Gemma on these two
+        // modern ABIs. Shipping sherpa-only 32-bit ABIs would advertise devices on
+        // which the app's required on-device correction path cannot run.
+        ndk {
+            abiFilters += setOf("arm64-v8a", "x86_64")
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
