@@ -3,6 +3,7 @@ package com.goodlight.floatingvoicebubble
 import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.goodlight.floatingvoicebubble.diagnostics.SelfDiagnostics
 import com.goodlight.floatingvoicebubble.dictionary.DictionaryTerm
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
@@ -37,12 +38,34 @@ class RuntimeSmokeTest {
     @Test
     fun keystoreBackedByokSecretRoundTrips() {
         val store = SettingsStore(context)
+        val previous = store.apiKey()
         val secret = "diagnostic-${System.nanoTime()}"
         store.setApiKey(secret)
         try {
             assertEquals(secret, SettingsStore(context).apiKey())
         } finally {
-            store.setApiKey("")
+            store.setApiKey(previous)
+        }
+    }
+
+    @Test
+    fun automaticDiagnosticsRunsAndRedactsSecrets() {
+        val store = SettingsStore(context)
+        val previous = store.apiKey()
+        val sentinel = "SUPER_SECRET_DIAGNOSTIC_${System.nanoTime()}"
+        store.setApiKey(sentinel)
+        try {
+            val report = SelfDiagnostics(context, store).run(includeExternalProbes = false)
+            val ids = report.items.map { it.id }.toSet()
+            assertTrue("offline-cloud-block" in ids)
+            assertTrue("correction-guard" in ids)
+            assertTrue("dictionary-db" in ids)
+            assertTrue("trace-storage" in ids)
+            val json = report.toRedactedJson()
+            assertFalse(json.contains(sentinel))
+            assertTrue(json.contains("offline-cloud-block"))
+        } finally {
+            store.setApiKey(previous)
         }
     }
 
@@ -59,7 +82,7 @@ class RuntimeSmokeTest {
     }
 
     @Test
-    fun traceStoreWritesRedactedSessionMetadataAndAudio() {
+    fun traceStoreWritesSessionMetadataAndAudio() {
         val store = SessionTraceStore(context)
         val id = "instrumented-${System.nanoTime()}"
         val wav = File(store.audioDir, "$id.wav")
