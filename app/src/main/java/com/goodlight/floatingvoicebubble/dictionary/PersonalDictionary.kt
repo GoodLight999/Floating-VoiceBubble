@@ -17,43 +17,40 @@ data class DictionaryTerm(
 data class DictionaryImportResult(val imported: Int, val skipped: Int)
 
 class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+    init {
+        setWriteAheadLoggingEnabled(true)
+    }
+
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
         db.setForeignKeyConstraintsEnabled(true)
-        db.enableWriteAheadLogging()
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL(
-            """
-            CREATE TABLE dictionary_terms (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                term TEXT NOT NULL UNIQUE,
-                reading TEXT NOT NULL DEFAULT '',
-                aliases TEXT NOT NULL DEFAULT '',
-                weight INTEGER NOT NULL DEFAULT 100,
-                use_count INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL
-            )
-            """.trimIndent()
-        )
-        db.execSQL("CREATE INDEX dictionary_rank ON dictionary_terms(weight DESC, use_count DESC, updated_at DESC)")
-        db.execSQL("CREATE INDEX dictionary_reading ON dictionary_terms(reading)")
+        createTermsTable(db)
+        createAliasTable(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            createAliasTable(db)
+            migratePackedAliases(db)
+        }
+    }
 
     fun count(): Long = DatabaseUtils.queryNumEntries(readableDatabase, "dictionary_terms")
 
     fun upsert(term: DictionaryTerm) {
-        val normalized = term.copy(term = term.term.trim(), reading = term.reading.trim())
+        val normalized = normalize(term)
         require(normalized.term.isNotEmpty())
-        writableDatabase.insertWithOnConflict(
-            "dictionary_terms",
-            null,
-            normalized.toValues(),
-            SQLiteDatabase.CONFLICT_REPLACE,
-        )
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            upsert(db, normalized)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun importText(text: String): DictionaryImportResult {
@@ -66,7 +63,7 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
                 val line = rawLine.trim()
                 if (line.isEmpty() || line.startsWith("#")) return@forEachIndexed
                 val columns = splitRecord(line)
-                if (index == 0 && columns.firstOrNull()?.lowercase() in setOf("term", "単語", "word")) {
+                if (index == 0 && columns.firstOrNull()?.trim()?.lowercase() in setOf("term", "単語", "word")) {
                     return@forEachIndexed
                 }
                 val term = columns.getOrNull(0)?.trim().orEmpty()
@@ -81,12 +78,7 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
                     ?.filter(String::isNotEmpty)
                     .orEmpty()
                 val weight = columns.getOrNull(3)?.trim()?.toIntOrNull()?.coerceIn(1, 10_000) ?: 100
-                db.insertWithOnConflict(
-                    "dictionary_terms",
-                    null,
-                    DictionaryTerm(term, reading, aliases, weight).toValues(),
-                    SQLiteDatabase.CONFLICT_REPLACE,
-                )
+                upsert(db, normalize(DictionaryTerm(term, reading, aliases, weight)))
                 imported++
             }
             db.setTransactionSuccessful()
@@ -96,39 +88,46 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
         return DictionaryImportResult(imported, skipped)
     }
 
-    fun topBiasTerms(limit: Int = 384): List<String> = readableDatabase.query(
-        "dictionary_terms",
-        arrayOf("term"),
-        null,
-        null,
-        null,
-        null,
-        "weight DESC, use_count DESC, updated_at DESC",
-        limit.coerceIn(1, 1_000).toString(),
-    ).use { cursor ->
-        buildList {
-            while (cursor.moveToNext()) add(cursor.getString(0))
+    /**
+     * Android's biasing extra is intentionally a bounded transport. The dictionary itself is not.
+     * Rank candidates locally, then spend the recognizer's finite bias budget on terms/readings/aliases
+     * that have the highest configured and observed usefulness.
+     */
+    fun topBiasTerms(limit: Int = 384): List<String> {
+        val source = topTerms((limit / 2).coerceAtLeast(96).coerceAtMost(1_000))
+        val output = LinkedHashSet<String>(limit)
+        for (entry in source) {
+            sequenceOf(entry.term, entry.reading)
+                .plus(entry.aliases.asSequence())
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .forEach {
+                    if (output.size < limit) output += it
+                }
+            if (output.size >= limit) break
         }
+        return output.toList()
     }
 
     fun relevantTerms(rawTranscript: String, limit: Int = 96): List<DictionaryTerm> {
         if (rawTranscript.isBlank()) return topTerms(limit)
         val matched = readableDatabase.rawQuery(
             """
-            SELECT term, reading, aliases, weight, use_count
-            FROM dictionary_terms
-            WHERE instr(?, term) > 0
-               OR (reading <> '' AND instr(?, reading) > 0)
-               OR (aliases <> '' AND instr(?, term) > 0)
-            ORDER BY weight DESC, use_count DESC, updated_at DESC
+            SELECT DISTINCT t.term, t.reading, t.aliases, t.weight, t.use_count
+            FROM dictionary_terms t
+            LEFT JOIN dictionary_aliases a ON a.term_id = t.id
+            WHERE instr(?, t.term) > 0
+               OR (t.reading <> '' AND instr(?, t.reading) > 0)
+               OR (a.alias IS NOT NULL AND instr(?, a.alias) > 0)
+            ORDER BY t.weight DESC, t.use_count DESC, t.updated_at DESC
             LIMIT ?
             """.trimIndent(),
-            arrayOf(rawTranscript, rawTranscript, rawTranscript, limit.toString()),
+            arrayOf(rawTranscript, rawTranscript, rawTranscript, limit.coerceAtLeast(1).toString()),
         ).use(::readTerms)
 
         if (matched.size >= limit) return matched
         val seen = matched.mapTo(HashSet()) { it.term }
-        val highPriority = topTerms(limit - matched.size).filterNot { it.term in seen }
+        val highPriority = topTerms(limit).filterNot { it.term in seen }
         return (matched + highPriority).take(limit)
     }
 
@@ -146,6 +145,39 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
+        }
+    }
+
+    private fun upsert(db: SQLiteDatabase, term: DictionaryTerm) {
+        val aliasesPacked = term.aliases.joinToString("|")
+        db.execSQL(
+            """
+            INSERT INTO dictionary_terms(term, reading, aliases, weight, use_count, updated_at)
+            VALUES(?, ?, ?, ?, 0, ?)
+            ON CONFLICT(term) DO UPDATE SET
+                reading = excluded.reading,
+                aliases = excluded.aliases,
+                weight = excluded.weight,
+                updated_at = excluded.updated_at
+            """.trimIndent(),
+            arrayOf(term.term, term.reading, aliasesPacked, term.weight, System.currentTimeMillis()),
+        )
+        val id = DatabaseUtils.longForQuery(
+            db,
+            "SELECT id FROM dictionary_terms WHERE term = ?",
+            arrayOf(term.term),
+        )
+        db.delete("dictionary_aliases", "term_id = ?", arrayOf(id.toString()))
+        term.aliases.distinct().forEach { alias ->
+            db.insertWithOnConflict(
+                "dictionary_aliases",
+                null,
+                ContentValues().apply {
+                    put("term_id", id)
+                    put("alias", alias)
+                },
+                SQLiteDatabase.CONFLICT_IGNORE,
+            )
         }
     }
 
@@ -174,13 +206,65 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
         }
     }
 
-    private fun DictionaryTerm.toValues() = ContentValues().apply {
-        put("term", term)
-        put("reading", reading)
-        put("aliases", aliases.joinToString("|"))
-        put("weight", weight)
-        put("use_count", useCount)
-        put("updated_at", System.currentTimeMillis())
+    private fun normalize(term: DictionaryTerm): DictionaryTerm = term.copy(
+        term = term.term.trim(),
+        reading = term.reading.trim(),
+        aliases = term.aliases.map(String::trim)
+            .filter(String::isNotEmpty)
+            .filterNot { it == term.term.trim() }
+            .distinct(),
+        weight = term.weight.coerceIn(1, 10_000),
+    )
+
+    private fun createTermsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS dictionary_terms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term TEXT NOT NULL UNIQUE,
+                reading TEXT NOT NULL DEFAULT '',
+                aliases TEXT NOT NULL DEFAULT '',
+                weight INTEGER NOT NULL DEFAULT 100,
+                use_count INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS dictionary_rank ON dictionary_terms(weight DESC, use_count DESC, updated_at DESC)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS dictionary_reading ON dictionary_terms(reading)")
+    }
+
+    private fun createAliasTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS dictionary_aliases (
+                term_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                PRIMARY KEY(term_id, alias),
+                FOREIGN KEY(term_id) REFERENCES dictionary_terms(id) ON DELETE CASCADE
+            ) WITHOUT ROWID
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS dictionary_alias_lookup ON dictionary_aliases(alias)")
+    }
+
+    private fun migratePackedAliases(db: SQLiteDatabase) {
+        db.query("dictionary_terms", arrayOf("id", "aliases"), "aliases <> ''", null, null, null, null).use { cursor ->
+            while (cursor.moveToNext()) {
+                val termId = cursor.getLong(0)
+                cursor.getString(1).split('|').map(String::trim).filter(String::isNotEmpty).distinct().forEach { alias ->
+                    db.insertWithOnConflict(
+                        "dictionary_aliases",
+                        null,
+                        ContentValues().apply {
+                            put("term_id", termId)
+                            put("alias", alias)
+                        },
+                        SQLiteDatabase.CONFLICT_IGNORE,
+                    )
+                }
+            }
+        }
     }
 
     private fun splitRecord(line: String): List<String> {
@@ -211,6 +295,6 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
 
     companion object {
         private const val DB_NAME = "personal_dictionary.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
     }
 }
