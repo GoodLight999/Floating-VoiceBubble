@@ -7,8 +7,17 @@ import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import java.io.File
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
+
+data class StreamingReplayDecode(
+    val text: String,
+    val elapsedMs: Long,
+    val audioDurationMs: Long,
+    val realTimeFactor: Double,
+    val engineId: String,
+)
 
 class SherpaStreamingEngine(
     private val model: StreamingAsrModel,
@@ -105,14 +114,7 @@ class SherpaStreamingEngine(
         }
     }
 
-    private fun drain(recognizer: OnlineRecognizer, stream: OnlineStream) {
-        var steps = 0
-        while (recognizer.isReady(stream)) {
-            recognizer.decode(stream)
-            steps += 1
-            check(steps <= MAX_DECODE_STEPS_PER_PACKET) { "Sherpa decoder did not quiesce" }
-        }
-    }
+    private fun drain(recognizer: OnlineRecognizer, stream: OnlineStream) = drainRecognizer(recognizer, stream)
 
     private fun fail(message: String) {
         if (!terminal.compareAndSet(false, true)) return
@@ -159,9 +161,55 @@ class SherpaStreamingEngine(
     companion object {
         private const val MAX_QUEUED_PACKETS = 256
         private const val MAX_DECODE_STEPS_PER_PACKET = 10_000
+        private const val REPLAY_FRAME_SAMPLES = 320 // 20 ms at 16 kHz; only replay pacing, not fake live output.
 
         fun preload(model: StreamingAsrModel) {
             SherpaRecognizerCache.acquire(model)
+        }
+
+        /**
+         * Replays a saved WAV through the exact online recognizer for fair same-audio model comparison.
+         * This is an offline benchmark operation; it is never presented as a live-streaming UX measurement.
+         */
+        fun decodeReplay(model: StreamingAsrModel, wavFile: File): StreamingReplayDecode {
+            val audio = Pcm16WavReader.read(wavFile)
+            require(audio.sampleRate == 16_000) { "Nemotron replay requires 16 kHz WAV" }
+            val recognizer = SherpaRecognizerCache.acquire(model)
+            val stream = recognizer.createStream().also { it.setOption("language", "ja") }
+            val startedNs = System.nanoTime()
+            try {
+                var offset = 0
+                while (offset < audio.samples.size) {
+                    val end = minOf(offset + REPLAY_FRAME_SAMPLES, audio.samples.size)
+                    stream.acceptWaveform(audio.samples.copyOfRange(offset, end), audio.sampleRate)
+                    drainRecognizer(recognizer, stream)
+                    offset = end
+                }
+                stream.inputFinished()
+                drainRecognizer(recognizer, stream)
+                val text = recognizer.getResult(stream).text.trim()
+                require(text.isNotBlank()) { "Nemotron replay produced no text" }
+                val elapsedMs = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L)
+                val durationMs = audio.durationMs.coerceAtLeast(1L)
+                return StreamingReplayDecode(
+                    text = text,
+                    elapsedMs = elapsedMs,
+                    audioDurationMs = durationMs,
+                    realTimeFactor = elapsedMs.toDouble() / durationMs.toDouble(),
+                    engineId = "sherpa-online:${model.id}",
+                )
+            } finally {
+                runCatching { stream.release() }
+            }
+        }
+
+        private fun drainRecognizer(recognizer: OnlineRecognizer, stream: OnlineStream) {
+            var steps = 0
+            while (recognizer.isReady(stream)) {
+                recognizer.decode(stream)
+                steps += 1
+                check(steps <= MAX_DECODE_STEPS_PER_PACKET) { "Sherpa decoder did not quiesce" }
+            }
         }
     }
 }
