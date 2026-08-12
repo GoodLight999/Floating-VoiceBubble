@@ -14,11 +14,14 @@ import com.goodlight.floatingvoicebubble.BuildConfig
 import com.goodlight.floatingvoicebubble.CorrectionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService
+import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
+import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
 import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
 import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
 import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
 import com.goodlight.floatingvoicebubble.correction.OpenAiCompatibleCorrector
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
+import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -113,12 +116,12 @@ class SelfDiagnostics(
             }
         }
         results += probe("trace-storage") {
-            val dir = File(appContext.filesDir, "session-traces").apply { mkdirs() }
+            val dir = SessionTraceStore(appContext).audioDir.apply { mkdirs() }
             val file = File(dir, ".diagnostic-${System.nanoTime()}.tmp")
             file.writeText("ok", Charsets.UTF_8)
             check(file.readText(Charsets.UTF_8) == "ok") { "trace storage readback mismatch" }
             check(file.delete()) { "temporary diagnostic file could not be deleted" }
-            "read/write/delete OK"
+            "actual no-backup trace directory read/write/delete OK"
         }
 
         val modelFile = settings.gemmaModelPath.takeIf(String::isNotBlank)?.let(::File)
@@ -132,10 +135,15 @@ class SelfDiagnostics(
             )
         }
 
-        results += if (settings.offlineMode) {
-            pass("offline-cloud-block", "offline mode active; cloud probe suppressed")
-        } else {
-            pass("offline-cloud-block", "offline mode inactive; no silent cloud restriction expected")
+        results += probe("offline-cloud-block") {
+            val forcedOffline = settings.copy(
+                offlineMode = true,
+                correctionMode = CorrectionMode.BYOK,
+                byokModel = "diagnostic-cloud-model",
+            )
+            val backend = CorrectionBackendResolver.resolve(forcedOffline, gemmaAvailable = true)
+            check(backend == CorrectionBackend.GEMMA) { "forced offline mode selected $backend" }
+            "policy verified: explicit BYOK resolves to GEMMA when offline"
         }
 
         results += probeCorrectionGuard()
@@ -279,6 +287,6 @@ class SelfDiagnostics(
                 digest.update(buffer, 0, read)
             }
         }
-        return digest.digest().take(6).joinToString("") { "%02x".format(it) }
+        return digest.digest().take(6).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 }
