@@ -139,7 +139,7 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
             terms.distinct().forEach { term ->
                 db.execSQL(
                     "UPDATE dictionary_terms SET use_count = use_count + 1, updated_at = ? WHERE term = ?",
-                    arrayOf(System.currentTimeMillis(), term),
+                    arrayOf<Any>(System.currentTimeMillis(), term),
                 )
             }
             db.setTransactionSuccessful()
@@ -160,7 +160,7 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
                 weight = excluded.weight,
                 updated_at = excluded.updated_at
             """.trimIndent(),
-            arrayOf(term.term, term.reading, aliasesPacked, term.weight, System.currentTimeMillis()),
+            arrayOf<Any>(term.term, term.reading, aliasesPacked, term.weight, System.currentTimeMillis()),
         )
         val id = DatabaseUtils.longForQuery(
             db,
