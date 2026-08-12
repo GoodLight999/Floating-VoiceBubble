@@ -23,7 +23,15 @@ object GemmaModelVerifier {
 
     private val knownArtifacts = listOf(
         KnownArtifact(
-            id = "litert-community/gemma-4-E2B-it-litert-lm:gemma-4-E2B-it.litertlm",
+            id = "litert-community/gemma-4-E2B-it-litert-lm:gemma-4-E2B-it.litertlm@current",
+            variant = GemmaVariant.E2B,
+            bytes = 2_588_147_712L,
+            sha256 = "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c",
+        ),
+        // Keep the immediately preceding official E2B revision recognized so an already-downloaded
+        // model does not become "unknown" solely because the upstream package was regenerated.
+        KnownArtifact(
+            id = "litert-community/gemma-4-E2B-it-litert-lm:gemma-4-E2B-it.litertlm@previous",
             variant = GemmaVariant.E2B,
             bytes = 2_583_085_056L,
             sha256 = "ab7838cdfc8f77e54d8ca45eadceb20452d9f01e4bfade03e5dce27911b27e42",
