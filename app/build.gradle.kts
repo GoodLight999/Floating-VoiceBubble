@@ -57,7 +57,7 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.documentfile:documentfile:1.1.0")
 
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.13.1")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.14.0")
     implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.5")
 
     testImplementation("junit:junit:4.13.2")
