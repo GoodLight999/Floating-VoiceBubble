@@ -158,6 +158,7 @@ class SpeechRecognitionSession(
             autoEndpoint = autoEndpoint,
             mirrorToRecognizerPipe = backend != RecognitionBackend.SHERPA_STREAMING,
             onPcm16 = sherpaEngine?.let { engine -> { samples, count -> engine.acceptPcm16(samples, count) } },
+            onCaptureFailure = { message -> mainHandler.post { fail(message) } },
         ) {
             mainHandler.post { finishInput() }
         }
