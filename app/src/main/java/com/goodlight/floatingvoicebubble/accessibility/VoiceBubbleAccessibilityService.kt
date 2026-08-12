@@ -10,6 +10,8 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.inputmethod.EditorInfo
 import com.goodlight.floatingvoicebubble.CorrectionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
+import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
+import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
 import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
 import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
 import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
@@ -232,26 +234,19 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     }
 
     private fun selectCorrector(settings: com.goodlight.floatingvoicebubble.AppSettings): TextCorrector? {
-        if (settings.offlineMode) {
-            return GemmaCorrector(this, settings.gemmaModelPath, settings.gemmaBackend)
-        }
-        return when (settings.correctionMode) {
-            CorrectionMode.NONE -> null
-            CorrectionMode.BYOK -> OpenAiCompatibleCorrector(
+        val gemmaAvailable = File(settings.gemmaModelPath).isFile
+        return when (CorrectionBackendResolver.resolve(settings, gemmaAvailable)) {
+            CorrectionBackend.NONE -> null
+            CorrectionBackend.BYOK -> OpenAiCompatibleCorrector(
                 settings.byokEndpoint,
                 settings.byokModel,
                 settingsStore.apiKey(),
             )
-            CorrectionMode.GEMMA -> GemmaCorrector(this, settings.gemmaModelPath, settings.gemmaBackend)
-            CorrectionMode.AUTO -> when {
-                settings.byokModel.isNotBlank() -> OpenAiCompatibleCorrector(
-                    settings.byokEndpoint,
-                    settings.byokModel,
-                    settingsStore.apiKey(),
-                )
-                File(settings.gemmaModelPath).isFile -> GemmaCorrector(this, settings.gemmaModelPath, settings.gemmaBackend)
-                else -> null
-            }
+            CorrectionBackend.GEMMA -> GemmaCorrector(
+                this,
+                settings.gemmaModelPath,
+                settings.gemmaBackend,
+            )
         }
     }
 
