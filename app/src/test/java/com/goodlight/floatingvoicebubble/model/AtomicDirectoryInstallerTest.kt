@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble.model
 
 import java.nio.file.Files
+import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -38,6 +39,60 @@ class AtomicDirectoryInstallerTest {
 
             assertEquals("new", destination.resolve("marker.txt").readText())
             assertTrue(root.listFiles().orEmpty().none { it.name.contains(".backup-") })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun recoversBackupWhenDestinationIsMissing() {
+        val root = Files.createTempDirectory("voicebubble-recover").toFile()
+        try {
+            val backup = root.resolve(".model.backup-${UUID.randomUUID()}").apply { mkdirs() }
+            backup.resolve("marker.txt").writeText("last-known-good")
+
+            AtomicDirectoryInstaller.recoverBackups(root)
+
+            val destination = root.resolve("model")
+            assertTrue(destination.isDirectory)
+            assertEquals("last-known-good", destination.resolve("marker.txt").readText())
+            assertFalse(backup.exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun healthyDestinationWinsAndStaleBackupIsRemoved() {
+        val root = Files.createTempDirectory("voicebubble-clean-backup").toFile()
+        try {
+            val destination = root.resolve("model").apply { mkdirs() }
+            destination.resolve("marker.txt").writeText("current")
+            val backup = root.resolve(".model.backup-${UUID.randomUUID()}").apply { mkdirs() }
+            backup.resolve("marker.txt").writeText("old")
+
+            AtomicDirectoryInstaller.recoverBackups(root)
+
+            assertEquals("current", destination.resolve("marker.txt").readText())
+            assertFalse(backup.exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun unexpectedDestinationFileIsNeverDestroyedAutomatically() {
+        val root = Files.createTempDirectory("voicebubble-nondir").toFile()
+        try {
+            val destination = root.resolve("model").apply { writeText("unexpected") }
+            val backup = root.resolve(".model.backup-${UUID.randomUUID()}").apply { mkdirs() }
+            backup.resolve("marker.txt").writeText("old")
+
+            AtomicDirectoryInstaller.recoverBackups(root)
+
+            assertTrue(destination.isFile)
+            assertEquals("unexpected", destination.readText())
+            assertTrue(backup.isDirectory)
         } finally {
             root.deleteRecursively()
         }
