@@ -1,6 +1,8 @@
 package com.goodlight.floatingvoicebubble
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -48,6 +50,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService
+import com.goodlight.floatingvoicebubble.diagnostics.DiagnosticReport
+import com.goodlight.floatingvoicebubble.diagnostics.SelfDiagnostics
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.ModelImporter
 import java.io.File
@@ -84,6 +88,7 @@ class MainActivity : ComponentActivity() {
         var modelDraft by remember { mutableStateOf(settings.byokModel) }
         var message by remember { mutableStateOf<String?>(null) }
         var busy by remember { mutableStateOf(false) }
+        var diagnosticReport by remember { mutableStateOf<DiagnosticReport?>(null) }
         var dictionaryCount by remember { mutableLongStateOf(PersonalDictionary(this).use { it.count() }) }
 
         val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refreshRuntimeStatus() }
@@ -185,7 +190,13 @@ class MainActivity : ComponentActivity() {
             }
 
             Section("BYOK") {
-                OutlinedTextField(value = endpointDraft, onValueChange = { endpointDraft = it }, label = { Text("OpenAI互換 chat/completions URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = endpointDraft,
+                    onValueChange = { endpointDraft = it },
+                    label = { Text("API URL（OpenAI互換 / Anthropic / Gemini）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 OutlinedTextField(value = modelDraft, onValueChange = { modelDraft = it }, label = { Text("モデル名") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = apiKey, onValueChange = { apiKey = it }, label = { Text("API key（Android Keystoreで暗号化）") }, visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth())
                 Button(
@@ -222,6 +233,53 @@ class MainActivity : ComponentActivity() {
                     checked = settings.keepSessionTraces,
                     onChecked = { checked -> settings = settingsStore.update { it.copy(keepSessionTraces = checked) } },
                 )
+                HorizontalDivider()
+                Text("全自動診断", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "1回で権限、Accessibility、SpeechRecognizer、AudioRecord、辞書DB、保存先、Gemma、BYOK、オフライン遮断、補正ガードを検査します。設定済みBYOK/Gemmaには固定テスト文だけを使い、ユーザーの音声・辞書・API keyは診断レポートへ出しません。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(
+                    onClick = {
+                        busy = true
+                        diagnosticReport = null
+                        message = "全自動診断を実行しています…"
+                        Thread {
+                            runCatching { SelfDiagnostics(this).run(includeExternalProbes = true) }
+                                .onSuccess { report -> runOnUiThread {
+                                    diagnosticReport = report
+                                    busy = false
+                                    message = if (report.failed) "診断でFAILを検出しました。" else "全自動診断が完了しました。"
+                                } }
+                                .onFailure { error -> runOnUiThread {
+                                    busy = false
+                                    message = error.message ?: "全自動診断を完了できませんでした。"
+                                } }
+                        }.start()
+                    },
+                    enabled = !busy,
+                ) { Text("全自動診断を実行") }
+
+                diagnosticReport?.let { report ->
+                    Text(report.summary(), fontWeight = FontWeight.Bold)
+                    report.items.forEach { item ->
+                        Text(
+                            "${item.status.name.padEnd(4)}  ${item.id}  —  ${item.detail}",
+                            color = when (item.status.name) {
+                                "FAIL" -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    OutlinedButton(onClick = {
+                        getSystemService(ClipboardManager::class.java).setPrimaryClip(
+                            ClipData.newPlainText("Floating VoiceBubble diagnostic", report.toRedactedJson()),
+                        )
+                        message = "redacted診断JSONをクリップボードへコピーしました。"
+                    }) { Text("診断JSONをコピー") }
+                }
             }
 
             message?.let { Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
