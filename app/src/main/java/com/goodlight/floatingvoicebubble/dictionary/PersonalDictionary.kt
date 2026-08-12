@@ -78,21 +78,20 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
     fun search(query: String = "", limit: Int = 50, offset: Int = 0): List<DictionaryTerm> {
         val boundedLimit = limit.coerceIn(1, 500)
         val boundedOffset = offset.coerceAtLeast(0)
-        if (query.isBlank()) return topTerms(boundedLimit, boundedOffset)
-        val escaped = escapeLike(query.trim())
-        val pattern = "%$escaped%"
+        val needle = query.trim()
+        if (needle.isBlank()) return topTerms(boundedLimit, boundedOffset)
         return readableDatabase.rawQuery(
             """
             SELECT DISTINCT t.term, t.reading, t.aliases, t.weight, t.use_count
             FROM dictionary_terms t
             LEFT JOIN dictionary_aliases a ON a.term_id = t.id
-            WHERE t.term LIKE ? ESCAPE '\\'
-               OR t.reading LIKE ? ESCAPE '\\'
-               OR a.alias LIKE ? ESCAPE '\\'
+            WHERE instr(t.term, ?) > 0
+               OR instr(t.reading, ?) > 0
+               OR (a.alias IS NOT NULL AND instr(a.alias, ?) > 0)
             ORDER BY t.weight DESC, t.use_count DESC, t.updated_at DESC
             LIMIT ? OFFSET ?
             """.trimIndent(),
-            arrayOf(pattern, pattern, pattern, boundedLimit.toString(), boundedOffset.toString()),
+            arrayOf(needle, needle, needle, boundedLimit.toString(), boundedOffset.toString()),
         ).use(::readTerms)
     }
 
@@ -352,11 +351,6 @@ class PersonalDictionary(context: Context) : SQLiteOpenHelper(context, DB_NAME, 
         output += current.toString()
         return output
     }
-
-    private fun escapeLike(value: String): String = value
-        .replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
 
     private fun tsv(value: String): String = value
         .replace('\t', ' ')
