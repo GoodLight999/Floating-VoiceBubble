@@ -3,6 +3,8 @@ package com.goodlight.floatingvoicebubble.accessibility
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.InputMethod
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityEvent
 import com.goodlight.floatingvoicebubble.CorrectionMode
@@ -184,17 +186,33 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             mainExecutor.execute {
                 if (!isSameTarget(expectedTarget)) {
                     activeTarget = null
-                    overlay.showError("補正中に入力先が変わったため、誤った欄への挿入を止めました。認識結果: $finalText")
+                    copyToClipboard(finalText)
+                    overlay.showFinalizing(finalText, "入力先が変わったためクリップボードへ保存しました")
+                    returnToIdleAfter(CLIPBOARD_NOTICE_MS)
                     return@execute
                 }
+
                 val connection = voiceInputMethod?.currentInputConnection
                 if (connection == null) {
                     activeTarget = null
-                    overlay.showError("入力欄との接続が切れました。認識結果: $finalText")
+                    copyToClipboard(finalText)
+                    overlay.showFinalizing(finalText, "入力欄が消えたためクリップボードへ保存しました")
+                    returnToIdleAfter(CLIPBOARD_NOTICE_MS)
                     return@execute
                 }
-                connection.commitText(finalText, 1, null)
+
+                val committed = runCatching {
+                    connection.commitText(finalText, 1, null)
+                }.isSuccess
                 activeTarget = null
+
+                if (!committed) {
+                    copyToClipboard(finalText)
+                    overlay.showFinalizing(finalText, "入力できなかったためクリップボードへ保存しました")
+                    returnToIdleAfter(CLIPBOARD_NOTICE_MS)
+                    return@execute
+                }
+
                 if (correctionError != null) {
                     overlay.showFinalizing(finalText, "補正を使えず、認識結果を入力しました")
                 } else if (!decision.accepted) {
@@ -202,7 +220,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 } else {
                     overlay.showFinalizing(finalText, "入力しました")
                 }
-                rootViewHandler.postDelayed({ if (activeSession == null) overlay.showIdle() }, 550)
+                returnToIdleAfter(550L)
             }
         }
     }
@@ -231,6 +249,15 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun copyToClipboard(text: String) {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("Floating VoiceBubble", text))
+    }
+
+    private fun returnToIdleAfter(delayMs: Long) {
+        rootViewHandler.postDelayed({ if (activeSession == null) overlay.showIdle() }, delayMs)
+    }
+
     private fun stopSession(showIdle: Boolean) {
         activeSession?.close()
         activeSession = null
@@ -242,7 +269,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private fun transientError(message: String) {
         if (!::overlay.isInitialized) return
         overlay.showError(message)
-        rootViewHandler.postDelayed({ if (activeSession == null) overlay.showIdle() }, 2_800)
+        returnToIdleAfter(2_800L)
     }
 
     private fun isSameTarget(expected: EditorTarget?): Boolean {
@@ -254,4 +281,8 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private val rootViewHandler by lazy { android.os.Handler(mainLooper) }
 
     private data class EditorTarget(val packageName: String, val fieldId: Int)
+
+    companion object {
+        private const val CLIPBOARD_NOTICE_MS = 1_800L
+    }
 }
