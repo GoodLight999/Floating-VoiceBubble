@@ -62,7 +62,10 @@ class FloatingBubbleController(
         transcript.setTextIsSelectable(false)
         transcriptScroll.isVerticalScrollBarEnabled = false
         transcriptScroll.overScrollMode = View.OVER_SCROLL_NEVER
-        transcriptScroll.addView(transcript, ScrollView.LayoutParams(ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT))
+        transcriptScroll.addView(
+            transcript,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT),
+        )
 
         card.addView(status, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(22)))
         card.addView(
@@ -165,7 +168,11 @@ class FloatingBubbleController(
     private fun onMicTouch(view: View, event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                downRawX = event.rawX; downRawY = event.rawY; downX = params.x; downY = params.y; moved = false
+                downRawX = event.rawX
+                downRawY = event.rawY
+                downX = params.x
+                downY = params.y
+                moved = false
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
@@ -181,7 +188,11 @@ class FloatingBubbleController(
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                if (!moved) { view.performClick(); acknowledgeTap(); onToggle() }
+                if (!moved) {
+                    view.performClick()
+                    acknowledgeTap()
+                    onToggle()
+                }
                 return true
             }
             MotionEvent.ACTION_CANCEL -> return true
@@ -190,13 +201,19 @@ class FloatingBubbleController(
     }
 
     private fun baseParams(widthDp: Int, heightDp: Int) = WindowManager.LayoutParams(
-        dp(widthDp), dp(heightDp), WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        dp(widthDp),
+        dp(heightDp),
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
         PixelFormat.TRANSLUCENT,
     )
 
     private fun roundedDrawable(color: Int, radiusDp: Float) = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE; setColor(color); cornerRadius = dp(radiusDp).toFloat()
+        shape = GradientDrawable.RECTANGLE
+        setColor(color)
+        cornerRadius = dp(radiusDp).toFloat()
     }
 
     private fun dp(value: Int): Int = (value * service.resources.displayMetrics.density).roundToInt()
