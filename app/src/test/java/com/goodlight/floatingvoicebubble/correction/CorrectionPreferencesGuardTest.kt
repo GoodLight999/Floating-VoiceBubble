@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble.correction
 
 import com.goodlight.floatingvoicebubble.LineBreakMode
+import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -24,6 +25,58 @@ class CorrectionPreferencesGuardTest {
     fun rejectsFillerRemovalWhenDisabled() {
         val keepFillers = CorrectionPreferences(removeFillers = false)
         val decision = CorrectionGuard.choose("えー今日は晴れ", "今日は晴れ", keepFillers)
+        assertFalse(decision.accepted)
+    }
+
+    @Test
+    fun realWorldKikitoriAiMisrecognitionIsAcceptedInNormalMode() {
+        val raw = "今思ったけど取り合いがだいぶがっつりと聞き取りミスをしたのを直せるようにしたい"
+        val repaired = "今思ったけど聞き取りAIがだいぶがっつりと聞き取りミスをしたのを直せるようにしたい"
+        val decision = CorrectionGuard.choose(
+            raw,
+            repaired,
+            CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.NORMAL),
+        )
+        assertTrue(decision.accepted)
+        assertEquals(repaired, decision.text)
+    }
+
+    @Test
+    fun repairOffRejectsLexicalAsrCorrectionButStillAllowsPunctuation() {
+        val off = CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.OFF)
+        val raw = "取り合いが聞き取りミスをした"
+        val lexical = CorrectionGuard.choose(raw, "聞き取りAIが聞き取りミスをした", off)
+        assertFalse(lexical.accepted)
+        assertEquals("recognition-repair-off", lexical.reason)
+
+        val punctuation = CorrectionGuard.choose("今日は晴れ", "今日は晴れ。", off)
+        assertTrue(punctuation.accepted)
+    }
+
+    @Test
+    fun strongModeAcceptsMultiWordAcousticRepairThatNormalBudgetRejects() {
+        val raw = "昨日の開発会議で現人の設計と温泉式の海鮮方針を話した"
+        val repaired = "昨日の開発会議でエンジンの設計と音声認識の改善方針を話した"
+        val normal = CorrectionGuard.choose(
+            raw,
+            repaired,
+            CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.NORMAL),
+        )
+        val strong = CorrectionGuard.choose(
+            raw,
+            repaired,
+            CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.STRONG),
+        )
+        assertFalse(normal.accepted)
+        assertTrue(strong.accepted)
+    }
+
+    @Test
+    fun strongRepairStillRejectsRunawayContentExpansion() {
+        val strong = CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.STRONG)
+        val raw = "確認して"
+        val runaway = "確認して、その結果を関係者全員へ共有し、今後の計画と予算と担当者まで決定したうえで明日の会議資料も作成しておいてください"
+        val decision = CorrectionGuard.choose(raw, runaway, strong)
         assertFalse(decision.accepted)
     }
 
