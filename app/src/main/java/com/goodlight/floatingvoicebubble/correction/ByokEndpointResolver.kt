@@ -41,14 +41,19 @@ object ByokEndpointResolver {
         val path = uri.path.orEmpty().trimEnd('/')
         val generation = when {
             path.endsWith("/v1/messages") -> "$origin$path"
+            path.endsWith("/v1/models") -> "$origin${path.removeSuffix("/models")}/messages"
             path.endsWith("/v1") -> "$origin$path/messages"
             path.isBlank() || path == "/" -> "$origin/v1/messages"
             else -> "$origin$path"
         }
+        val models = when {
+            path.contains("/v1/") || path == "/v1" -> "$origin/v1/models"
+            else -> "$origin/v1/models"
+        }
         return ResolvedByokEndpoint(
             CloudCorrectorFactory.Protocol.ANTHROPIC,
             generation,
-            "$origin/v1/models",
+            models,
         )
     }
 
