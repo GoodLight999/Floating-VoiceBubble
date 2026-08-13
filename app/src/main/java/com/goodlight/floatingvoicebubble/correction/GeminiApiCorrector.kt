@@ -24,7 +24,7 @@ class GeminiApiCorrector(
                 "systemInstruction",
                 JSONObject().put(
                     "parts",
-                    JSONArray().put(JSONObject().put("text", CorrectionPrompt.SYSTEM.trim())),
+                    JSONArray().put(JSONObject().put("text", CorrectionPrompt.system(request))),
                 ),
             )
             .put(

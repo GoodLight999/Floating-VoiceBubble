@@ -6,6 +6,7 @@ import android.media.AudioFormat
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -43,6 +44,8 @@ class SpeechRecognitionSession(
     private val sessionId = UUID.randomUUID().toString()
     private val startedAtMs = System.currentTimeMillis()
     private val delivered = AtomicBoolean(false)
+    private val closed = AtomicBoolean(false)
+    private val accumulator = TranscriptAccumulator()
     private val backend: RecognitionBackend
     private val recognizer: SpeechRecognizer?
     private val sherpaEngine: SherpaStreamingEngine?
@@ -51,40 +54,81 @@ class SpeechRecognitionSession(
     private var latestAlternatives: List<String> = emptyList()
     private var latestPartial: String = ""
     private var inputClosed = false
+    private var androidSource: ParcelFileDescriptor? = null
+    private var recognizerListening = false
+    private var consecutiveRestartErrors = 0
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) = onState("聴いています")
+        override fun onReadyForSpeech(params: Bundle?) {
+            recognizerListening = true
+            consecutiveRestartErrors = 0
+            onState("聴いています")
+        }
+
         override fun onBeginningOfSpeech() = onState("聴いています")
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
+
         override fun onEndOfSpeech() {
-            if (!inputClosed) onState("認識を確定しています")
+            if (!inputClosed) onState("音声認識を継続しています")
         }
 
         override fun onError(error: Int) {
-            if (delivered.get()) return
-            val fallback = latestAlternatives.ifEmpty {
-                latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty()
+            recognizerListening = false
+            if (delivered.get() || closed.get()) return
+
+            val fallback = accumulator.finalCandidates(latestAlternatives, latestPartial)
+            if (inputClosed) {
+                if (fallback.isNotEmpty()) deliver(fallback) else fail(errorMessage(error))
+                return
             }
-            if (inputClosed && fallback.isNotEmpty()) {
-                deliver(fallback)
+
+            // Some Android/OEM recognizers impose their own speech-window boundary even when
+            // VoiceBubble still owns an open PCM source. Preserve the latest partial and reopen
+            // only the recognizer turn; never stop the caller-owned microphone session here.
+            if (isRecoverableSegmentationError(error) && consecutiveRestartErrors < MAX_ANDROID_RESTART_ERRORS) {
+                if (latestPartial.isNotBlank()) accumulator.commit(latestPartial)
+                latestPartial = ""
+                latestAlternatives = emptyList()
+                onPartial(accumulator.display())
+                consecutiveRestartErrors += 1
+                onState("続けて話せます")
+                scheduleAndroidRestart(ANDROID_RESTART_BASE_DELAY_MS * consecutiveRestartErrors)
             } else {
-                capture.stop()
                 fail(errorMessage(error))
             }
         }
 
         override fun onResults(results: Bundle) {
+            recognizerListening = false
+            if (delivered.get() || closed.get()) return
             val candidates = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.map(String::trim)
                 ?.filter(String::isNotEmpty)
                 .orEmpty()
             if (candidates.isNotEmpty()) latestAlternatives = candidates
-            if (latestAlternatives.isNotEmpty()) {
-                deliver(latestAlternatives)
-            } else {
-                fail("音声を文字として認識できませんでした。")
+
+            if (inputClosed) {
+                val finalCandidates = accumulator.finalCandidates(latestAlternatives, latestPartial)
+                if (finalCandidates.isNotEmpty()) deliver(finalCandidates)
+                else fail("音声を文字として認識できませんでした。")
+                return
             }
+
+            if (candidates.isEmpty()) {
+                scheduleAndroidRestart(ANDROID_RESTART_BASE_DELAY_MS)
+                return
+            }
+
+            // A provider final result is a segment, not the end of the VoiceBubble recording.
+            // This is the critical distinction that prevents long utterances from disappearing.
+            accumulator.commit(candidates.first())
+            latestPartial = ""
+            latestAlternatives = emptyList()
+            consecutiveRestartErrors = 0
+            onPartial(accumulator.display())
+            onState("続けて話せます")
+            scheduleAndroidRestart(ANDROID_RESTART_BASE_DELAY_MS)
         }
 
         override fun onPartialResults(partialResults: Bundle) {
@@ -95,7 +139,7 @@ class SpeechRecognitionSession(
             if (candidates.isEmpty()) return
             latestPartial = candidates.first()
             latestAlternatives = candidates
-            onPartial(latestPartial)
+            onPartial(accumulator.display(latestPartial))
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
@@ -121,8 +165,8 @@ class SpeechRecognitionSession(
             RecognitionBackend.SHERPA_STREAMING -> null
         }
         recognizerKind = when (backend) {
-            RecognitionBackend.ANDROID_ON_DEVICE -> "android-on-device"
-            RecognitionBackend.ANDROID_SYSTEM -> "android-system"
+            RecognitionBackend.ANDROID_ON_DEVICE -> "android-on-device-segmented"
+            RecognitionBackend.ANDROID_SYSTEM -> "android-system-segmented"
             RecognitionBackend.SHERPA_STREAMING -> "sherpa-nemotron35-${streamingModel!!.chunkMs}ms"
         }
 
@@ -130,10 +174,10 @@ class SpeechRecognitionSession(
             val model = requireNotNull(streamingModel)
             SherpaStreamingEngine(
                 model = model,
-                onState = { state -> mainHandler.post { if (!delivered.get()) onState(state) } },
+                onState = { state -> mainHandler.post { if (!delivered.get() && !closed.get()) onState(state) } },
                 onPartial = { partial ->
                     mainHandler.post {
-                        if (delivered.get()) return@post
+                        if (delivered.get() || closed.get()) return@post
                         latestPartial = partial
                         latestAlternatives = listOf(partial)
                         onPartial(partial)
@@ -141,6 +185,7 @@ class SpeechRecognitionSession(
                 },
                 onFinal = { finalText ->
                     mainHandler.post {
+                        if (closed.get()) return@post
                         latestPartial = finalText
                         latestAlternatives = listOf(finalText)
                         deliver(listOf(finalText))
@@ -166,6 +211,7 @@ class SpeechRecognitionSession(
     }
 
     fun start() {
+        check(!closed.get()) { "SpeechRecognitionSession is closed" }
         onState("準備しています")
         if (backend == RecognitionBackend.SHERPA_STREAMING) {
             requireNotNull(sherpaEngine).start()
@@ -173,7 +219,76 @@ class SpeechRecognitionSession(
             return
         }
 
-        val source = capture.detachRecognizerAudioSource()
+        val source = capture.detachRecognizerAudioSource().also { androidSource = it }
+        startAndroidListening(source)
+        capture.start(sessionId)
+    }
+
+    fun finishInput() {
+        if (inputClosed || delivered.get() || closed.get()) return
+        inputClosed = true
+        mainHandler.removeCallbacks(restartRunnable)
+        onState("認識を確定しています")
+        capture.stop()
+        if (backend == RecognitionBackend.SHERPA_STREAMING) {
+            sherpaEngine?.finish()
+        } else {
+            // If a provider ended a segment just before the user stopped, there may be no active
+            // recognizer turn to finalize. The committed prefix is already a valid complete result.
+            if (!recognizerListening) {
+                val fallback = accumulator.finalCandidates(latestAlternatives, latestPartial)
+                if (fallback.isNotEmpty()) {
+                    deliver(fallback)
+                    return
+                }
+            }
+            runCatching { recognizer?.stopListening() }
+        }
+
+        val timeout = if (backend == RecognitionBackend.SHERPA_STREAMING) {
+            SHERPA_FINAL_RESULT_TIMEOUT_MS
+        } else {
+            ANDROID_FINAL_RESULT_TIMEOUT_MS
+        }
+        mainHandler.postDelayed({
+            if (!delivered.get() && !closed.get()) {
+                val fallback = if (backend == RecognitionBackend.SHERPA_STREAMING) {
+                    latestAlternatives.ifEmpty { latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty() }
+                } else {
+                    accumulator.finalCandidates(latestAlternatives, latestPartial)
+                }
+                if (fallback.isNotEmpty()) deliver(fallback)
+                else fail("音声認識の確定がタイムアウトしました。")
+            }
+        }, timeout)
+    }
+
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        mainHandler.removeCallbacksAndMessages(null)
+        capture.close()
+        sherpaEngine?.close()
+        recognizer?.let { speechRecognizer ->
+            runCatching { speechRecognizer.cancel() }
+            runCatching { speechRecognizer.destroy() }
+        }
+        recognizerListening = false
+    }
+
+    private val restartRunnable = Runnable {
+        if (inputClosed || delivered.get() || closed.get()) return@Runnable
+        val source = androidSource ?: return@Runnable
+        startAndroidListening(source)
+    }
+
+    private fun scheduleAndroidRestart(delayMs: Long) {
+        if (inputClosed || delivered.get() || closed.get()) return
+        mainHandler.removeCallbacks(restartRunnable)
+        mainHandler.postDelayed(restartRunnable, delayMs)
+    }
+
+    private fun startAndroidListening(source: ParcelFileDescriptor) {
+        if (inputClosed || delivered.get() || closed.get()) return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.JAPAN.toLanguageTag())
@@ -190,74 +305,61 @@ class SpeechRecognitionSession(
                 )
             }
         }
-        requireNotNull(recognizer).startListening(intent)
-        capture.start(sessionId)
-    }
-
-    fun finishInput() {
-        if (inputClosed || delivered.get()) return
-        inputClosed = true
-        onState("認識を確定しています")
-        capture.stop()
-        if (backend == RecognitionBackend.SHERPA_STREAMING) {
-            sherpaEngine?.finish()
-        }
-        val timeout = if (backend == RecognitionBackend.SHERPA_STREAMING) {
-            SHERPA_FINAL_RESULT_TIMEOUT_MS
-        } else {
-            ANDROID_FINAL_RESULT_TIMEOUT_MS
-        }
-        mainHandler.postDelayed({
-            if (!delivered.get()) {
-                val fallback = latestAlternatives.ifEmpty {
-                    latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty()
-                }
-                if (fallback.isNotEmpty()) {
-                    deliver(fallback)
-                } else {
-                    fail("音声認識の確定がタイムアウトしました。")
-                }
-            }
-        }, timeout)
-    }
-
-    override fun close() {
-        mainHandler.removeCallbacksAndMessages(null)
-        capture.close()
-        sherpaEngine?.close()
-        recognizer?.let { speechRecognizer ->
-            runCatching { speechRecognizer.cancel() }
-            runCatching { speechRecognizer.destroy() }
+        runCatching {
+            recognizerListening = true
+            requireNotNull(recognizer).startListening(intent)
+        }.onFailure { failure ->
+            recognizerListening = false
+            fail(failure.message ?: "音声認識を再開できませんでした。")
         }
     }
 
     private fun deliver(candidates: List<String>) {
         if (!delivered.compareAndSet(false, true)) return
         mainHandler.removeCallbacksAndMessages(null)
+        recognizerListening = false
         capture.stop()
         val normalized = candidates.map(String::trim).filter(String::isNotEmpty).distinct()
         if (normalized.isEmpty()) {
             onFailure("音声を文字として認識できませんでした。")
             return
         }
-        onComplete(
-            RecognitionOutcome(
-                sessionId = sessionId,
-                rawTranscript = normalized.first(),
-                alternatives = normalized,
-                audioFile = capture.expectedWavFile(),
-                startedAtMs = startedAtMs,
-                recognitionFinishedAtMs = System.currentTimeMillis(),
-                recognizerKind = recognizerKind,
-            )
-        )
+        val recognitionFinishedAtMs = System.currentTimeMillis()
+        Thread(
+            {
+                val finalizedWav = capture.awaitFinalizedWav()
+                if (closed.get()) return@Thread
+                val outcome = RecognitionOutcome(
+                    sessionId = sessionId,
+                    rawTranscript = normalized.first(),
+                    alternatives = normalized,
+                    audioFile = finalizedWav,
+                    startedAtMs = startedAtMs,
+                    recognitionFinishedAtMs = recognitionFinishedAtMs,
+                    recognizerKind = recognizerKind,
+                )
+                mainHandler.post {
+                    if (!closed.get()) onComplete(outcome)
+                }
+            },
+            "VoiceBubble-WavFinalize",
+        ).start()
     }
 
     private fun fail(message: String) {
         if (!delivered.compareAndSet(false, true)) return
         mainHandler.removeCallbacksAndMessages(null)
+        recognizerListening = false
         capture.stop()
         onFailure(message)
+    }
+
+    private fun isRecoverableSegmentationError(code: Int): Boolean = when (code) {
+        SpeechRecognizer.ERROR_NO_MATCH,
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+        SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> true
+        else -> false
     }
 
     private fun errorMessage(code: Int): String = when (code) {
@@ -276,5 +378,7 @@ class SpeechRecognitionSession(
     companion object {
         private const val ANDROID_FINAL_RESULT_TIMEOUT_MS = 8_000L
         private const val SHERPA_FINAL_RESULT_TIMEOUT_MS = 20_000L
+        private const val ANDROID_RESTART_BASE_DELAY_MS = 120L
+        private const val MAX_ANDROID_RESTART_ERRORS = 4
     }
 }

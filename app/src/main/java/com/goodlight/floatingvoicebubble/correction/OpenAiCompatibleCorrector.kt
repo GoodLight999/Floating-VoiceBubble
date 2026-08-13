@@ -10,27 +10,15 @@ class OpenAiCompatibleCorrector(
     private val model: String,
     private val apiKey: String,
 ) : TextCorrector {
-    private val protocol = CloudCorrectorFactory.protocolFor(endpoint)
+    override val id: String = "byok:openai-compatible:$model"
 
-    override val id: String = when (protocol) {
-        CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE -> "byok:openai-compatible:$model"
-        CloudCorrectorFactory.Protocol.ANTHROPIC -> "byok:anthropic:$model"
-        CloudCorrectorFactory.Protocol.GEMINI -> "byok:gemini:$model"
-    }
-
-    override fun correct(request: CorrectionRequest): String = when (protocol) {
-        CloudCorrectorFactory.Protocol.ANTHROPIC -> AnthropicCorrector(endpoint, model, apiKey).correct(request)
-        CloudCorrectorFactory.Protocol.GEMINI -> GeminiApiCorrector(endpoint, model, apiKey).correct(request)
-        CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE -> correctOpenAiCompatible(request)
-    }
-
-    private fun correctOpenAiCompatible(request: CorrectionRequest): String {
+    override fun correct(request: CorrectionRequest): String {
         require(endpoint.startsWith("https://")) { "BYOK endpoint must use HTTPS" }
         require(model.isNotBlank()) { "BYOK model is not configured" }
         val body = JSONObject().put("model", model).put("temperature", 0).put(
             "messages",
             JSONArray()
-                .put(JSONObject().put("role", "system").put("content", CorrectionPrompt.SYSTEM.trim()))
+                .put(JSONObject().put("role", "system").put("content", CorrectionPrompt.system(request)))
                 .put(JSONObject().put("role", "user").put("content", CorrectionPrompt.user(request))),
         )
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
@@ -64,7 +52,7 @@ class OpenAiCompatibleCorrector(
                     }
                 }
                 else -> error("BYOK response content is unsupported")
-            }.trim()
+            }.trim().ifBlank { error("BYOK response has no text") }
         } finally {
             connection.disconnect()
         }

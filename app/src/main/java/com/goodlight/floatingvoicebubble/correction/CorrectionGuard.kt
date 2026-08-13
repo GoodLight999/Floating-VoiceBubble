@@ -6,7 +6,7 @@ import kotlin.math.max
 object CorrectionGuard {
     data class Decision(val text: String, val accepted: Boolean, val normalizedDistance: Double, val reason: String? = null)
 
-    fun choose(raw: String, modelOutput: String): Decision {
+    fun choose(raw: String, modelOutput: String, allowRegisterRewrite: Boolean = false): Decision {
         val cleaned = sanitize(modelOutput)
         if (raw.isBlank()) return Decision(cleaned, cleaned.isNotBlank(), 0.0)
         if (cleaned.isBlank()) return Decision(raw, false, 1.0, "empty-output")
@@ -15,8 +15,13 @@ object CorrectionGuard {
         val distance = levenshtein(rawPoints, newPoints)
         val normalized = distance.toDouble() / max(rawPoints.size, newPoints.size).coerceAtLeast(1)
         val lengthDelta = abs(newPoints.size - rawPoints.size).toDouble() / rawPoints.size.coerceAtLeast(1)
-        val threshold = when { rawPoints.size <= 8 -> 0.72; rawPoints.size <= 20 -> 0.58; else -> 0.46 }
-        return if (normalized <= threshold && lengthDelta <= 0.40) Decision(cleaned, true, normalized)
+        val threshold = if (allowRegisterRewrite) {
+            when { rawPoints.size <= 8 -> 0.90; rawPoints.size <= 20 -> 0.82; else -> 0.72 }
+        } else {
+            when { rawPoints.size <= 8 -> 0.72; rawPoints.size <= 20 -> 0.58; else -> 0.46 }
+        }
+        val maxLengthDelta = if (allowRegisterRewrite) 0.65 else 0.40
+        return if (normalized <= threshold && lengthDelta <= maxLengthDelta) Decision(cleaned, true, normalized)
         else Decision(raw, false, normalized, "edit-budget-exceeded")
     }
 

@@ -21,7 +21,7 @@ class AnthropicCorrector(
             .put("model", model)
             .put("max_tokens", 768)
             .put("temperature", 0)
-            .put("system", CorrectionPrompt.SYSTEM.trim())
+            .put("system", CorrectionPrompt.system(request))
             .put(
                 "messages",
                 JSONArray().put(

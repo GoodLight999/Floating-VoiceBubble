@@ -12,6 +12,8 @@ import java.io.FileOutputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class AudioCaptureSession(
@@ -30,6 +32,7 @@ class AudioCaptureSession(
     private val appContext = context.applicationContext
     private val running = AtomicBoolean(false)
     private val endpointSent = AtomicBoolean(false)
+    private val finalized = CountDownLatch(1)
     private val pipe: Array<ParcelFileDescriptor>? = if (mirrorToRecognizerPipe) {
         ParcelFileDescriptor.createPipe()
     } else {
@@ -63,6 +66,7 @@ class AudioCaptureSession(
         )
         if (queriedMinBuffer <= 0) {
             running.set(false)
+            finalized.countDown()
             error("AudioRecord does not support 16 kHz mono PCM16 (code=$queriedMinBuffer)")
         }
         val minBuffer = queriedMinBuffer.coerceAtLeast(sampleRate / 5 * 2)
@@ -80,12 +84,14 @@ class AudioCaptureSession(
                 .build()
         } catch (failure: Throwable) {
             running.set(false)
+            finalized.countDown()
             throw failure
         }
 
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             record.release()
             running.set(false)
+            finalized.countDown()
             error("AudioRecord initialization failed")
         }
         audioRecord = record
@@ -98,6 +104,7 @@ class AudioCaptureSession(
             audioRecord = null
             running.set(false)
             runCatching { record.release() }
+            finalized.countDown()
             throw failure
         }
 
@@ -114,6 +121,11 @@ class AudioCaptureSession(
     }
 
     fun expectedWavFile(): File? = wavFile
+
+    fun awaitFinalizedWav(timeoutMs: Long = WAV_FINALIZE_TIMEOUT_MS): File? {
+        finalized.await(timeoutMs, TimeUnit.MILLISECONDS)
+        return wavFile?.takeIf { it.isFile && it.length() > WAV_HEADER_BYTES }
+    }
 
     override fun close() {
         stop()
@@ -172,10 +184,11 @@ class AudioCaptureSession(
             runCatching { record.stop() }
             runCatching { record.release() }
             audioRecord = null
-            // WAV is diagnostic/final-ASR support data. Failure to persist it must not discard
-            // a transcript that the live recognizer may still be able to finalize.
+            // The final ASR consumes this exact WAV. Count down only after wrapping finishes so
+            // the finalizer can never race a half-written diagnostic/final-ASR file.
             runCatching { wrapPcmAsWav(raw, wav) }
             raw.delete()
+            finalized.countDown()
             failureMessage?.let(onCaptureFailure)
         }
     }
@@ -225,4 +238,9 @@ class AudioCaptureSession(
         .order(ByteOrder.LITTLE_ENDIAN)
         .putShort(value)
         .array()
+
+    companion object {
+        private const val WAV_HEADER_BYTES = 44L
+        private const val WAV_FINALIZE_TIMEOUT_MS = 3_000L
+    }
 }

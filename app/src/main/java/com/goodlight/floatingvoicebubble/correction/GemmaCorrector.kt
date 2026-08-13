@@ -16,7 +16,7 @@ class GemmaCorrector(context: Context, private val modelPath: String, private va
 
     override fun correct(request: CorrectionRequest): String = GemmaEnginePool.withEngine(appContext, modelPath, backendPreference) { engine ->
         val config = ConversationConfig(
-            systemInstruction = Contents.of(CorrectionPrompt.SYSTEM.trim()),
+            systemInstruction = Contents.of(CorrectionPrompt.system(request)),
             samplerConfig = SamplerConfig(topK = 1, topP = 1.0, temperature = 0.0),
         )
         engine.createConversation(config).use { conversation ->
