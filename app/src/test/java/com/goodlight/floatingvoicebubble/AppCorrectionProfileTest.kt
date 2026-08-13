@@ -88,6 +88,50 @@ class AppCorrectionProfileTest {
     }
 
     @Test
+    fun everyProfileCombinationRoundTripsAndKeepsRegisterExclusive() {
+        var checked = 0
+        for (enabled in listOf(false, true)) {
+            for (commas in ProfileToggle.entries) {
+                for (periods in ProfileToggle.entries) {
+                    for (fillers in ProfileToggle.entries) {
+                        for (register in ProfileRegister.entries) {
+                            for (mode in ProfileCorrectionMode.entries) {
+                                val profile = AppCorrectionProfile(
+                                    packageName = "com.example.exhaustive",
+                                    enabled = enabled,
+                                    addCommas = commas,
+                                    addPeriods = periods,
+                                    removeFillers = fillers,
+                                    register = register,
+                                    correctionMode = mode,
+                                )
+                                val decoded = AppCorrectionProfileCodec.decode(
+                                    profile.packageName,
+                                    AppCorrectionProfileCodec.encode(profile),
+                                )
+                                assertEquals(profile, decoded)
+
+                                val effective = profile.applyTo(
+                                    global.copy(
+                                        correctionPolite = true,
+                                        correctionBusinessPolite = false,
+                                    ),
+                                )
+                                assertFalse(
+                                    "register must never resolve to polite and business simultaneously: $profile",
+                                    effective.correctionPolite && effective.correctionBusinessPolite,
+                                )
+                                checked += 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assertEquals(1080, checked)
+    }
+
+    @Test
     fun codecFallsBackPerFieldForFutureOrCorruptEnumValues() {
         val decoded = AppCorrectionProfileCodec.decode(
             "com.example.app",
