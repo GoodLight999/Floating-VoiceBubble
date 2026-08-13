@@ -1,687 +1,194 @@
 package com.goodlight.floatingvoicebubble.accessibility
 
 import android.Manifest
-import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.InputMethod
-import android.content.ClipData
-import android.content.ClipboardManager
+import android.accessibilityservice.*
+import android.content.*
 import android.content.pm.PackageManager
-import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityWindowInfo
+import android.view.accessibility.*
 import android.view.inputmethod.EditorInfo
-import com.goodlight.floatingvoicebubble.AppProfileStore
-import com.goodlight.floatingvoicebubble.AppSettings
-import com.goodlight.floatingvoicebubble.CorrectionMode
-import com.goodlight.floatingvoicebubble.FinalAsrMode
-import com.goodlight.floatingvoicebubble.RecognitionMode
-import com.goodlight.floatingvoicebubble.SettingsStore
-import com.goodlight.floatingvoicebubble.correction.ByokEndpointResolver
-import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
-import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
-import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
-import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
-import com.goodlight.floatingvoicebubble.correction.CorrectionPreferences
-import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
-import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
-import com.goodlight.floatingvoicebubble.correction.TextCorrector
+import com.goodlight.floatingvoicebubble.*
+import com.goodlight.floatingvoicebubble.correction.*
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
-import com.goodlight.floatingvoicebubble.model.AsrModelStore
-import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
+import com.goodlight.floatingvoicebubble.model.*
 import com.goodlight.floatingvoicebubble.overlay.FloatingBubbleController
-import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
-import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
-import com.goodlight.floatingvoicebubble.speech.SherpaStreamingEngine
-import com.goodlight.floatingvoicebubble.speech.SpeechRecognitionSession
-import com.goodlight.floatingvoicebubble.trace.FinalizationTrace
+import com.goodlight.floatingvoicebubble.speech.*
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import java.io.File
 import java.util.LinkedHashMap
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
+import java.util.concurrent.*
 
 class VoiceBubbleAccessibilityService : AccessibilityService() {
-    private lateinit var settingsStore: SettingsStore
-    private lateinit var appProfileStore: AppProfileStore
+    private lateinit var settings: SettingsStore
+    private lateinit var profiles: AppProfileStore
     private lateinit var dictionary: PersonalDictionary
-    private lateinit var traceStore: SessionTraceStore
-    private lateinit var asrModelStore: AsrModelStore
-    private lateinit var finalAsrModelStore: FinalAsrModelStore
+    private lateinit var traces: SessionTraceStore
+    private lateinit var asrModels: AsrModelStore
+    private lateinit var finalModels: FinalAsrModelStore
+    private lateinit var finalizer: FinalizationEngine
     private lateinit var overlay: FloatingBubbleController
+    private val worker=Executors.newSingleThreadExecutor{r->Thread(r,"VoiceBubble-Finalizer")}
+    private val inference=Executors.newCachedThreadPool{r->Thread(r,"VoiceBubble-Inference")}
+    private val warmup=Executors.newSingleThreadExecutor{r->Thread(r,"VoiceBubble-Warmup")}
+    private var input: TrackingInputMethod?=null
+    private var session: SpeechRecognitionSession?=null
+    private var target: Target?=null
+    private var latest=""
+    private var inputStarted=false
+    private var imeVisible=false
+    private var bubbleVisible=false
+    private var generation=0L
+    private var rawGeneration:Long?=null
+    private var nextJob=0L
+    private val pending=LinkedHashMap<Long,String>()
+    private val targets=LinkedHashMap<Long,Target?>()
+    private val h by lazy{android.os.Handler(mainLooper)}
 
-    // Delivery remains serial so utterances cannot be inserted out of order.
-    private val worker = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "VoiceBubble-Finalizer").apply { priority = Thread.NORM_PRIORITY - 1 }
-    }
-    // Potentially blocking model/native calls are isolated here and bounded with Future#get timeouts.
-    // A provider/native call that ignores interruption therefore cannot permanently block the serial finalizer.
-    private val inferenceWorker = Executors.newCachedThreadPool { runnable ->
-        Thread(runnable, "VoiceBubble-BoundedInference").apply { priority = Thread.NORM_PRIORITY - 1 }
-    }
-    private val warmupWorker = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "VoiceBubble-ASR-Warmup").apply { priority = Thread.NORM_PRIORITY - 1 }
-    }
-
-    private var voiceInputMethod: TrackingInputMethod? = null
-    private var activeSession: SpeechRecognitionSession? = null
-    private var activeTarget: EditorTarget? = null
-    private var latestRaw = ""
-    private var inputSessionAvailable = false
-    private var imeWindowVisible = false
-    private var bubbleAvailable = false
-    private var sessionGeneration = 0L
-    private var nextFinalizationId = 0L
-    private val pendingFinalizations = LinkedHashMap<Long, String>()
-
-    override fun onCreateInputMethod(): InputMethod = TrackingInputMethod(this) { available ->
-        rootViewHandler.post { onInputAvailabilityChanged(available) }
-    }.also { voiceInputMethod = it }
-
-    override fun onServiceConnected() {
+    override fun onCreateInputMethod():InputMethod=TrackingInputMethod(this){v->h.post{inputChanged(v)}}.also{input=it}
+    override fun onServiceConnected(){
         super.onServiceConnected()
-        settingsStore = SettingsStore(this)
-        appProfileStore = AppProfileStore(this)
-        dictionary = PersonalDictionary(this)
-        traceStore = SessionTraceStore(this)
-        asrModelStore = AsrModelStore(this)
-        finalAsrModelStore = FinalAsrModelStore(this)
-        overlay = FloatingBubbleController(
-            service = this,
-            onToggle = ::toggleRecording,
-            onCancel = ::cancelCurrentOperation,
-            onDismiss = ::dismissCurrentInput,
-        )
-        overlay.attach()
-        inputSessionAvailable = voiceInputMethod?.currentInputStarted == true
-        updateImeWindowVisibility(resetDismissal = true)
-
-        val settings = settingsStore.load()
-        asrModelStore.resolve(settings.streamingAsrModelId)?.let { model ->
-            warmupWorker.execute { runCatching { SherpaStreamingEngine.preload(model) } }
-        }
-        if (settings.finalAsrMode == FinalAsrMode.REAZON_SPEECH) {
-            finalAsrModelStore.resolve(settings.finalAsrModelId)?.let { model ->
-                warmupWorker.execute { runCatching { SherpaFinalAsrEngine.preload(model) } }
-            }
-        }
+        settings=SettingsStore(this); profiles=AppProfileStore(this); dictionary=PersonalDictionary(this)
+        traces=SessionTraceStore(this); asrModels=AsrModelStore(this); finalModels=FinalAsrModelStore(this)
+        finalizer=FinalizationEngine(this,settings,dictionary,traces,finalModels,inference)
+        overlay=FloatingBubbleController(this,::toggle,::commitRaw,::cancel,::dismiss)
+        overlay.attach(); inputStarted=input?.currentInputStarted==true; updateIme(true)
+        val s=settings.load()
+        asrModels.resolve(s.streamingAsrModelId)?.let{m->warmup.execute{runCatching{SherpaStreamingEngine.preload(m)}}}
+        if(s.finalAsrMode==FinalAsrMode.REAZON_SPEECH) finalModels.resolve(s.finalAsrModelId)?.let{m->warmup.execute{runCatching{SherpaFinalAsrEngine.preload(m)}}}
+    }
+    override fun onAccessibilityEvent(e:AccessibilityEvent?){when(e?.eventType){
+        AccessibilityEvent.TYPE_WINDOWS_CHANGED,AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+        AccessibilityEvent.TYPE_VIEW_FOCUSED->h.post{updateIme()}
+    }}
+    override fun onInterrupt()=cancel()
+    override fun onDestroy(){
+        session?.close(); pending.clear(); targets.clear()
+        if(::overlay.isInitialized)overlay.detach(); if(::dictionary.isInitialized)dictionary.close()
+        worker.shutdownNow(); inference.shutdownNow(); warmup.shutdownNow(); super.onDestroy()
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        when (event?.eventType) {
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_FOCUSED -> rootViewHandler.post { updateImeWindowVisibility() }
+    private fun inputChanged(v:Boolean){
+        inputStarted=v
+        if(!v){refresh();return}
+        updateIme(true); h.postDelayed({updateIme(true)},180)
+    }
+    private fun updateIme(reset:Boolean=false){
+        imeVisible=runCatching{windows.any{it.type==AccessibilityWindowInfo.TYPE_INPUT_METHOD}}.getOrDefault(false); refresh(reset)
+    }
+    private fun refresh(reset:Boolean=false){
+        val v=inputStarted&&imeVisible; val appeared=!bubbleVisible&&v; val hidden=bubbleVisible&&!v; bubbleVisible=v
+        if(::overlay.isInitialized)overlay.setInputAvailable(v,reset||appeared)
+        when{
+            hidden->session?.finishInput()
+            v&&session==null&&pending.isEmpty()->overlay.showIdle()
+            v&&session==null->overlay.showFinalizingStack(pending.values.toList())
         }
     }
-
-    override fun onInterrupt() {
-        cancelCurrentOperation()
+    private fun toggle(){
+        session?.let{overlay.showListening(latest,"発話を終了しています",pending.values.toList());it.finishInput();return}
+        start()
+    }
+    private fun start(){
+        if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){errorUi("マイク権限を許可してください。");return}
+        val i=input; val c=i?.currentInputConnection; val e=i?.currentInputEditorInfo
+        if(i==null||c==null||e==null||!i.currentInputStarted){errorUi("文字入力欄へカーソルを置いてください。");return}
+        val pkg=e.packageName?.toString().orEmpty(); profiles.recordInputApp(pkg)
+        val s=profiles.effectiveSettings(settings.load(),pkg); val model=asrModels.resolve(s.streamingAsrModelId)
+        if(s.offlineMode&&model==null){errorUi("完全オフラインにはストリーミングASRモデルが必要です。");return}
+        if(s.recognitionMode==RecognitionMode.SHERPA_STREAMING&&model==null){errorUi("Nemotronモデルを導入してください。");return}
+        val gemma=File(s.gemmaModelPath).isFile
+        if(s.correctionMode==CorrectionMode.GEMMA&&!gemma){errorUi("Gemma補正モデルを導入してください。");return}
+        if(CorrectionBackendResolver.resolve(s,gemma)==CorrectionBackend.BYOK){
+            if(s.byokModel.isBlank()){errorUi("補正モデルを選択してください。");return}
+            runCatching{ByokEndpointResolver.resolve(s.byokEndpoint)}.onFailure{errorUi(it.message?:"API URLが不正です。");return}
+        }
+        if(s.finalAsrMode==FinalAsrMode.REAZON_SPEECH&&finalModels.resolve(s.finalAsrModelId)==null){errorUi("ReazonSpeechモデルを導入してください。");return}
+        target=Target(i.generation,pkg,e.fieldId,e.fieldName); latest=""; overlay.showListening("","録音を開始しています",pending.values.toList())
+        val token=++generation
+        val created=runCatching{SpeechRecognitionSession(
+            context=this,mode=s.recognitionMode,offlineRequired=s.offlineMode,autoEndpoint=s.autoStop,
+            biasTerms=dictionary.topBiasTerms(),traceAudioDir=traces.audioDir,streamingModel=model,
+            onPartial={t->if(token==generation&&session!=null){latest=t;overlay.showListening(t,pending=pending.values.toList())}},
+            onState={st->if(token==generation&&session!=null)overlay.showListening(latest,st,pending.values.toList())},
+            onComplete={o->complete(token,o)},onFailure={m->failed(token,m)}
+        )}.getOrElse{errorUi(it.message?:"音声認識を初期化できませんでした。");return}
+        session=created
+        runCatching{created.start()}.onFailure{if(token==generation){created.close();session=null;target=null;errorUi(it.message?:"録音を開始できませんでした。")}}
+    }
+    private fun failed(token:Long,msg:String){
+        if(token!=generation)return
+        if(rawGeneration==token)rawGeneration=null
+        session?.close();session=null;target=null;latest="";errorUi(msg)
+    }
+    private fun complete(token:Long,o:RecognitionOutcome){
+        if(token!=generation)return
+        latest=o.rawTranscript;session?.close();session=null
+        val bypass=rawGeneration==token;if(bypass)rawGeneration=null
+        val t=target;target=null
+        val context=if(!bypass&&same(t))runCatching{input?.currentInputConnection?.getSurroundingText(700,300,0)?.text?.toString().orEmpty()}.getOrDefault("") else ""
+        val base=settings.load();val s=t?.packageName?.let{profiles.effectiveSettings(base,it)}?:base
+        val id=++nextJob;pending[id]=o.rawTranscript;targets[id]=t
+        overlay.showFinalizingStack(pending.values.toList(),if(bypass)"補正せず確定しています" else "整えています")
+        h.postDelayed({if(pending.containsKey(id))recover(id,t,o.rawTranscript,TimeoutException("確定処理が45秒を超えました"))},45000)
+        worker.execute{try{val r=finalizer.finalize(o,context,s,bypass);mainExecutor.execute{deliver(id,t,r)}}catch(x:Throwable){mainExecutor.execute{recover(id,t,o.rawTranscript,x)}}}
     }
 
-    override fun onDestroy() {
-        activeSession?.close()
-        activeSession = null
-        pendingFinalizations.clear()
-        if (::overlay.isInitialized) overlay.detach()
-        if (::dictionary.isInitialized) dictionary.close()
-        worker.shutdownNow()
-        inferenceWorker.shutdownNow()
-        warmupWorker.shutdownNow()
-        super.onDestroy()
+    private fun commitRaw(){
+        session?.let{rawGeneration=generation;overlay.showListening(latest,"補正せず確定しています",pending.values.toList());it.finishInput();return}
+        val e=pending.entries.firstOrNull()?:return;val t=targets.remove(e.key);if(pending.remove(e.key)==null)return
+        put(t,e.value,"補正なしで入力しました")
+        if(pending.isNotEmpty())overlay.showFinalizingStack(pending.values.toList())else idleAfter(650)
     }
-
-    private fun onInputAvailabilityChanged(available: Boolean) {
-        inputSessionAvailable = available
-        if (!available) {
-            refreshBubbleAvailability()
-            return
+    private fun deliver(id:Long,t:Target?,r:FinalizationResult){
+        if(pending.remove(id)==null)return;targets.remove(id)
+        if(!same(t)){clip(r.finalText);notice(r.finalText,"入力先が変わったためクリップボードへ保存しました",2400);return}
+        val c=input?.currentInputConnection
+        if(c==null){clip(r.finalText);notice(r.finalText,"入力欄が消えたためクリップボードへ保存しました",2400);return}
+        if(!runCatching{c.commitText(r.finalText,1,null)}.getOrDefault(false)){clip(r.finalText);notice(r.finalText,"直接入力できずクリップボードへ保存しました",2400);return}
+        val state=when{
+            r.correctionBypassed->"補正なしで入力しました"
+            r.correctionError!=null&&r.correctionChanged->"一部補正: ${short(r.correctionError)}"
+            r.correctionError!=null->"補正失敗: ${short(r.correctionError)} — 認識結果を入力しました"
+            !r.correctionAccepted->"安全ガードが変更を拒否しました: ${r.correctionDecisionReason?:"edit-budget"}"
+            r.correctionAttempted&&r.correctionChanged->"補正して入力しました"
+            r.correctionAttempted->"補正モデルは変更なしでした"
+            r.finalAsrError!=null->"最終認識を使えずリアルタイム認識で入力しました"
+            else->"入力しました"
         }
-        // OEM IMEs do not all publish the input window in the same frame as onStartInput.
-        // Probe now and shortly afterwards; window-change events keep it exact after that.
-        updateImeWindowVisibility(resetDismissal = true)
-        rootViewHandler.postDelayed({ updateImeWindowVisibility(resetDismissal = true) }, IME_WINDOW_RECHECK_MS)
+        val delay=if(r.correctionError!=null||!r.correctionAccepted)2400 else if(r.correctionAttempted&&!r.correctionChanged)1800 else 650
+        notice(r.finalText,state,delay)
     }
-
-    private fun updateImeWindowVisibility(resetDismissal: Boolean = false) {
-        imeWindowVisible = runCatching {
-            windows.any { window -> window.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
-        }.getOrDefault(false)
-        refreshBubbleAvailability(resetDismissal)
+    private fun put(t:Target?,text:String,state:String){
+        val ok=same(t)&&(input?.currentInputConnection?.let{runCatching{it.commitText(text,1,null)}.getOrDefault(false)}==true)
+        if(ok)notice(text,state,650)else{clip(text);notice(text,"$state（クリップボードへ保存）",2400)}
     }
-
-    private fun refreshBubbleAvailability(resetDismissal: Boolean = false) {
-        val available = inputSessionAvailable && imeWindowVisible
-        val becameVisible = !bubbleAvailable && available
-        val becameHidden = bubbleAvailable && !available
-        bubbleAvailable = available
-        if (::overlay.isInitialized) {
-            overlay.setInputAvailable(available, resetDismissal = resetDismissal || becameVisible)
-        }
-        if (becameHidden) {
-            // Never leave the microphone running invisibly after the user closes the IME.
-            activeSession?.finishInput()
-        } else if (available && activeSession == null && pendingFinalizations.isEmpty() && ::overlay.isInitialized) {
-            overlay.showIdle()
-        } else if (available && activeSession == null && pendingFinalizations.isNotEmpty() && ::overlay.isInitialized) {
-            overlay.showFinalizingStack(pendingFinalizations.values.toList())
-        }
+    private fun recover(id:Long,t:Target?,text:String,x:Throwable){
+        if(pending.remove(id)==null)return;targets.remove(id)
+        val ok=same(t)&&(input?.currentInputConnection?.let{runCatching{it.commitText(text,1,null)}.getOrDefault(false)}==true)
+        val d=x.message?.takeIf(String::isNotBlank)?.let(::short)
+        if(ok)notice(text,d?.let{"補正処理エラー: $it — 認識結果を入力"}?:"補正処理を完了できず認識結果を入力",2400)
+        else{clip(text);notice(text,d?.let{"確定処理エラー: $it — クリップボードへ保存"}?:"確定処理エラーのためクリップボードへ保存",2400)}
     }
-
-    private fun toggleRecording() {
-        val session = activeSession
-        if (session != null) {
-            overlay.showListening(
-                latestRaw,
-                "発話を終了しています",
-                pendingFinalizations.values.toList(),
-            )
-            session.finishInput()
-        } else {
-            startSession()
-        }
+    private fun notice(text:String,state:String,delay:Long){
+        if(!bubbleVisible)return
+        when{session!=null->overlay.showListening(latest,pending=pending.values.toList());pending.isNotEmpty()->overlay.showFinalizingStack(pending.values.toList(),state);else->{overlay.showFinalizing(text,state);idleAfter(delay)}}
     }
-
-    private fun startSession() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            transientError("アプリを開き、マイク権限を許可してください。")
-            return
-        }
-
-        val inputMethod = voiceInputMethod
-        val connection = inputMethod?.currentInputConnection
-        val editor = inputMethod?.currentInputEditorInfo
-        if (inputMethod == null || connection == null || editor == null || !inputMethod.currentInputStarted) {
-            transientError("文字入力欄へカーソルを置いてから音声入力を開始してください。")
-            return
-        }
-
-        val targetPackageName = editor.packageName?.toString().orEmpty()
-        appProfileStore.recordInputApp(targetPackageName)
-        val settings = appProfileStore.effectiveSettings(settingsStore.load(), targetPackageName)
-        val streamingModel = asrModelStore.resolve(settings.streamingAsrModelId)
-        if (settings.offlineMode && streamingModel == null) {
-            transientError("完全オフラインには真のストリーミングASRモデルが必要です。設定からNemotronモデルを導入してください。")
-            return
-        }
-        if (settings.recognitionMode == RecognitionMode.SHERPA_STREAMING && streamingModel == null) {
-            transientError("自前ストリーミング認識を使うにはNemotronモデルが必要です。")
-            return
-        }
-
-        val gemmaAvailable = File(settings.gemmaModelPath).isFile
-        if (settings.correctionMode == CorrectionMode.GEMMA && !gemmaAvailable) {
-            transientError("Gemma補正を使うにはE2B/E4Bモデルを自動導入または読み込んでください。")
-            return
-        }
-        val correctionBackend = CorrectionBackendResolver.resolve(settings, gemmaAvailable)
-        if (correctionBackend == CorrectionBackend.BYOK) {
-            if (settings.byokModel.isBlank()) {
-                transientError("補正モデルが未設定です。補正モデル画面でAPIから一覧を取得して選んでください。")
-                return
-            }
-            runCatching { ByokEndpointResolver.resolve(settings.byokEndpoint) }.onFailure { failure ->
-                transientError(failure.message ?: "API URLが不正です。")
-                return
-            }
-        }
-        if (
-            settings.finalAsrMode == FinalAsrMode.REAZON_SPEECH &&
-            finalAsrModelStore.resolve(settings.finalAsrModelId) == null
-        ) {
-            transientError("ReazonSpeech最終ASRを使うにはモデルを導入してください。")
-            return
-        }
-
-        activeTarget = EditorTarget(
-            generation = inputMethod.generation,
-            packageName = targetPackageName,
-            fieldId = editor.fieldId,
-            fieldName = editor.fieldName,
-        )
-        latestRaw = ""
-        overlay.showListening("", "録音を開始しています", pendingFinalizations.values.toList())
-        val token = ++sessionGeneration
-
-        val session = runCatching {
-            SpeechRecognitionSession(
-                context = this,
-                mode = settings.recognitionMode,
-                offlineRequired = settings.offlineMode,
-                autoEndpoint = settings.autoStop,
-                biasTerms = dictionary.topBiasTerms(),
-                traceAudioDir = traceStore.audioDir,
-                streamingModel = streamingModel,
-                onPartial = { partial ->
-                    if (token == sessionGeneration && activeSession != null) {
-                        latestRaw = partial
-                        overlay.showListening(partial, pending = pendingFinalizations.values.toList())
-                    }
-                },
-                onState = { state ->
-                    if (token == sessionGeneration && activeSession != null) {
-                        overlay.showListening(latestRaw, state, pendingFinalizations.values.toList())
-                    }
-                },
-                onComplete = { outcome -> onRecognitionComplete(token, outcome) },
-                onFailure = { message -> onRecognitionFailure(token, message) },
-            )
-        }.getOrElse { failure ->
-            transientError(failure.message ?: "音声認識を初期化できませんでした。")
-            return
-        }
-
-        activeSession = session
-        runCatching { session.start() }.onFailure { failure ->
-            if (token == sessionGeneration) {
-                session.close()
-                activeSession = null
-                activeTarget = null
-                transientError(failure.message ?: "録音を開始できませんでした。")
-            }
-        }
+    private fun cancel(){
+        session?.let{++generation;rawGeneration=null;it.close();session=null;target=null;latest="";if(pending.isEmpty())overlay.showIdle()else overlay.showFinalizingStack(pending.values.toList(),"前の発話を処理しています");return}
+        pending.clear();targets.clear();latest="";if(::overlay.isInitialized)overlay.showIdle()
     }
-
-    private fun onRecognitionFailure(token: Long, message: String) {
-        if (token != sessionGeneration) return
-        activeSession?.close()
-        activeSession = null
-        activeTarget = null
-        latestRaw = ""
-        transientError(message)
+    private fun dismiss(){++generation;rawGeneration=null;session?.close();session=null;target=null;latest="";pending.clear();targets.clear()}
+    private fun clip(t:String)=getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Floating VoiceBubble",t))
+    private fun idleAfter(ms:Long)=h.postDelayed({when{session!=null||!bubbleVisible->Unit;pending.isNotEmpty()->overlay.showFinalizingStack(pending.values.toList(),"前の発話を処理しています");else->overlay.showIdle()}},ms)
+    private fun errorUi(m:String){if(::overlay.isInitialized){overlay.showError(m);idleAfter(2400)}}
+    private fun same(t:Target?):Boolean{
+        t?:return false;val i=input?:return false;if(!i.currentInputStarted||i.generation!=t.generation)return false;val e=i.currentInputEditorInfo?:return false
+        return t.packageName==e.packageName?.toString().orEmpty()&&t.fieldId==e.fieldId&&t.fieldName==e.fieldName
     }
-
-    private fun onRecognitionComplete(token: Long, outcome: RecognitionOutcome) {
-        if (token != sessionGeneration) return
-        latestRaw = outcome.rawTranscript
-        activeSession?.close()
-        activeSession = null
-
-        val expectedTarget = activeTarget
-        activeTarget = null
-        val surrounding = if (isSameTarget(expectedTarget)) {
-            runCatching {
-                voiceInputMethod?.currentInputConnection
-                    ?.getSurroundingText(700, 300, 0)
-                    ?.text
-                    ?.toString()
-                    .orEmpty()
-            }.getOrDefault("")
-        } else {
-            ""
-        }
-        val baseSettings = settingsStore.load()
-        val settings = expectedTarget?.packageName
-            ?.let { appProfileStore.effectiveSettings(baseSettings, it) }
-            ?: baseSettings
-        val jobId = ++nextFinalizationId
-        pendingFinalizations[jobId] = outcome.rawTranscript
-        overlay.showFinalizingStack(pendingFinalizations.values.toList())
-
-        // Last-resort UI watchdog. Even a native/provider implementation that ignores interruption
-        // cannot leave an utterance visibly stuck forever. The normal bounded calls below should fire first.
-        rootViewHandler.postDelayed({
-            if (pendingFinalizations.containsKey(jobId)) {
-                recoverFinalization(
-                    jobId,
-                    expectedTarget,
-                    outcome.rawTranscript,
-                    TimeoutException("確定処理が${FINALIZATION_WATCHDOG_MS / 1000}秒を超えました"),
-                )
-            }
-        }, FINALIZATION_WATCHDOG_MS)
-
-        worker.execute {
-            try {
-                finalizeAndDeliver(jobId, outcome, expectedTarget, surrounding, settings)
-            } catch (failure: Throwable) {
-                mainExecutor.execute {
-                    recoverFinalization(jobId, expectedTarget, outcome.rawTranscript, failure)
-                }
-            }
-        }
-    }
-
-    private fun finalizeAndDeliver(
-        jobId: Long,
-        outcome: RecognitionOutcome,
-        expectedTarget: EditorTarget?,
-        surrounding: String,
-        settings: AppSettings,
-    ) {
-        var finalAsrError: String? = null
-        var finalAsrId = "live-result"
-        var finalAsrLatencyMs: Long? = null
-        var finalAsrRtf: Double? = null
-
-        val correctionInput = when (settings.finalAsrMode) {
-            FinalAsrMode.LIVE_RESULT -> outcome.rawTranscript
-            FinalAsrMode.REAZON_SPEECH -> {
-                val model = finalAsrModelStore.resolve(settings.finalAsrModelId)
-                val audio = outcome.audioFile
-                if (model == null || audio == null) {
-                    finalAsrError = if (model == null) "ReazonSpeech model is missing" else "recorded WAV is missing"
-                    outcome.rawTranscript
-                } else {
-                    runCatching {
-                        runBounded(FINAL_ASR_TIMEOUT_MS, "最終ASR") {
-                            SherpaFinalAsrEngine.decode(model, audio)
-                        }
-                    }
-                        .onSuccess { decoded ->
-                            finalAsrId = decoded.engineId
-                            finalAsrLatencyMs = decoded.elapsedMs
-                            finalAsrRtf = decoded.realTimeFactor
-                        }
-                        .onFailure { failure -> finalAsrError = failure.message ?: failure.javaClass.simpleName }
-                        .getOrNull()?.text ?: outcome.rawTranscript
-                }
-            }
-        }
-
-        val alternatives = buildList {
-            add(correctionInput)
-            addAll(outcome.alternatives)
-        }.map(String::trim).filter(String::isNotEmpty).distinct()
-
-        val relevant = dictionary.relevantTerms(correctionInput)
-        val preferences = CorrectionPreferences(
-            addCommas = settings.correctionAddCommas,
-            addPeriods = settings.correctionAddPeriods,
-            removeFillers = settings.correctionRemoveFillers,
-            polite = settings.correctionPolite,
-            businessPolite = settings.correctionBusinessPolite,
-            lineBreakMode = settings.correctionLineBreakMode,
-            recognitionRepairMode = settings.recognitionRepairMode,
-        )
-        val request = CorrectionRequest(
-            rawTranscript = correctionInput,
-            alternatives = alternatives,
-            surroundingContext = surrounding,
-            dictionaryTerms = relevant,
-            preferences = preferences,
-        )
-
-        var correctionError: String? = null
-        val corrector = runCatching { selectCorrector(settings) }
-            .onFailure { failure -> correctionError = failure.message ?: failure.javaClass.simpleName }
-            .getOrNull()
-        val modelOutput = if (corrector == null) {
-            correctionInput
-        } else {
-            runCatching {
-                runBounded(CORRECTION_TIMEOUT_MS, "補正モデル") { corrector.correct(request) }
-            }
-                .onFailure { failure -> correctionError = failure.message ?: failure.javaClass.simpleName }
-                .getOrDefault(correctionInput)
-        }
-        val decision = CorrectionGuard.choose(correctionInput, modelOutput, preferences)
-        val finalText = decision.text
-
-        relevant.filter { item -> finalText.contains(item.term) }
-            .map { it.term }
-            .takeIf { it.isNotEmpty() }
-            ?.let(dictionary::markUsed)
-
-        traceStore.save(
-            FinalizationTrace(
-                outcome = outcome,
-                finalText = finalText,
-                correctorId = corrector?.id ?: "none",
-                correctionAccepted = decision.accepted,
-                correctionDistance = decision.normalizedDistance,
-                correctionError = correctionError ?: decision.reason,
-                correctionInputText = correctionInput,
-                finalAsrId = finalAsrId,
-                finalAsrLatencyMs = finalAsrLatencyMs,
-                finalAsrRtf = finalAsrRtf,
-                finalAsrError = finalAsrError,
-            ),
-            enabled = settings.keepSessionTraces,
-        )
-
-        mainExecutor.execute {
-            deliverFinalText(
-                jobId = jobId,
-                expectedTarget = expectedTarget,
-                finalText = finalText,
-                finalAsrError = finalAsrError,
-                correctionError = correctionError,
-                correctionAccepted = decision.accepted,
-                correctionDecisionReason = decision.reason,
-            )
-        }
-    }
-
-    private fun deliverFinalText(
-        jobId: Long,
-        expectedTarget: EditorTarget?,
-        finalText: String,
-        finalAsrError: String?,
-        correctionError: String?,
-        correctionAccepted: Boolean,
-        correctionDecisionReason: String?,
-    ) {
-        if (pendingFinalizations.remove(jobId) == null) return
-
-        if (!isSameTarget(expectedTarget)) {
-            copyToClipboard(finalText)
-            showFinalizationNotice(finalText, "入力先が変わったためクリップボードへ保存しました", CLIPBOARD_NOTICE_MS)
-            return
-        }
-
-        val currentConnection = voiceInputMethod?.currentInputConnection
-        if (currentConnection == null) {
-            copyToClipboard(finalText)
-            showFinalizationNotice(finalText, "入力欄が消えたためクリップボードへ保存しました", CLIPBOARD_NOTICE_MS)
-            return
-        }
-
-        val dispatchSucceeded = runCatching { currentConnection.commitText(finalText, 1, null) }.isSuccess
-        if (!dispatchSucceeded) {
-            copyToClipboard(finalText)
-            showFinalizationNotice(finalText, "直接入力できなかったためクリップボードへ保存しました", CLIPBOARD_NOTICE_MS)
-            return
-        }
-
-        val state = when {
-            finalAsrError != null -> "最終認識を使えず、リアルタイム認識結果で入力しました"
-            correctionError != null -> "補正失敗: ${compactError(correctionError)} — 認識結果を入力しました"
-            !correctionAccepted -> when (correctionDecisionReason) {
-                "comma-not-allowed" -> "読点OFFに反した変更を拒否し、認識結果を入力しました"
-                "period-not-allowed" -> "句点OFFに反した変更を拒否し、認識結果を入力しました"
-                "filler-removal-not-allowed" -> "フィラー削除OFFに反した変更を拒否し、認識結果を入力しました"
-                "linebreak-not-allowed" -> "改行OFFに反した変更を拒否し、認識結果を入力しました"
-                "recognition-repair-off" -> "聞き取りミス修復OFFのため語句変更を拒否し、認識結果を入力しました"
-                else -> "内容の変更が大きすぎたため、認識結果を保護して入力しました"
-            }
-            else -> "入力しました"
-        }
-        val notice = if (correctionError != null || !correctionAccepted) CLIPBOARD_NOTICE_MS else DIRECT_INSERT_NOTICE_MS
-        showFinalizationNotice(finalText, state, notice)
-    }
-
-    private fun recoverFinalization(
-        jobId: Long,
-        expectedTarget: EditorTarget?,
-        fallbackText: String,
-        failure: Throwable,
-    ) {
-        if (pendingFinalizations.remove(jobId) == null) return
-        val dispatchSucceeded = if (isSameTarget(expectedTarget)) {
-            voiceInputMethod?.currentInputConnection?.let { connection ->
-                runCatching { connection.commitText(fallbackText, 1, null) }.isSuccess
-            } ?: false
-        } else {
-            false
-        }
-
-        if (dispatchSucceeded) {
-            showFinalizationNotice(fallbackText, "補正処理を完了できなかったため、認識結果を入力しました", CLIPBOARD_NOTICE_MS)
-            return
-        }
-
-        copyToClipboard(fallbackText)
-        val detail = failure.message?.takeIf(String::isNotBlank)?.let(::compactError)
-        showFinalizationNotice(
-            fallbackText,
-            detail?.let { "確定処理エラー: $it — クリップボードへ保存しました" }
-                ?: "確定処理エラーのためクリップボードへ保存しました",
-            CLIPBOARD_NOTICE_MS,
-        )
-    }
-
-    private fun showFinalizationNotice(text: String, state: String, delayMs: Long) {
-        if (!bubbleAvailable) return
-        when {
-            activeSession != null -> overlay.showListening(
-                latestRaw,
-                pending = pendingFinalizations.values.toList(),
-            )
-            pendingFinalizations.isNotEmpty() -> overlay.showFinalizingStack(
-                pendingFinalizations.values.toList(),
-                state,
-            )
-            else -> {
-                overlay.showFinalizing(text, state)
-                returnToIdleAfter(delayMs)
-            }
-        }
-    }
-
-    private fun selectCorrector(settings: AppSettings): TextCorrector? {
-        val gemmaAvailable = File(settings.gemmaModelPath).isFile
-        return when (CorrectionBackendResolver.resolve(settings, gemmaAvailable)) {
-            CorrectionBackend.NONE -> null
-            CorrectionBackend.BYOK -> CloudCorrectorFactory.create(
-                settings.byokEndpoint,
-                settings.byokModel,
-                settingsStore.apiKey(),
-                settings.reasoningEffort,
-            )
-            CorrectionBackend.GEMMA -> GemmaCorrector(
-                this,
-                settings.gemmaModelPath,
-                settings.gemmaBackend,
-            )
-        }
-    }
-
-    private fun cancelCurrentOperation() {
-        val session = activeSession
-        if (session != null) {
-            ++sessionGeneration
-            session.close()
-            activeSession = null
-            activeTarget = null
-            latestRaw = ""
-            if (pendingFinalizations.isEmpty()) overlay.showIdle()
-            else overlay.showFinalizingStack(pendingFinalizations.values.toList(), "前の発話を処理しています")
-            return
-        }
-
-        if (pendingFinalizations.isNotEmpty()) pendingFinalizations.clear()
-        latestRaw = ""
-        if (::overlay.isInitialized) overlay.showIdle()
-    }
-
-    private fun dismissCurrentInput() {
-        ++sessionGeneration
-        activeSession?.close()
-        activeSession = null
-        activeTarget = null
-        latestRaw = ""
-        pendingFinalizations.clear()
-    }
-
-    private fun copyToClipboard(text: String) {
-        val clipboard = getSystemService(ClipboardManager::class.java)
-        clipboard.setPrimaryClip(ClipData.newPlainText("Floating VoiceBubble", text))
-    }
-
-    private fun returnToIdleAfter(delayMs: Long) {
-        rootViewHandler.postDelayed({
-            when {
-                activeSession != null || !bubbleAvailable -> Unit
-                pendingFinalizations.isNotEmpty() -> overlay.showFinalizingStack(
-                    pendingFinalizations.values.toList(),
-                    "前の発話を処理しています",
-                )
-                else -> overlay.showIdle()
-            }
-        }, delayMs)
-    }
-
-    private fun transientError(message: String) {
-        if (!::overlay.isInitialized) return
-        overlay.showError(message)
-        returnToIdleAfter(ERROR_NOTICE_MS)
-    }
-
-    private fun <T> runBounded(timeoutMs: Long, label: String, block: () -> T): T {
-        val future = inferenceWorker.submit<T> { block() }
-        return try {
-            future.get(timeoutMs, TimeUnit.MILLISECONDS)
-        } catch (timeout: TimeoutException) {
-            future.cancel(true)
-            throw TimeoutException("$label が${timeoutMs / 1000}秒以内に応答しませんでした")
-        } catch (execution: ExecutionException) {
-            throw (execution.cause ?: execution)
-        } catch (interrupted: InterruptedException) {
-            future.cancel(true)
-            Thread.currentThread().interrupt()
-            throw interrupted
-        }
-    }
-
-    private fun isSameTarget(expected: EditorTarget?): Boolean {
-        expected ?: return false
-        val inputMethod = voiceInputMethod ?: return false
-        if (!inputMethod.currentInputStarted || inputMethod.generation != expected.generation) return false
-        val editor = inputMethod.currentInputEditorInfo ?: return false
-        return expected.packageName == editor.packageName?.toString().orEmpty() &&
-            expected.fieldId == editor.fieldId &&
-            expected.fieldName == editor.fieldName
-    }
-
-    private fun compactError(value: String): String = value.replace(Regex("\\s+"), " ").trim().take(MAX_ERROR_DETAIL_CHARS)
-
-    private val rootViewHandler by lazy { android.os.Handler(mainLooper) }
-
-    private data class EditorTarget(
-        val generation: Long,
-        val packageName: String,
-        val fieldId: Int,
-        val fieldName: String?,
-    )
-
-    private class TrackingInputMethod(
-        service: AccessibilityService,
-        private val onInputAvailabilityChanged: (Boolean) -> Unit,
-    ) : InputMethod(service) {
-        var generation: Long = 0L
-            private set
-
-        override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
-            if (!restarting) generation += 1L
-            super.onStartInput(attribute, restarting)
-            onInputAvailabilityChanged(true)
-        }
-
-        override fun onFinishInput() {
-            super.onFinishInput()
-            onInputAvailabilityChanged(false)
-        }
-    }
-
-    companion object {
-        private const val DIRECT_INSERT_NOTICE_MS = 650L
-        private const val CLIPBOARD_NOTICE_MS = 2_200L
-        private const val ERROR_NOTICE_MS = 3_000L
-        private const val IME_WINDOW_RECHECK_MS = 180L
-        private const val CORRECTION_TIMEOUT_MS = 25_000L
-        private const val FINAL_ASR_TIMEOUT_MS = 30_000L
-        private const val FINALIZATION_WATCHDOG_MS = 45_000L
-        private const val MAX_ERROR_DETAIL_CHARS = 92
+    private fun short(s:String)=s.replace(Regex("\\s+")," ").trim().take(92)
+    private data class Target(val generation:Long,val packageName:String,val fieldId:Int,val fieldName:String?)
+    private class TrackingInputMethod(service:AccessibilityService,val changed:(Boolean)->Unit):InputMethod(service){
+        var generation=0L;private set
+        override fun onStartInput(a:EditorInfo,restarting:Boolean){if(!restarting)generation++;super.onStartInput(a,restarting);changed(true)}
+        override fun onFinishInput(){super.onFinishInput();changed(false)}
     }
 }
