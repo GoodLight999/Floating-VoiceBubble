@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble.correction
 
 import com.goodlight.floatingvoicebubble.LineBreakMode
+import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import com.goodlight.floatingvoicebubble.dictionary.DictionaryTerm
 
 data class CorrectionPreferences(
@@ -10,9 +11,11 @@ data class CorrectionPreferences(
     val polite: Boolean = false,
     val businessPolite: Boolean = false,
     val lineBreakMode: LineBreakMode = LineBreakMode.NONE,
+    val recognitionRepairMode: RecognitionRepairMode = RecognitionRepairMode.NORMAL,
 ) {
     val registerRewriteRequested: Boolean get() = polite || businessPolite
     val lineBreakRewriteRequested: Boolean get() = lineBreakMode != LineBreakMode.NONE
+    val strongRecognitionRepairRequested: Boolean get() = recognitionRepairMode == RecognitionRepairMode.STRONG
 }
 
 data class CorrectionRequest(
@@ -35,9 +38,11 @@ object CorrectionPrompt {
 絶対規則:
 - ユーザーが明示的に語調変換を指定していない限り、入力話者の語調、敬語レベル、タメ語、俗語、荒い表現、口癖、キャラクター性を保存する。
 - 指定されていない美化、婉曲化、要約、意訳、内容追加、論旨整理をしない。
-- 明白な音声認識誤り、明白な言い直しの整理、ユーザーが明示的に選択した整形だけを行う。
+- 音声認識誤りの復元では、RAWだけでなくN-best、周辺文脈、個人辞書、文中の自己参照を根拠として使う。
+- 音として近いが文脈上不自然な語句は、話者が実際に言った可能性の高い語へ戻す。複数文字・複数語にまたがる誤認識でも、根拠が強ければ一まとまりで修復する。
+- 例: 「取り合いがだいぶがっつりと聞き取りミスをした」かつ文脈が音声認識AIについてなら、「聞き取りAIがだいぶがっつりと聞き取りミスをした」のような復元を検討する。
 - 固有名詞は個人辞書とN-best候補を強く参照する。
-- 周辺文脈は同音異義語などの判定だけに使い、話者の発言へ内容を足さない。
+- 周辺文脈は誤認識の判定に使ってよいが、話者が発言していない新しい事実・主張・理由を足してはいけない。
 - 確信できない箇所は原文を保存する。
 - 出力は訂正後本文のみ。説明、引用符、Markdown、JSONを付けない。
 """
@@ -45,6 +50,19 @@ object CorrectionPrompt {
     fun system(request: CorrectionRequest): String = buildString {
         append(BASE.trim())
         appendLine()
+        appendLine()
+        appendLine("聞き取りミス修復:")
+        when (request.preferences.recognitionRepairMode) {
+            RecognitionRepairMode.OFF -> appendLine(
+                "- 語句そのものの音声認識誤りは直さない。選択された句読点・フィラー・語調・改行だけを処理する。",
+            )
+            RecognitionRepairMode.NORMAL -> appendLine(
+                "- 明白または文脈上かなり確度の高い音声認識誤りを直す。RAWが日本語として不自然で、N-best・周辺文脈・辞書・同一文中の語から意図語が強く推定できる場合は、文字列差が数文字あっても修復する。意味が変わる推測はしない。",
+            )
+            RecognitionRepairMode.STRONG -> appendLine(
+                "- 強めに復元する。複数語が連続して壊れていても、発音類似・N-best・周辺文脈・辞書・文意が同じ候補へ収束するなら大きく置換してよい。ただし話者の意図・事実・論旨を新しく作ってはいけない。候補が複数残るなら原文を優先する。",
+            )
+        }
         appendLine()
         appendLine("ユーザーが選択した整形:")
         appendLine(if (request.preferences.addCommas) "- 読点「、」を自然な位置へ追加してよい。" else "- 読点「、」を新たに追加しない。")
@@ -83,6 +101,6 @@ object CorrectionPrompt {
         }
         appendLine(); appendLine("[SURROUNDING_CONTEXT]")
         appendLine(request.surroundingContext.takeLast(1_500).ifBlank { "(none)" })
-        appendLine(); appendLine("RAWを上記の明示設定だけに従って必要最小限に訂正し、本文だけを返してください。")
+        appendLine(); appendLine("RAWを上記の明示設定だけに従って訂正し、本文だけを返してください。")
     }
 }
