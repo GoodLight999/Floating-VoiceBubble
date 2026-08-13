@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -47,6 +49,7 @@ import com.goodlight.floatingvoicebubble.model.ModelInstallProgress
 import com.goodlight.floatingvoicebubble.model.OfficialModelCatalog
 import com.goodlight.floatingvoicebubble.model.OfficialModelEntry
 import com.goodlight.floatingvoicebubble.model.OfficialModelInstaller
+import java.util.Locale
 
 class CorrectionSetupActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,6 +76,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     var endpoint by remember { mutableStateOf(settings.byokEndpoint) }
     var apiKey by remember { mutableStateOf(store.apiKey()) }
     var model by remember { mutableStateOf(settings.byokModel) }
+    var reasoningEffort by remember { mutableStateOf(settings.reasoningEffort) }
     var modelFilter by remember { mutableStateOf("") }
     var models by remember { mutableStateOf<List<ByokModelInfo>>(emptyList()) }
     var busyAction by remember { mutableStateOf<String?>(null) }
@@ -80,11 +84,44 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     var progress by remember { mutableStateOf<ModelInstallProgress?>(null) }
 
     fun saveByok(): AppSettings {
-        val updated = store.update { it.copy(byokEndpoint = endpoint.trim(), byokModel = model.trim()) }
+        val updated = store.update {
+            it.copy(
+                byokEndpoint = endpoint.trim(),
+                byokModel = model.trim(),
+                reasoningEffort = reasoningEffort,
+            )
+        }
         store.setApiKey(apiKey.trim())
         settings = updated
         return updated
     }
+
+    fun connectionRequest(): CorrectionRequest = CorrectionRequest(
+        rawTranscript = "えー今日はがんだむを見に行く",
+        alternatives = listOf("えー今日はガンダムを見に行く"),
+        surroundingContext = "",
+        dictionaryTerms = emptyList(),
+        preferences = CorrectionPreferences(
+            addCommas = settings.correctionAddCommas,
+            addPeriods = settings.correctionAddPeriods,
+            removeFillers = settings.correctionRemoveFillers,
+            polite = settings.correctionPolite,
+            businessPolite = settings.correctionBusinessPolite,
+            lineBreakMode = settings.correctionLineBreakMode,
+        ),
+    )
+
+    val resolvedPreview = runCatching { ByokEndpointResolver.resolve(endpoint) }.getOrNull()
+    val selectedModelInfo = models.firstOrNull { it.id == model }
+    val filteredModels = models.asSequence()
+        .filter { item ->
+            val query = modelFilter.trim()
+            query.isBlank() || item.id.contains(query, ignoreCase = true) ||
+                item.displayName.contains(query, ignoreCase = true) ||
+                item.description.contains(query, ignoreCase = true)
+        }
+        .take(MAX_VISIBLE_MODELS)
+        .toList()
 
     Column(
         modifier = Modifier
@@ -99,10 +136,10 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("補正エンジン", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("補正モデル", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text(
-                    "BYOKと端末内Gemmaを実際に接続確認します。",
+                    "APIを登録し、使えるモデルを一覧から選びます。モデルIDの手入力は通常不要です。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -120,8 +157,8 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                         Text(
                             when (mode) {
                                 CorrectionMode.AUTO -> "自動"
-                                CorrectionMode.BYOK -> "BYOK"
-                                CorrectionMode.GEMMA -> "Gemma"
+                                CorrectionMode.BYOK -> "クラウドAPI"
+                                CorrectionMode.GEMMA -> "端末内Gemma"
                                 CorrectionMode.NONE -> "補正なし"
                             },
                         )
@@ -131,146 +168,172 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         }
 
         HorizontalDivider()
-        Text("BYOK", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text("クラウドAPI", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
-            "OpenAI互換はAPIルート・/api・/v1・完全URLのいずれでも補完します。Anthropic / Geminiも公式APIルートから自動補完します。",
+            "OpenAI / OpenRouter / OpenAI互換 / Anthropic / Geminiに対応します。URLとAPIキーを入れたら、次の「モデルを取得」を押してください。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
         OutlinedTextField(
             value = endpoint,
-            onValueChange = { endpoint = it },
+            onValueChange = { endpoint = it; models = emptyList(); message = "" },
             label = { Text("API URL") },
+            supportingText = { Text("例: https://openrouter.ai  または providerのAPI URL") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        val resolvedPreview = runCatching { ByokEndpointResolver.resolve(endpoint) }.getOrNull()
-        resolvedPreview?.let { resolved ->
-            Text(
-                "生成: ${resolved.generationUrl}\nモデル一覧: ${resolved.modelsUrl}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
         OutlinedTextField(
             value = apiKey,
-            onValueChange = { apiKey = it },
-            label = { Text("API key") },
+            onValueChange = { apiKey = it; models = emptyList(); message = "" },
+            label = { Text("APIキー") },
+            supportingText = { Text("端末のAndroid Keystoreで暗号化して保存します") },
             visualTransformation = PasswordVisualTransformation(),
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+
+        resolvedPreview?.let { resolved ->
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("接続先の確認", style = MaterialTheme.typography.labelLarge)
+                    Text("生成: ${resolved.generationUrl}", style = MaterialTheme.typography.bodySmall)
+                    Text("モデル取得: ${resolved.modelsUrl}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        OutlinedButton(
+            onClick = {
+                busyAction = "models"
+                message = "モデル一覧を取得しています…"
+                Thread({
+                    runCatching { ByokModelDiscovery().list(endpoint, apiKey.trim()) }
+                        .onSuccess { fetched -> activity.runOnUiThread {
+                            models = fetched
+                            busyAction = null
+                            message = if (fetched.isEmpty()) {
+                                "接続はできましたが、選択可能なテキスト生成モデルが0件でした。"
+                            } else {
+                                "${fetched.size}件取得しました。下の検索欄から選んでください。"
+                            }
+                        } }
+                        .onFailure { failure -> activity.runOnUiThread {
+                            busyAction = null
+                            message = "モデル取得失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                        } }
+                }, "VoiceBubble-ModelDiscovery").start()
+            },
+            enabled = busyAction == null && endpoint.trim().startsWith("https://"),
+        ) { Text(if (busyAction == "models") "取得中…" else "APIからモデルを取得") }
+
+        if (models.isNotEmpty()) {
+            Text("モデルを選ぶ", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            OutlinedTextField(
+                value = modelFilter,
+                onValueChange = { modelFilter = it },
+                label = { Text("モデルを検索") },
+                supportingText = { Text("名前・ID・説明文から絞り込みます") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "${models.size}件中 ${filteredModels.size}件を表示" +
+                    if (models.size > MAX_VISIBLE_MODELS && modelFilter.isBlank()) "（検索すると絞れます）" else "",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                filteredModels.forEach { item ->
+                    ModelRow(item = item, selected = model == item.id) { model = item.id }
+                }
+            }
+        }
+
+        if (models.isEmpty()) {
+            OutlinedTextField(
+                value = model,
+                onValueChange = { model = it },
+                label = { Text("モデルID（一覧取得できないAPIだけ）") },
+                supportingText = { Text("通常は上のモデル一覧から選択してください") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else if (model.isNotBlank()) {
+            Text("選択中: $model", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
+        }
+
+        Text("推論の深さ", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+            "音声の整形は通常それほど深い推論を必要としません。遅い場合は「低」、難しい固有名詞や文脈判定を重視するなら上げます。「モデル既定」は余計なパラメータを送りません。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            ReasoningEffort.entries.forEach { effort ->
+                FilterChip(
+                    selected = reasoningEffort == effort,
+                    onClick = { reasoningEffort = effort },
+                    label = { Text(reasoningLabel(effort)) },
+                )
+            }
+        }
+        selectedModelInfo?.let { info ->
+            if (ByokEndpointResolver.isOpenRouter(endpoint) && info.supportedParameters.isNotEmpty()) {
+                Text(
+                    if (info.supportsReasoning) "このモデルはOpenRouter上でreasoning対応です。"
+                    else "このモデルのOpenRouter metadataにはreasoning対応がありません。推論深度は「モデル既定」を推奨します。",
+                    color = if (info.supportsReasoning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
                 onClick = {
-                    busyAction = "models"
-                    message = "APIからモデル一覧を取得しています…"
-                    Thread({
-                        runCatching { ByokModelDiscovery().list(endpoint, apiKey.trim()) }
-                            .onSuccess { fetched -> activity.runOnUiThread {
-                                models = fetched
-                                busyAction = null
-                                message = "${fetched.size}件のモデルを取得しました。"
-                            } }
-                            .onFailure { failure -> activity.runOnUiThread {
-                                busyAction = null
-                                message = "モデル一覧を取得できませんでした: ${failure.message ?: failure.javaClass.simpleName}"
-                            } }
-                    }, "VoiceBubble-ModelDiscovery").start()
-                },
-                enabled = busyAction == null && endpoint.trim().startsWith("https://"),
-            ) { Text("モデル一覧を取得") }
-            Button(
-                onClick = {
-                    val saved = saveByok()
                     busyAction = "test"
-                    message = "BYOKへ実リクエストを送っています…"
+                    message = "選択したモデルへテスト送信しています…"
                     Thread({
-                        val request = CorrectionRequest(
-                            rawTranscript = "えー今日はがんだむを見に行く",
-                            alternatives = listOf("えー今日はガンダムを見に行く"),
-                            surroundingContext = "",
-                            dictionaryTerms = emptyList(),
-                            preferences = CorrectionPreferences(
-                                addCommas = saved.correctionAddCommas,
-                                addPeriods = saved.correctionAddPeriods,
-                                removeFillers = saved.correctionRemoveFillers,
-                                polite = saved.correctionPolite,
-                                businessPolite = saved.correctionBusinessPolite,
-                            ),
-                        )
                         runCatching {
                             CloudCorrectorFactory.create(
-                                saved.byokEndpoint,
-                                saved.byokModel,
-                                store.apiKey(),
-                            ).correct(request)
+                                endpoint.trim(),
+                                model.trim(),
+                                apiKey.trim(),
+                                reasoningEffort,
+                            ).correct(connectionRequest())
                         }.onSuccess { output -> activity.runOnUiThread {
                             busyAction = null
-                            message = "BYOK接続成功: ${output.take(120)}"
+                            message = "接続成功: ${output.take(160)}"
                         } }.onFailure { failure -> activity.runOnUiThread {
                             busyAction = null
-                            message = "BYOK接続失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                            message = "接続失敗: ${failure.message ?: failure.javaClass.simpleName}"
                         } }
                     }, "VoiceBubble-ByokTest").start()
                 },
                 enabled = busyAction == null && endpoint.trim().startsWith("https://") && model.isNotBlank(),
-            ) { Text("保存して接続テスト") }
+            ) { Text(if (busyAction == "test") "テスト中…" else "このモデルへ接続テスト") }
+            Button(
+                onClick = {
+                    saveByok()
+                    message = "API・モデル・推論深度を保存しました。"
+                },
+                enabled = busyAction == null && endpoint.trim().startsWith("https://") && model.isNotBlank(),
+            ) { Text("設定を保存") }
         }
-        OutlinedTextField(
-            value = model,
-            onValueChange = { model = it },
-            label = { Text("モデルID") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
 
-        if (models.isNotEmpty()) {
-            OutlinedTextField(
-                value = modelFilter,
-                onValueChange = { modelFilter = it },
-                label = { Text("取得したモデルを絞り込み") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            val visible = models.asSequence()
-                .filter { item ->
-                    modelFilter.isBlank() || item.id.contains(modelFilter, ignoreCase = true) ||
-                        item.displayName.contains(modelFilter, ignoreCase = true)
-                }
-                .take(MAX_VISIBLE_MODELS)
-                .toList()
-            Column {
-                visible.forEach { item ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { model = item.id }
-                            .padding(vertical = 10.dp, horizontal = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        Text(
-                            item.id,
-                            color = if (model == item.id) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onBackground,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        if (item.displayName != item.id) {
-                            Text(
-                                item.displayName,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
-                    HorizontalDivider()
-                }
-            }
-            if (visible.size == MAX_VISIBLE_MODELS) {
+        if (message.isNotBlank()) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if ("失敗" in message || "0件" in message) MaterialTheme.colorScheme.errorContainer
+                    else MaterialTheme.colorScheme.surfaceVariant,
+                ),
+            ) {
                 Text(
-                    "先頭${MAX_VISIBLE_MODELS}件を表示中です。絞り込みで目的のモデルを検索できます。",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
+                    message,
+                    modifier = Modifier.padding(12.dp),
+                    color = if ("失敗" in message || "0件" in message) MaterialTheme.colorScheme.onErrorContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
                 )
             }
         }
@@ -278,15 +341,15 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         HorizontalDivider()
         Text("端末内Gemma 4", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
-            if (settings.gemmaModelPath.isBlank()) "モデル未導入" else "導入済み: ${settings.gemmaVariant.name}",
+            if (settings.gemmaModelPath.isBlank()) "まだモデルを入れていません。" else "導入済み: ${settings.gemmaVariant.name}",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            "公式LiteRT-LM artifactを直接取得し、サイズとSHA-256が一致した場合だけ端末内へ確定します。",
+            "ネットを使わず補正したい場合のモデルです。E2Bは軽量、E4Bは精度寄りです。ダウンロード後にサイズとSHA-256を検証してから使います。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             GemmaInstallButton(
                 title = "E2Bを自動導入",
                 entry = OfficialModelCatalog.gemmaE2B,
@@ -323,17 +386,41 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         progress?.let { p ->
             Text(formatProgress(p), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
+    }
+}
 
-        if (message.isNotBlank()) {
-            HorizontalDivider()
-            Text(
-                message,
-                color = if ("失敗" in message || "できません" in message) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-            )
+@Composable
+private fun ModelRow(item: ByokModelInfo, selected: Boolean, onSelect: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+            .padding(vertical = 10.dp, horizontal = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(
+            item.displayName,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onBackground,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        )
+        if (item.displayName != item.id) {
+            Text(item.id, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        }
+        val metadata = buildList {
+            item.contextLength?.let { add("context ${formatTokenCount(it)}") }
+            if (item.supportsReasoning) add("reasoning")
+            if (item.promptPricePerMillion != null || item.completionPricePerMillion != null) {
+                val input = item.promptPricePerMillion?.let(::formatPrice) ?: "?"
+                val output = item.completionPricePerMillion?.let(::formatPrice) ?: "?"
+                add("$${input}/M in · $${output}/M out")
+            }
+        }
+        if (metadata.isNotEmpty()) {
+            Text(metadata.joinToString("  •  "), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
     }
+    HorizontalDivider()
 }
 
 @Composable
@@ -365,6 +452,30 @@ private fun GemmaInstallButton(
     ) { Text(title) }
 }
 
+private fun reasoningLabel(value: ReasoningEffort): String = when (value) {
+    ReasoningEffort.DEFAULT -> "モデル既定"
+    ReasoningEffort.NONE -> "なし"
+    ReasoningEffort.MINIMAL -> "最小"
+    ReasoningEffort.LOW -> "低"
+    ReasoningEffort.MEDIUM -> "中"
+    ReasoningEffort.HIGH -> "高"
+    ReasoningEffort.XHIGH -> "xhigh"
+    ReasoningEffort.MAX -> "max"
+}
+
+private fun formatTokenCount(value: Long): String = when {
+    value >= 1_000_000 -> "%.1fM".format(Locale.US, value / 1_000_000.0)
+    value >= 1_000 -> "%.0fk".format(Locale.US, value / 1_000.0)
+    else -> value.toString()
+}
+
+private fun formatPrice(value: Double): String = when {
+    value == 0.0 -> "0"
+    value < 0.01 -> "%.4f".format(Locale.US, value)
+    value < 1.0 -> "%.3f".format(Locale.US, value)
+    else -> "%.2f".format(Locale.US, value)
+}
+
 private fun formatProgress(progress: ModelInstallProgress): String {
     val doneMiB = progress.completedBytes / (1024.0 * 1024.0)
     val total = progress.totalBytes
@@ -377,4 +488,4 @@ private fun formatProgress(progress: ModelInstallProgress): String {
     }
 }
 
-private const val MAX_VISIBLE_MODELS = 40
+private const val MAX_VISIBLE_MODELS = 80
