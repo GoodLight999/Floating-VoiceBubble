@@ -53,6 +53,18 @@ class RuntimeSmokeTest {
     }
 
     @Test
+    fun correctionSetupActivityStarts() {
+        val intent = Intent(context, CorrectionSetupActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val activity = instrumentation.startActivitySync(intent)
+        try {
+            assertTrue(activity is CorrectionSetupActivity)
+            assertFalse(activity.isFinishing)
+        } finally {
+            activity.finish()
+        }
+    }
+
+    @Test
     fun appProfilesActivityStarts() {
         val intent = Intent(context, AppProfilesActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val activity = instrumentation.startActivitySync(intent)
@@ -73,6 +85,7 @@ class RuntimeSmokeTest {
             addPeriods = ProfileToggle.OFF,
             register = ProfileRegister.POLITE,
             correctionMode = ProfileCorrectionMode.GEMMA,
+            lineBreakMode = ProfileLineBreakMode.SMART_SPACED,
         )
         try {
             store.save(profile)
@@ -83,6 +96,7 @@ class RuntimeSmokeTest {
                     correctionAddPeriods = true,
                     correctionPolite = false,
                     correctionBusinessPolite = false,
+                    correctionLineBreakMode = LineBreakMode.NONE,
                 ),
                 packageName,
             )
@@ -90,8 +104,28 @@ class RuntimeSmokeTest {
             assertTrue(effective.correctionPolite)
             assertFalse(effective.correctionBusinessPolite)
             assertEquals(CorrectionMode.GEMMA, effective.correctionMode)
+            assertEquals(LineBreakMode.SMART_SPACED, effective.correctionLineBreakMode)
         } finally {
             store.delete(packageName)
+        }
+    }
+
+    @Test
+    fun newCorrectionSettingsPersistAcrossStoreInstances() {
+        val store = SettingsStore(context)
+        val previous = store.load()
+        try {
+            store.update {
+                it.copy(
+                    reasoningEffort = ReasoningEffort.HIGH,
+                    correctionLineBreakMode = LineBreakMode.SMART_SPACED,
+                )
+            }
+            val reloaded = SettingsStore(context).load()
+            assertEquals(ReasoningEffort.HIGH, reloaded.reasoningEffort)
+            assertEquals(LineBreakMode.SMART_SPACED, reloaded.correctionLineBreakMode)
+        } finally {
+            store.update { previous }
         }
     }
 
