@@ -231,6 +231,17 @@ private fun AppProfileEditor(
             }
         }
 
+        Text("聞き取りミスを直す", style = MaterialTheme.typography.labelLarge)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            ProfileRecognitionRepairMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = draft.recognitionRepairMode == mode,
+                    onClick = { draft = draft.copy(recognitionRepairMode = mode) },
+                    label = { Text(repairModeLabel(mode)) },
+                )
+            }
+        }
+
         ProfileToggleSelector("読点 、", draft.addCommas) { draft = draft.copy(addCommas = it) }
         ProfileToggleSelector("句点 。", draft.addPeriods) { draft = draft.copy(addPeriods = it) }
         ProfileToggleSelector("えー・あの等を削除", draft.removeFillers) { draft = draft.copy(removeFillers = it) }
@@ -307,6 +318,7 @@ private fun profileSummary(profile: AppCorrectionProfile): String {
     if (!profile.enabled) return "個別設定OFF"
     val parts = buildList {
         if (profile.correctionMode != ProfileCorrectionMode.INHERIT) add("補正=${correctionModeLabel(profile.correctionMode)}")
+        if (profile.recognitionRepairMode != ProfileRecognitionRepairMode.INHERIT) add("聞き取り=${repairModeLabel(profile.recognitionRepairMode)}")
         if (profile.addCommas != ProfileToggle.INHERIT) add("、=${profile.addCommas.name}")
         if (profile.addPeriods != ProfileToggle.INHERIT) add("。=${profile.addPeriods.name}")
         if (profile.removeFillers != ProfileToggle.INHERIT) add("フィラー=${profile.removeFillers.name}")
@@ -322,6 +334,13 @@ private fun correctionModeLabel(mode: ProfileCorrectionMode): String = when (mod
     ProfileCorrectionMode.BYOK -> "クラウドAPI"
     ProfileCorrectionMode.GEMMA -> "端末内Gemma"
     ProfileCorrectionMode.NONE -> "補正なし"
+}
+
+private fun repairModeLabel(mode: ProfileRecognitionRepairMode): String = when (mode) {
+    ProfileRecognitionRepairMode.INHERIT -> "普段どおり"
+    ProfileRecognitionRepairMode.OFF -> "直さない"
+    ProfileRecognitionRepairMode.NORMAL -> "標準"
+    ProfileRecognitionRepairMode.STRONG -> "強め"
 }
 
 private fun registerLabel(register: ProfileRegister): String = when (register) {
