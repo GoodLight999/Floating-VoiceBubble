@@ -5,6 +5,7 @@ import android.content.Context
 enum class ProfileToggle { INHERIT, ON, OFF }
 enum class ProfileRegister { INHERIT, PLAIN, POLITE, BUSINESS }
 enum class ProfileCorrectionMode { INHERIT, AUTO, BYOK, GEMMA, NONE }
+enum class ProfileLineBreakMode { INHERIT, NONE, SMART, SMART_SPACED }
 
 data class AppCorrectionProfile(
     val packageName: String,
@@ -14,6 +15,7 @@ data class AppCorrectionProfile(
     val removeFillers: ProfileToggle = ProfileToggle.INHERIT,
     val register: ProfileRegister = ProfileRegister.INHERIT,
     val correctionMode: ProfileCorrectionMode = ProfileCorrectionMode.INHERIT,
+    val lineBreakMode: ProfileLineBreakMode = ProfileLineBreakMode.INHERIT,
 ) {
     fun applyTo(base: AppSettings): AppSettings {
         if (!enabled) return base
@@ -30,6 +32,7 @@ data class AppCorrectionProfile(
             correctionPolite = registerPair.first,
             correctionBusinessPolite = registerPair.second,
             correctionMode = correctionMode.resolve(base.correctionMode),
+            correctionLineBreakMode = lineBreakMode.resolve(base.correctionLineBreakMode),
         )
     }
 }
@@ -48,6 +51,13 @@ private fun ProfileCorrectionMode.resolve(global: CorrectionMode): CorrectionMod
     ProfileCorrectionMode.NONE -> CorrectionMode.NONE
 }
 
+private fun ProfileLineBreakMode.resolve(global: LineBreakMode): LineBreakMode = when (this) {
+    ProfileLineBreakMode.INHERIT -> global
+    ProfileLineBreakMode.NONE -> LineBreakMode.NONE
+    ProfileLineBreakMode.SMART -> LineBreakMode.SMART
+    ProfileLineBreakMode.SMART_SPACED -> LineBreakMode.SMART_SPACED
+}
+
 /** Compact, deterministic format so profile persistence can be JVM-tested without Android JSON stubs. */
 object AppCorrectionProfileCodec {
     fun encode(profile: AppCorrectionProfile): String = listOf(
@@ -58,6 +68,7 @@ object AppCorrectionProfileCodec {
         "fillers=${profile.removeFillers.name}",
         "register=${profile.register.name}",
         "mode=${profile.correctionMode.name}",
+        "breaks=${profile.lineBreakMode.name}",
     ).joinToString("|")
 
     fun decode(packageName: String, raw: String?): AppCorrectionProfile? {
@@ -76,6 +87,7 @@ object AppCorrectionProfileCodec {
             removeFillers = enumOr(values["fillers"], ProfileToggle.INHERIT),
             register = enumOr(values["register"], ProfileRegister.INHERIT),
             correctionMode = enumOr(values["mode"], ProfileCorrectionMode.INHERIT),
+            lineBreakMode = enumOr(values["breaks"], ProfileLineBreakMode.INHERIT),
         )
     }
 
