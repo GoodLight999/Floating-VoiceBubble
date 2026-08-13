@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble.correction
 
 import com.goodlight.floatingvoicebubble.ReasoningEffort
+import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -14,7 +15,6 @@ class ByokEndpointResolverTest {
         val base = ByokEndpointResolver.resolve("https://openrouter.ai/api/v1")
         assertEquals("https://openrouter.ai/api/v1/chat/completions", base.generationUrl)
         assertEquals("https://openrouter.ai/api/v1/models", base.modelsUrl)
-
         val full = ByokEndpointResolver.resolve("https://api.openai.com/v1/chat/completions")
         assertEquals("https://api.openai.com/v1/chat/completions", full.generationUrl)
         assertEquals("https://api.openai.com/v1/models", full.modelsUrl)
@@ -101,7 +101,6 @@ class ByokEndpointResolverTest {
         assertNull(high.openRouterReasoningEffort)
         assertTrue(high.disableSampling)
         assertFalse(high.zaiCodingPlanEndpoint)
-
         val none = OpenAiProviderCompatibility.resolve(
             "https://api.z.ai/api/coding/paas/v4/chat/completions", "GLM-4.5-Air", ReasoningEffort.NONE,
         )
@@ -117,6 +116,31 @@ class ByokEndpointResolverTest {
         assertNull(options.openAiReasoningEffort)
         assertNull(options.openRouterReasoningEffort)
         assertNull(options.zaiThinkingEnabled)
+    }
+
+    @Test
+    fun selectedPeriodCannotBecomeSilentNoOp() {
+        val prefs = CorrectionPreferences(addPeriods = true, removeFillers = false)
+        assertEquals("今日は晴れ。", CorrectionPostProcessor.apply("今日は晴れ", "今日は晴れ", prefs))
+    }
+
+    @Test
+    fun selectedFillerRemovalCannotBecomeSilentNoOp() {
+        val prefs = CorrectionPreferences(addPeriods = false, removeFillers = true)
+        assertEquals("今日は晴れ", CorrectionPostProcessor.apply("えー今日は晴れ", "えー今日は晴れ", prefs))
+    }
+
+    @Test
+    fun strongRepairRetriesRawEchoOnlyWhenNBestHasEvidence() {
+        val request = CorrectionRequest(
+            rawTranscript = "取り合いが聞き取りミスをした",
+            alternatives = listOf("取り合いが聞き取りミスをした", "聞き取りAIが聞き取りミスをした"),
+            surroundingContext = "音声認識AIの話",
+            dictionaryTerms = emptyList(),
+            preferences = CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.STRONG),
+        )
+        assertTrue(CorrectionPostProcessor.shouldRetryStrongNoOp(request, request.rawTranscript))
+        assertFalse(CorrectionPostProcessor.shouldRetryStrongNoOp(request.copy(alternatives = listOf(request.rawTranscript)), request.rawTranscript))
     }
 
     @Test
