@@ -124,12 +124,17 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         latest=o.rawTranscript;session?.close();session=null
         val bypass=rawGeneration==token;if(bypass)rawGeneration=null
         val t=target;target=null
-        val context=if(!bypass&&same(t))runCatching{input?.currentInputConnection?.getSurroundingText(700,300,0)?.text?.toString().orEmpty()}.getOrDefault("") else ""
         val base=settings.load();val s=t?.packageName?.let{profiles.effectiveSettings(base,it)}?:base
+        if(bypass){
+            put(t,o.rawTranscript,"補正なしで入力しました")
+            worker.execute{runCatching{finalizer.finalize(o,"",s,true)}}
+            return
+        }
+        val context=if(same(t))runCatching{input?.currentInputConnection?.getSurroundingText(700,300,0)?.text?.toString().orEmpty()}.getOrDefault("") else ""
         val id=++nextJob;pending[id]=o.rawTranscript;targets[id]=t
-        overlay.showFinalizingStack(pending.values.toList(),if(bypass)"補正せず確定しています" else "整えています")
+        overlay.showFinalizingStack(pending.values.toList(),"整えています")
         h.postDelayed({if(pending.containsKey(id))recover(id,t,o.rawTranscript,TimeoutException("確定処理が45秒を超えました"))},45000)
-        worker.execute{try{val r=finalizer.finalize(o,context,s,bypass);mainExecutor.execute{deliver(id,t,r)}}catch(x:Throwable){mainExecutor.execute{recover(id,t,o.rawTranscript,x)}}}
+        worker.execute{try{val r=finalizer.finalize(o,context,s,false);mainExecutor.execute{deliver(id,t,r)}}catch(x:Throwable){mainExecutor.execute{recover(id,t,o.rawTranscript,x)}}}
     }
 
     private fun commitRaw(){
