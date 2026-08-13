@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.ReasoningEffort
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -9,6 +10,7 @@ class AnthropicCorrector(
     private val endpoint: String,
     private val model: String,
     private val apiKey: String,
+    private val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
 ) : TextCorrector {
     override val id: String = "byok:anthropic:$model"
 
@@ -19,8 +21,7 @@ class AnthropicCorrector(
 
         val body = JSONObject()
             .put("model", model)
-            .put("max_tokens", 768)
-            .put("temperature", 0)
+            .put("max_tokens", outputTokenBudget())
             .put("system", CorrectionPrompt.system(request))
             .put(
                 "messages",
@@ -30,11 +31,14 @@ class AnthropicCorrector(
                         .put("content", CorrectionPrompt.user(request)),
                 ),
             )
+        anthropicEffort(reasoningEffort)?.let { effort ->
+            body.put("output_config", JSONObject().put("effort", effort))
+        }
 
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 10_000
-            readTimeout = 45_000
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
@@ -61,5 +65,26 @@ class AnthropicCorrector(
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun anthropicEffort(value: ReasoningEffort): String? = when (value) {
+        ReasoningEffort.DEFAULT -> null
+        // Claude's current effort ladder starts at low; map requests below it to the minimum.
+        ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> "low"
+        ReasoningEffort.MEDIUM -> "medium"
+        ReasoningEffort.HIGH -> "high"
+        ReasoningEffort.XHIGH -> "xhigh"
+        ReasoningEffort.MAX -> "max"
+    }
+
+    private fun outputTokenBudget(): Int = when (reasoningEffort) {
+        ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 4096
+        ReasoningEffort.HIGH -> 2048
+        else -> 1024
+    }
+
+    companion object {
+        private const val CONNECT_TIMEOUT_MS = 10_000
+        private const val READ_TIMEOUT_MS = 35_000
     }
 }
