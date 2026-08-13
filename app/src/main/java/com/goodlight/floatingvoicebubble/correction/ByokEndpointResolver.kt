@@ -15,6 +15,7 @@ object ByokEndpointResolver {
         require(raw.startsWith("https://")) { "BYOK endpoint must use HTTPS" }
         val uri = URI(raw)
         require(!uri.host.isNullOrBlank()) { "BYOK endpoint host is missing" }
+        require(uri.userInfo.isNullOrBlank()) { "BYOK endpoint must not contain credentials" }
         val protocol = CloudCorrectorFactory.protocolFor(raw)
         return when (protocol) {
             CloudCorrectorFactory.Protocol.ANTHROPIC -> resolveAnthropic(uri)
@@ -25,12 +26,26 @@ object ByokEndpointResolver {
 
     private fun resolveOpenAiCompatible(uri: URI): ResolvedByokEndpoint {
         val base = withoutQueryOrFragment(uri).trimEnd('/')
+        val path = uri.path.orEmpty().trimEnd('/')
+        val lowerPath = path.lowercase()
+        val versioned = VERSION_SEGMENT.containsMatchIn(lowerPath)
+
         val generation = when {
-            base.endsWith("/chat/completions") -> base
-            base.endsWith("/models") -> base.removeSuffix("/models") + "/chat/completions"
-            base.endsWith("/v1") || base.endsWith("/api/v1") -> "$base/chat/completions"
-            uri.host.equals("api.openai.com", ignoreCase = true) && uri.path.orEmpty().isBlank() -> "$base/v1/chat/completions"
-            else -> "$base/chat/completions"
+            lowerPath.endsWith("/chat/completions") -> base
+            // A common hand-entered typo. The request body used by VoiceBubble is Chat Completions,
+            // so silently repair the missing trailing 's' rather than sending a guaranteed 404.
+            lowerPath.endsWith("/chat/completion") -> base.dropLast("/chat/completion".length) + "/chat/completions"
+            // Legacy OpenAI text-completions uses a different request schema. If the user pastes it,
+            // route to the sibling Chat Completions endpoint that accepts our messages payload.
+            lowerPath.endsWith("/completions") -> base.dropLast("/completions".length) + "/chat/completions"
+            lowerPath.endsWith("/models") -> base.removeSuffix(path.takeLast("/models".length)) + "/chat/completions"
+            lowerPath.endsWith("/v1") || lowerPath.endsWith("/api/v1") -> "$base/chat/completions"
+            // Google exposes an OpenAI-compatible path under /v1beta/openai. Do not inject another /v1.
+            versioned -> "$base/chat/completions"
+            // Most OpenAI-compatible servers expose their compatibility layer below /v1. Previously
+            // VoiceBubble appended only /chat/completions here, which breaks root URLs such as
+            // https://host.example or https://host.example/api when the real route is /v1/....
+            else -> "$base/v1/chat/completions"
         }
         val models = generation.removeSuffix("/chat/completions") + "/models"
         return ResolvedByokEndpoint(CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE, generation, models)
@@ -46,14 +61,10 @@ object ByokEndpointResolver {
             path.isBlank() || path == "/" -> "$origin/v1/messages"
             else -> "$origin$path"
         }
-        val models = when {
-            path.contains("/v1/") || path == "/v1" -> "$origin/v1/models"
-            else -> "$origin/v1/models"
-        }
         return ResolvedByokEndpoint(
             CloudCorrectorFactory.Protocol.ANTHROPIC,
             generation,
-            models,
+            "$origin/v1/models",
         )
     }
 
@@ -95,4 +106,6 @@ object ByokEndpointResolver {
         append(uri.host)
         if (uri.port != -1) append(":${uri.port}")
     }
+
+    private val VERSION_SEGMENT = Regex("/(?:v\\d+(?:beta\\d*)?|v\\d+beta)(?:/|$)", RegexOption.IGNORE_CASE)
 }
