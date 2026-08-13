@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.LineBreakMode
 import com.goodlight.floatingvoicebubble.dictionary.DictionaryTerm
 
 data class CorrectionPreferences(
@@ -8,8 +9,10 @@ data class CorrectionPreferences(
     val removeFillers: Boolean = true,
     val polite: Boolean = false,
     val businessPolite: Boolean = false,
+    val lineBreakMode: LineBreakMode = LineBreakMode.NONE,
 ) {
     val registerRewriteRequested: Boolean get() = polite || businessPolite
+    val lineBreakRewriteRequested: Boolean get() = lineBreakMode != LineBreakMode.NONE
 }
 
 data class CorrectionRequest(
@@ -47,6 +50,15 @@ object CorrectionPrompt {
         appendLine(if (request.preferences.addCommas) "- 読点「、」を自然な位置へ追加してよい。" else "- 読点「、」を新たに追加しない。")
         appendLine(if (request.preferences.addPeriods) "- 句点「。」を自然な文末へ追加してよい。" else "- 句点「。」を新たに追加しない。")
         appendLine(if (request.preferences.removeFillers) "- 「えー」「あの」「そのー」等の意味を持たないフィラーを除去してよい。" else "- フィラーを勝手に削除しない。")
+        when (request.preferences.lineBreakMode) {
+            LineBreakMode.NONE -> appendLine("- 改行を新たに追加しない。原文の改行だけを保存する。")
+            LineBreakMode.SMART -> appendLine(
+                "- 話題・文意の区切りが明確な場所だけに適宜1回の改行を入れてよい。短文ごとに細切れにはしない。空行は作らない。",
+            )
+            LineBreakMode.SMART_SPACED -> appendLine(
+                "- 話題・文意の区切りが明確な場所だけに適宜2回改行して1行分の空行を入れてよい。短文ごとに細切れにはしない。",
+            )
+        }
         when {
             request.preferences.businessPolite -> appendLine(
                 "- ユーザーの明示指定として、内容を一切増減せず、社外文面にも使える自然なビジネス敬語へ変換する。過剰な定型挨拶や謝辞は追加しない。",
