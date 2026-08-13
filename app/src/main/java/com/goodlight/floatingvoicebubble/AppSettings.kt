@@ -16,6 +16,23 @@ enum class CorrectionMode { AUTO, BYOK, GEMMA, NONE }
 enum class GemmaBackend { AUTO, GPU, CPU }
 enum class GemmaVariant { UNKNOWN, E2B, E4B }
 
+enum class ReasoningEffort {
+    DEFAULT,
+    NONE,
+    MINIMAL,
+    LOW,
+    MEDIUM,
+    HIGH,
+    XHIGH,
+    MAX,
+}
+
+enum class LineBreakMode {
+    NONE,
+    SMART,
+    SMART_SPACED,
+}
+
 data class AppSettings(
     val recognitionMode: RecognitionMode = RecognitionMode.AUTO,
     val finalAsrMode: FinalAsrMode = FinalAsrMode.LIVE_RESULT,
@@ -24,11 +41,13 @@ data class AppSettings(
     val autoStop: Boolean = true,
     val byokEndpoint: String = "https://api.openai.com/v1/chat/completions",
     val byokModel: String = "",
+    val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
     val correctionAddCommas: Boolean = true,
     val correctionAddPeriods: Boolean = true,
     val correctionRemoveFillers: Boolean = true,
     val correctionPolite: Boolean = false,
     val correctionBusinessPolite: Boolean = false,
+    val correctionLineBreakMode: LineBreakMode = LineBreakMode.NONE,
     val gemmaModelPath: String = "",
     val gemmaBackend: GemmaBackend = GemmaBackend.AUTO,
     val gemmaVariant: GemmaVariant = GemmaVariant.UNKNOWN,
@@ -50,11 +69,16 @@ class SettingsStore(context: Context) {
         byokEndpoint = prefs.getString("byok_endpoint", null)
             ?: "https://api.openai.com/v1/chat/completions",
         byokModel = prefs.getString("byok_model", "").orEmpty(),
+        reasoningEffort = enumValueOr(prefs.getString("reasoning_effort", null), ReasoningEffort.DEFAULT),
         correctionAddCommas = prefs.getBoolean("correction_add_commas", true),
         correctionAddPeriods = prefs.getBoolean("correction_add_periods", true),
         correctionRemoveFillers = prefs.getBoolean("correction_remove_fillers", true),
         correctionPolite = prefs.getBoolean("correction_polite", false),
         correctionBusinessPolite = prefs.getBoolean("correction_business_polite", false),
+        correctionLineBreakMode = enumValueOr(
+            prefs.getString("correction_line_break_mode", null),
+            LineBreakMode.NONE,
+        ),
         gemmaModelPath = prefs.getString("gemma_model_path", "").orEmpty(),
         gemmaBackend = enumValueOr(prefs.getString("gemma_backend", null), GemmaBackend.AUTO),
         gemmaVariant = enumValueOr(prefs.getString("gemma_variant", null), GemmaVariant.UNKNOWN),
@@ -73,11 +97,13 @@ class SettingsStore(context: Context) {
             .putBoolean("auto_stop", value.autoStop)
             .putString("byok_endpoint", value.byokEndpoint)
             .putString("byok_model", value.byokModel)
+            .putString("reasoning_effort", value.reasoningEffort.name)
             .putBoolean("correction_add_commas", value.correctionAddCommas)
             .putBoolean("correction_add_periods", value.correctionAddPeriods)
             .putBoolean("correction_remove_fillers", value.correctionRemoveFillers)
             .putBoolean("correction_polite", value.correctionPolite)
             .putBoolean("correction_business_polite", value.correctionBusinessPolite)
+            .putString("correction_line_break_mode", value.correctionLineBreakMode.name)
             .putString("gemma_model_path", value.gemmaModelPath)
             .putString("gemma_backend", value.gemmaBackend.name)
             .putString("gemma_variant", value.gemmaVariant.name)
