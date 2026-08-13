@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble.correction
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class ByokEndpointResolverTest {
@@ -13,6 +14,32 @@ class ByokEndpointResolverTest {
         val full = ByokEndpointResolver.resolve("https://api.openai.com/v1/chat/completions")
         assertEquals("https://api.openai.com/v1/chat/completions", full.generationUrl)
         assertEquals("https://api.openai.com/v1/models", full.modelsUrl)
+    }
+
+    @Test
+    fun addsV1ForVersionlessOpenAiCompatibleRoots() {
+        val root = ByokEndpointResolver.resolve("https://llm.example.com")
+        assertEquals("https://llm.example.com/v1/chat/completions", root.generationUrl)
+        assertEquals("https://llm.example.com/v1/models", root.modelsUrl)
+
+        val apiRoot = ByokEndpointResolver.resolve("https://openrouter.ai/api")
+        assertEquals("https://openrouter.ai/api/v1/chat/completions", apiRoot.generationUrl)
+        assertEquals("https://openrouter.ai/api/v1/models", apiRoot.modelsUrl)
+    }
+
+    @Test
+    fun repairsCommonOpenAiEndpointMistakes() {
+        val singular = ByokEndpointResolver.resolve("https://llm.example.com/v1/chat/completion")
+        assertEquals("https://llm.example.com/v1/chat/completions", singular.generationUrl)
+        assertEquals("https://llm.example.com/v1/models", singular.modelsUrl)
+
+        val legacy = ByokEndpointResolver.resolve("https://llm.example.com/v1/completions")
+        assertEquals("https://llm.example.com/v1/chat/completions", legacy.generationUrl)
+        assertEquals("https://llm.example.com/v1/models", legacy.modelsUrl)
+
+        val models = ByokEndpointResolver.resolve("https://llm.example.com/v1/models?foo=bar#ignored")
+        assertEquals("https://llm.example.com/v1/chat/completions", models.generationUrl)
+        assertEquals("https://llm.example.com/v1/models", models.modelsUrl)
     }
 
     @Test
@@ -45,5 +72,15 @@ class ByokEndpointResolverTest {
             "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             resolved.generationUrl,
         )
+    }
+
+    @Test
+    fun rejectsInsecureOrCredentialBearingEndpoints() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ByokEndpointResolver.resolve("http://llm.example.com/v1")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ByokEndpointResolver.resolve("https://user:secret@llm.example.com/v1")
+        }
     }
 }
