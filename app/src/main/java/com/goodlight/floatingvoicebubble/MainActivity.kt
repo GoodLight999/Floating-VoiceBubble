@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -43,22 +44,28 @@ class MainActivity : ComponentActivity() {
                             .windowInsetsPadding(WindowInsets.safeDrawing),
                     ) {
                         QuickCorrectionControls(this@MainActivity)
-                        if (showDetailed) {
-                            TextButton(onClick = { showDetailed = false }) { Text("← かんたん設定へ戻る") }
-                            VoiceBubbleSettingsScreen(
-                                activity = this@MainActivity,
-                                microphoneGranted = microphoneGranted,
-                                accessibilityEnabled = accessibilityEnabled,
-                                onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                            )
-                        } else {
-                            HomeSettingsScreen(
-                                activity = this@MainActivity,
-                                microphoneGranted = microphoneGranted,
-                                accessibilityEnabled = accessibilityEnabled,
-                                onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                                onOpenDetailedSettings = { showDetailed = true },
-                            )
+                        Box(Modifier.weight(1f)) {
+                            if (showDetailed) {
+                                Column(Modifier.fillMaxSize()) {
+                                    TextButton(onClick = { showDetailed = false }) { Text("← かんたん設定へ戻る") }
+                                    Box(Modifier.weight(1f)) {
+                                        VoiceBubbleSettingsScreen(
+                                            activity = this@MainActivity,
+                                            microphoneGranted = microphoneGranted,
+                                            accessibilityEnabled = accessibilityEnabled,
+                                            onRuntimeStatusChanged = ::refreshRuntimeStatus,
+                                        )
+                                    }
+                                }
+                            } else {
+                                HomeSettingsScreen(
+                                    activity = this@MainActivity,
+                                    microphoneGranted = microphoneGranted,
+                                    accessibilityEnabled = accessibilityEnabled,
+                                    onRuntimeStatusChanged = ::refreshRuntimeStatus,
+                                    onOpenDetailedSettings = { showDetailed = true },
+                                )
+                            }
                         }
                     }
                 }
