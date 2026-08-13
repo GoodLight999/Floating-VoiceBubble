@@ -1,5 +1,7 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.LineBreakMode
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -22,6 +24,33 @@ class CorrectionPreferencesGuardTest {
     fun rejectsFillerRemovalWhenDisabled() {
         val keepFillers = CorrectionPreferences(removeFillers = false)
         val decision = CorrectionGuard.choose("えー今日は晴れ", "今日は晴れ", keepFillers)
+        assertFalse(decision.accepted)
+    }
+
+    @Test
+    fun rejectsNewLineBreaksWhenDisabled() {
+        val preferences = CorrectionPreferences(lineBreakMode = LineBreakMode.NONE)
+        val decision = CorrectionGuard.choose("今日は晴れ。明日は雨。", "今日は晴れ。\n明日は雨。", preferences)
+        assertFalse(decision.accepted)
+        assertEquals("linebreak-not-allowed", decision.reason)
+    }
+
+    @Test
+    fun acceptsPureFormattingLineBreaksWhenExplicitlyEnabled() {
+        val preferences = CorrectionPreferences(lineBreakMode = LineBreakMode.SMART_SPACED)
+        val raw = "今日は晴れ。明日は雨。週末は出かける。"
+        val formatted = "今日は晴れ。\n\n明日は雨。\n\n週末は出かける。"
+        val decision = CorrectionGuard.choose(raw, formatted, preferences)
+        assertTrue(decision.accepted)
+        assertEquals(formatted, decision.text)
+    }
+
+    @Test
+    fun lineBreakPermissionDoesNotPermitUnrelatedRewrite() {
+        val preferences = CorrectionPreferences(lineBreakMode = LineBreakMode.SMART)
+        val raw = "今日は晴れ。明日は雨。"
+        val rewritten = "今日は晴れ。\n明日は雨なので外出をやめて家でゆっくり過ごすことにしました。"
+        val decision = CorrectionGuard.choose(raw, rewritten, preferences)
         assertFalse(decision.accepted)
     }
 
