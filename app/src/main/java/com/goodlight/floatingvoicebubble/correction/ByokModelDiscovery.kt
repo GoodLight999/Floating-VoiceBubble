@@ -8,7 +8,14 @@ import java.net.URLEncoder
 data class ByokModelInfo(
     val id: String,
     val displayName: String = id,
-)
+    val contextLength: Long? = null,
+    val supportedParameters: Set<String> = emptySet(),
+    val promptPricePerMillion: Double? = null,
+    val completionPricePerMillion: Double? = null,
+    val description: String = "",
+) {
+    val supportsReasoning: Boolean get() = "reasoning" in supportedParameters || "reasoning_effort" in supportedParameters
+}
 
 class ByokModelDiscovery {
     fun list(endpoint: String, apiKey: String): List<ByokModelInfo> {
@@ -32,7 +39,25 @@ class ByokModelDiscovery {
                 val item = data.optJSONObject(index) ?: continue
                 val id = item.optString("id").trim()
                 if (id.isBlank()) continue
-                add(ByokModelInfo(id, item.optString("display_name", id).ifBlank { id }))
+                val supported = item.optJSONArray("supported_parameters")?.let { values ->
+                    buildSet {
+                        for (i in 0 until values.length()) values.optString(i).trim().takeIf(String::isNotBlank)?.let(::add)
+                    }
+                }.orEmpty()
+                val pricing = item.optJSONObject("pricing")
+                add(
+                    ByokModelInfo(
+                        id = id,
+                        displayName = item.optString("name").ifBlank {
+                            item.optString("display_name", id).ifBlank { id }
+                        },
+                        contextLength = item.optLong("context_length").takeIf { it > 0L },
+                        supportedParameters = supported,
+                        promptPricePerMillion = pricing?.optString("prompt")?.toDoubleOrNull()?.times(1_000_000.0),
+                        completionPricePerMillion = pricing?.optString("completion")?.toDoubleOrNull()?.times(1_000_000.0),
+                        description = item.optString("description").trim(),
+                    ),
+                )
             }
         }
     }
@@ -85,7 +110,12 @@ class ByokModelDiscovery {
                     item.optString("name").removePrefix("models/")
                 }.trim()
                 if (id.isBlank()) continue
-                result += ByokModelInfo(id, item.optString("displayName", id).ifBlank { id })
+                result += ByokModelInfo(
+                    id = id,
+                    displayName = item.optString("displayName", id).ifBlank { id },
+                    contextLength = item.optLong("inputTokenLimit").takeIf { it > 0L },
+                    description = item.optString("description").trim(),
+                )
             }
             val next = json.optString("nextPageToken").trim()
             if (next.isBlank()) return result
@@ -101,6 +131,7 @@ class ByokModelDiscovery {
             connectTimeout = 10_000
             readTimeout = 30_000
             setRequestProperty("Accept", "application/json")
+            setRequestProperty("Accept-Encoding", "gzip")
             when (protocol) {
                 CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE -> {
                     if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
