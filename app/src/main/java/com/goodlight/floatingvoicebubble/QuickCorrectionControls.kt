@@ -42,7 +42,7 @@ internal fun QuickCorrectionControls(activity: MainActivity, modifier: Modifier 
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text("文章をどう整える？", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "ONにした変更だけを、音声認識のあとに適用します。話した内容そのものは増減しません。",
+                    "聞き間違いの修復と、句読点・語調・改行をここで決めます。話していない内容は足しません。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -54,6 +54,40 @@ internal fun QuickCorrectionControls(activity: MainActivity, modifier: Modifier 
                 TextButton(onClick = { activity.startActivity(Intent(activity, CorrectionSetupActivity::class.java)) }) {
                     Text("補正モデル")
                 }
+            }
+        }
+
+        Text(
+            "聞き取りミスを直す",
+            modifier = Modifier.padding(start = 20.dp, top = 8.dp),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            "「標準」は明白な誤変換を修復。「強め」は複数語が崩れた発話も前後文脈・候補・辞書から復元します。",
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            RecognitionRepairMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = settings.recognitionRepairMode == mode,
+                    onClick = { settings = store.update { it.copy(recognitionRepairMode = mode) } },
+                    label = {
+                        Text(
+                            when (mode) {
+                                RecognitionRepairMode.OFF -> "直さない"
+                                RecognitionRepairMode.NORMAL -> "標準"
+                                RecognitionRepairMode.STRONG -> "強め"
+                            },
+                        )
+                    },
+                )
             }
         }
 
