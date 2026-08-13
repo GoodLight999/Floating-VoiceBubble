@@ -94,8 +94,8 @@ class FloatingBubbleController(
         header.addView(cancel, LinearLayout.LayoutParams(dp(92), dp(48)))
 
         transcript.setTextColor(TEXT)
-        transcript.textSize = 17f
-        transcript.setLineSpacing(0f, 1.18f)
+        transcript.textSize = 16f
+        transcript.setLineSpacing(0f, 1.2f)
         transcript.setTextIsSelectable(false)
         transcriptScroll.isVerticalScrollBarEnabled = false
         transcriptScroll.overScrollMode = View.OVER_SCROLL_NEVER
@@ -107,7 +107,7 @@ class FloatingBubbleController(
         card.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
         card.addView(
             transcriptScroll,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(100)).apply { topMargin = dp(3) },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(132)).apply { topMargin = dp(3) },
         )
         root.addView(card, FrameLayout.LayoutParams(dp(CARD_DP), dp(CARD_HEIGHT_DP), Gravity.TOP or Gravity.START))
 
@@ -176,26 +176,34 @@ class FloatingBubbleController(
         refreshVisibility()
     }
 
-    fun showListening(text: String, state: String = "聴いています") {
+    fun showListening(text: String, state: String = "聴いています", pending: List<String> = emptyList()) {
         refreshVisibility()
         if (!isVisibleForInput()) return
         ensureExpanded()
-        status.text = "●  $state"
+        status.text = if (pending.isEmpty()) "●  $state" else "●  $state  ·  処理中${pending.size}件"
         status.setTextColor(ACCENT_SOFT)
-        transcript.text = text.ifBlank { "話し始めると、ここに認識文字が現れます。" }
-        transcript.setTextColor(if (text.isBlank()) MUTED else TEXT)
+        transcript.text = renderLiveTranscript(text, pending)
+        transcript.setTextColor(if (text.isBlank() && pending.isEmpty()) MUTED else TEXT)
         cancel.visibility = View.VISIBLE
         mic.text = "■"
         scrollToBottom()
     }
 
     fun showFinalizing(text: String, state: String = "整えています") {
+        showFinalizingStack(listOf(text), state)
+    }
+
+    fun showFinalizingStack(pending: List<String>, state: String = "整えています") {
         refreshVisibility()
         if (!isVisibleForInput()) return
+        if (pending.isEmpty()) {
+            showIdle()
+            return
+        }
         ensureExpanded()
-        status.text = "●  $state"
+        status.text = "●  $state  ·  ${pending.size}件"
         status.setTextColor(WARM)
-        transcript.text = text.ifBlank { "認識結果を確定しています。" }
+        transcript.text = renderPending(pending)
         transcript.setTextColor(TEXT)
         cancel.visibility = View.VISIBLE
         mic.text = "●"
@@ -212,6 +220,32 @@ class FloatingBubbleController(
         transcript.setTextColor(TEXT)
         cancel.visibility = View.VISIBLE
         mic.text = "●"
+    }
+
+    private fun renderLiveTranscript(current: String, pending: List<String>): String = buildString {
+        append("いま話している内容\n")
+        append(current.ifBlank { "話し始めると、ここに文字が出ます。" })
+        if (pending.isNotEmpty()) {
+            append("\n\n")
+            append(renderPending(pending))
+        }
+    }
+
+    private fun renderPending(items: List<String>): String = buildString {
+        items.takeLast(MAX_VISIBLE_PENDING).forEachIndexed { index, value ->
+            if (index > 0) append("\n\n")
+            val ordinal = items.size - minOf(items.size, MAX_VISIBLE_PENDING) + index + 1
+            append("処理中 $ordinal\n")
+            append(compactPending(value))
+        }
+        if (items.size > MAX_VISIBLE_PENDING) {
+            append("\n\nほか ${items.size - MAX_VISIBLE_PENDING}件を処理中")
+        }
+    }
+
+    private fun compactPending(value: String): String {
+        val normalized = value.replace(Regex("\\s+"), " ").trim()
+        return if (normalized.length <= MAX_PENDING_CHARS) normalized else normalized.take(MAX_PENDING_CHARS) + "…"
     }
 
     private fun isVisibleForInput(): Boolean = attached && inputAvailable && !dismissedForInput
@@ -365,9 +399,11 @@ class FloatingBubbleController(
     companion object {
         private const val BUBBLE_DP = 56
         private const val CARD_DP = 336
-        private const val CARD_HEIGHT_DP = 176
+        private const val CARD_HEIGHT_DP = 210
         private const val DISMISS_AREA_DP = 104
         private const val DISMISS_HIT_ZONE_DP = 118
+        private const val MAX_VISIBLE_PENDING = 4
+        private const val MAX_PENDING_CHARS = 140
         private val CARD = Color.rgb(24, 26, 31)
         private val TEXT = Color.rgb(245, 247, 250)
         private val MUTED = Color.rgb(163, 169, 179)
