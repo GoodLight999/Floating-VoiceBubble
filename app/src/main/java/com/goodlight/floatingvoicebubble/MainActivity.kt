@@ -9,9 +9,16 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,18 +36,31 @@ class MainActivity : ComponentActivity() {
         refreshRuntimeStatus()
         setContent {
             VoiceBubbleTheme {
-                Box(Modifier.fillMaxSize()) {
-                    VoiceBubbleSettingsScreen(
-                        activity = this@MainActivity,
-                        microphoneGranted = microphoneGranted,
-                        accessibilityEnabled = accessibilityEnabled,
-                        onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                    )
-                    FloatingActionButton(
-                        onClick = { startActivity(Intent(this@MainActivity, AdvancedToolsActivity::class.java)) },
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                    contentColor = MaterialTheme.colorScheme.onBackground,
+                ) {
+                    Column(
+                        Modifier
+                            .fillMaxSize()
+                            .windowInsetsPadding(WindowInsets.safeDrawing),
                     ) {
-                        Text("管理")
+                        QuickCorrectionControls(this@MainActivity)
+                        Box(Modifier.weight(1f)) {
+                            VoiceBubbleSettingsScreen(
+                                activity = this@MainActivity,
+                                microphoneGranted = microphoneGranted,
+                                accessibilityEnabled = accessibilityEnabled,
+                                onRuntimeStatusChanged = ::refreshRuntimeStatus,
+                            )
+                            FloatingActionButton(
+                                onClick = { startActivity(Intent(this@MainActivity, AdvancedToolsActivity::class.java)) },
+                                modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
+                            ) {
+                                Text("管理")
+                            }
+                        }
                     }
                 }
             }

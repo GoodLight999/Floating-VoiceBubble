@@ -6,6 +6,25 @@ import kotlin.math.max
 object CorrectionGuard {
     data class Decision(val text: String, val accepted: Boolean, val normalizedDistance: Double, val reason: String? = null)
 
+    fun choose(raw: String, modelOutput: String, preferences: CorrectionPreferences): Decision {
+        val decision = choose(raw, modelOutput, allowRegisterRewrite = preferences.registerRewriteRequested)
+        if (!decision.accepted) return decision
+        val cleaned = decision.text
+        if (!preferences.addCommas && cleaned.count { it == '、' } > raw.count { it == '、' }) {
+            return decision.copy(text = raw, accepted = false, reason = "comma-not-allowed")
+        }
+        if (!preferences.addPeriods && cleaned.count { it == '。' } > raw.count { it == '。' }) {
+            return decision.copy(text = raw, accepted = false, reason = "period-not-allowed")
+        }
+        if (!preferences.removeFillers && FILLERS.any { filler ->
+                occurrences(cleaned, filler) < occurrences(raw, filler)
+            }
+        ) {
+            return decision.copy(text = raw, accepted = false, reason = "filler-removal-not-allowed")
+        }
+        return decision
+    }
+
     fun choose(raw: String, modelOutput: String, allowRegisterRewrite: Boolean = false): Decision {
         val cleaned = sanitize(modelOutput)
         if (raw.isBlank()) return Decision(cleaned, cleaned.isNotBlank(), 0.0)
@@ -36,6 +55,18 @@ object CorrectionGuard {
         return text
     }
 
+    private fun occurrences(text: String, needle: String): Int {
+        if (needle.isEmpty()) return 0
+        var count = 0
+        var index = 0
+        while (true) {
+            index = text.indexOf(needle, index)
+            if (index < 0) return count
+            count += 1
+            index += needle.length
+        }
+    }
+
     private fun levenshtein(a: IntArray, b: IntArray): Int {
         if (a.isEmpty()) return b.size
         if (b.isEmpty()) return a.size
@@ -50,4 +81,6 @@ object CorrectionGuard {
         }
         return previous[b.size]
     }
+
+    private val FILLERS = listOf("えー", "ええと", "えっと", "あのー", "そのー", "うーん", "まあ")
 }

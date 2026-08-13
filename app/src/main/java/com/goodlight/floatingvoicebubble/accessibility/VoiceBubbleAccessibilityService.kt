@@ -7,6 +7,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.EditorInfo
 import com.goodlight.floatingvoicebubble.AppSettings
 import com.goodlight.floatingvoicebubble.CorrectionMode
@@ -55,7 +56,9 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private var activeSession: SpeechRecognitionSession? = null
     private var activeTarget: EditorTarget? = null
     private var latestRaw = ""
-    private var inputAvailable = false
+    private var inputSessionAvailable = false
+    private var imeWindowVisible = false
+    private var bubbleAvailable = false
     private var sessionGeneration = 0L
     private var nextFinalizationId = 0L
     private val pendingFinalizations = LinkedHashMap<Long, String>()
@@ -78,8 +81,8 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             onDismiss = ::dismissCurrentInput,
         )
         overlay.attach()
-        inputAvailable = voiceInputMethod?.currentInputStarted == true
-        overlay.setInputAvailable(inputAvailable, resetDismissal = inputAvailable)
+        inputSessionAvailable = voiceInputMethod?.currentInputStarted == true
+        updateImeWindowVisibility(resetDismissal = true)
 
         val settings = settingsStore.load()
         asrModelStore.resolve(settings.streamingAsrModelId)?.let { model ->
@@ -92,7 +95,13 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        when (event?.eventType) {
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_FOCUSED -> rootViewHandler.post { updateImeWindowVisibility() }
+        }
+    }
 
     override fun onInterrupt() {
         cancelCurrentOperation()
@@ -110,12 +119,36 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     }
 
     private fun onInputAvailabilityChanged(available: Boolean) {
-        inputAvailable = available
-        if (::overlay.isInitialized) overlay.setInputAvailable(available, resetDismissal = available)
+        inputSessionAvailable = available
         if (!available) {
-            // Preserve already-spoken audio: keyboard dismissal means finalize, not discard.
+            refreshBubbleAvailability()
+            return
+        }
+        // OEM IMEs do not all publish the input window in the same frame as onStartInput.
+        // Probe now and shortly afterwards; window-change events keep it exact after that.
+        updateImeWindowVisibility(resetDismissal = true)
+        rootViewHandler.postDelayed({ updateImeWindowVisibility(resetDismissal = true) }, IME_WINDOW_RECHECK_MS)
+    }
+
+    private fun updateImeWindowVisibility(resetDismissal: Boolean = false) {
+        imeWindowVisible = runCatching {
+            windows.any { window -> window.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        }.getOrDefault(false)
+        refreshBubbleAvailability(resetDismissal)
+    }
+
+    private fun refreshBubbleAvailability(resetDismissal: Boolean = false) {
+        val available = inputSessionAvailable && imeWindowVisible
+        val becameVisible = !bubbleAvailable && available
+        val becameHidden = bubbleAvailable && !available
+        bubbleAvailable = available
+        if (::overlay.isInitialized) {
+            overlay.setInputAvailable(available, resetDismissal = resetDismissal || becameVisible)
+        }
+        if (becameHidden) {
+            // Never leave the microphone running invisibly after the user closes the IME.
             activeSession?.finishInput()
-        } else if (activeSession == null && pendingFinalizations.isEmpty() && ::overlay.isInitialized) {
+        } else if (available && activeSession == null && pendingFinalizations.isEmpty() && ::overlay.isInitialized) {
             overlay.showIdle()
         }
     }
@@ -199,9 +232,10 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 traceAudioDir = traceStore.audioDir,
                 streamingModel = streamingModel,
                 onPartial = { partial ->
-                    if (token != sessionGeneration || activeSession == null) return@SpeechRecognitionSession
-                    latestRaw = partial
-                    overlay.showListening(partial)
+                    if (token == sessionGeneration && activeSession != null) {
+                        latestRaw = partial
+                        overlay.showListening(partial)
+                    }
                 },
                 onState = { state ->
                     if (token == sessionGeneration && activeSession != null) overlay.showListening(latestRaw, state)
@@ -447,7 +481,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
     private fun showFinalizationNotice(text: String, state: String, delayMs: Long) {
         // Never cover a new live transcript with an older session's correction result.
-        if (activeSession == null && inputAvailable) {
+        if (activeSession == null && bubbleAvailable) {
             overlay.showFinalizing(text, state)
             returnToIdleAfter(delayMs)
         }
@@ -505,7 +539,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private fun returnToIdleAfter(delayMs: Long) {
         rootViewHandler.postDelayed({
             when {
-                activeSession != null || !inputAvailable -> Unit
+                activeSession != null || !bubbleAvailable -> Unit
                 pendingFinalizations.isNotEmpty() -> overlay.showFinalizing(
                     pendingFinalizations.values.last(),
                     "前の発話を整えています",
@@ -565,6 +599,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         private const val DIRECT_INSERT_NOTICE_MS = 650L
         private const val CLIPBOARD_NOTICE_MS = 2_200L
         private const val ERROR_NOTICE_MS = 3_000L
+        private const val IME_WINDOW_RECHECK_MS = 180L
         private const val MAX_ERROR_DETAIL_CHARS = 92
     }
 }

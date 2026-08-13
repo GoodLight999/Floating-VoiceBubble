@@ -36,9 +36,41 @@ android {
         )
     }
 
+    // Stable development/release signing is deliberately opt-in through private
+    // environment values. Never fall back to a repository-committed private key:
+    // this app owns microphone + Accessibility privileges and its update identity matters.
+    val stableStore = providers.environmentVariable("FVB_SIGNING_STORE_FILE").orNull
+        ?.takeIf(String::isNotBlank)
+        ?.let(::file)
+    val stableStorePassword = providers.environmentVariable("FVB_SIGNING_STORE_PASSWORD").orNull
+    val stableKeyAlias = providers.environmentVariable("FVB_SIGNING_KEY_ALIAS").orNull
+    val stableKeyPassword = providers.environmentVariable("FVB_SIGNING_KEY_PASSWORD").orNull
+    val stableSigningReady = stableStore?.isFile == true &&
+        !stableStorePassword.isNullOrBlank() &&
+        !stableKeyAlias.isNullOrBlank() &&
+        !stableKeyPassword.isNullOrBlank()
+    val stableSigning = if (stableSigningReady) {
+        signingConfigs.create("stable") {
+            storeFile = stableStore
+            storePassword = stableStorePassword
+            keyAlias = stableKeyAlias
+            keyPassword = stableKeyPassword
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+            enableV4Signing = true
+        }
+    } else {
+        null
+    }
+
     buildTypes {
+        debug {
+            stableSigning?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = true
+            stableSigning?.let { signingConfig = it }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

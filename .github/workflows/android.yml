@@ -24,6 +24,12 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      FVB_SIGNING_STORE_FILE: ${{ github.workspace }}/.ci/fvb-signing.jks
+      FVB_SIGNING_STORE_PASSWORD: ${{ secrets.FVB_SIGNING_STORE_PASSWORD }}
+      FVB_SIGNING_KEY_ALIAS: ${{ secrets.FVB_SIGNING_KEY_ALIAS }}
+      FVB_SIGNING_KEY_PASSWORD: ${{ secrets.FVB_SIGNING_KEY_PASSWORD }}
+      FVB_SIGNING_CERT_SHA256: ${{ secrets.FVB_SIGNING_CERT_SHA256 }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-java@v5
@@ -38,12 +44,28 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "9.5.0"
+      - name: Prepare stable APK signer when configured
+        env:
+          FVB_SIGNING_KEYSTORE_B64: ${{ secrets.FVB_SIGNING_KEYSTORE_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${FVB_SIGNING_KEYSTORE_B64:-}" && -n "${FVB_SIGNING_STORE_PASSWORD:-}" && -n "${FVB_SIGNING_KEY_ALIAS:-}" && -n "${FVB_SIGNING_KEY_PASSWORD:-}" ]]; then
+            mkdir -p "$(dirname "$FVB_SIGNING_STORE_FILE")"
+            printf '%s' "$FVB_SIGNING_KEYSTORE_B64" | base64 --decode > "$FVB_SIGNING_STORE_FILE"
+            chmod 600 "$FVB_SIGNING_STORE_FILE"
+            keytool -list -keystore "$FVB_SIGNING_STORE_FILE" -storepass "$FVB_SIGNING_STORE_PASSWORD" -alias "$FVB_SIGNING_KEY_ALIAS" >/dev/null
+            echo "Stable APK signer loaded from GitHub Actions secrets."
+          else
+            echo "::warning::Stable signing secrets are not configured; this run will use Android's runner-local debug signer and is not a stable-install APK."
+          fi
       - name: Lint, JVM tests, debug and release/R8
         shell: bash
         run: |
           set -o pipefail
           gradle --no-daemon --stacktrace :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease 2>&1 | tee gradle-verify.log
       - name: Verify APK archive, native ABI/alignment, signature and manifest
+        shell: bash
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
@@ -59,7 +81,27 @@ jobs:
           printf '%s\n' "$BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
           printf '%s\n' "$BADGING" | grep -F "sdkVersion:'33'"
           printf '%s\n' "$BADGING" | grep -F "targetSdkVersion:'36'"
+          printf '%s\n' "$BADGING" | grep -F "application-label:'Floating VoiceBubble'"
+          printf '%s\n' "$BADGING" | grep -F "application-icon"
           printf '%s\n' "$BADGING" | grep -F "launchable-activity: name='com.goodlight.floatingvoicebubble.MainActivity'"
+
+          ACTUAL_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner.log | head -n1 | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
+          test -n "$ACTUAL_CERT"
+          printf '%s\n' "$ACTUAL_CERT" | tee apk-signing-cert-sha256.txt
+          if [[ -n "${FVB_SIGNING_CERT_SHA256:-}" ]]; then
+            EXPECTED_CERT="$(printf '%s' "$FVB_SIGNING_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
+            test "$ACTUAL_CERT" = "$EXPECTED_CERT"
+          fi
+
+          if [[ -f "$FVB_SIGNING_STORE_FILE" ]]; then
+            RELEASE=app/build/outputs/apk/release/app-release.apk
+            test -s "$RELEASE"
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$RELEASE" | tee apksigner-release.log
+            RELEASE_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner-release.log | head -n1 | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
+            test "$RELEASE_CERT" = "$ACTUAL_CERT"
+          else
+            echo "Stable signer absent; release signing identity check skipped." | tee apksigner-release.log
+          fi
       - name: Upload CI diagnostic reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -70,6 +112,8 @@ jobs:
             apk-contents.txt
             zipalign-16k.log
             apksigner.log
+            apksigner-release.log
+            apk-signing-cert-sha256.txt
             apk-badging.txt
             app/build/reports/**
             app/build/test-results/**
@@ -80,6 +124,14 @@ jobs:
         with:
           name: FloatingVoiceBubble-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload signed release APK when stable signer is configured
+        if: ${{ hashFiles('.ci/fvb-signing.jks') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatingVoiceBubble-release-${{ github.sha }}
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
 
