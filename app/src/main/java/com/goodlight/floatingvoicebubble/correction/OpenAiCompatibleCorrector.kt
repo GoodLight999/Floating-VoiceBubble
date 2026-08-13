@@ -4,7 +4,6 @@ import com.goodlight.floatingvoicebubble.ReasoningEffort
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
-import java.net.URI
 import java.net.URL
 
 class OpenAiCompatibleCorrector(
@@ -18,26 +17,27 @@ class OpenAiCompatibleCorrector(
     override fun correct(request: CorrectionRequest): String {
         require(endpoint.startsWith("https://")) { "BYOK endpoint must use HTTPS" }
         require(model.isNotBlank()) { "BYOK model is not configured" }
+
+        val options = OpenAiProviderCompatibility.resolve(endpoint, model, reasoningEffort)
         val body = JSONObject()
-            .put("model", model)
-            .put("temperature", 0)
+            .put("model", options.requestModel)
             .put(
                 "messages",
                 JSONArray()
                     .put(JSONObject().put("role", "system").put("content", CorrectionPrompt.system(request)))
                     .put(JSONObject().put("role", "user").put("content", CorrectionPrompt.user(request))),
             )
-        applyReasoning(body)
+        applyProviderOptions(body, options)
 
-        var result = execute(body)
-        if (
-            result.status in listOf(400, 422) &&
-            result.text.contains("temperature", ignoreCase = true)
-        ) {
-            // Reasoning-oriented and newer models often reject temperature. Retrying the same
-            // semantic request without this optional sampling parameter keeps compatibility.
-            body.remove("temperature")
-            result = execute(body)
+        var result = execute(body, options)
+        if (result.status in listOf(400, 422) && optionalParameterRejected(result.text)) {
+            // Optional provider controls are never allowed to make the core correction request unusable.
+            // Retry once with the portable Chat Completions subset only.
+            body.remove("reasoning_effort")
+            body.remove("reasoning")
+            body.remove("thinking")
+            body.remove("do_sample")
+            result = execute(body, options.copy(sendEnglishAcceptLanguage = false))
         }
         if (result.status !in 200..299) {
             error("BYOK request failed: HTTP ${result.status} ${compact(result.text)}")
@@ -56,21 +56,26 @@ class OpenAiCompatibleCorrector(
                     if (part.optString("type") == "text") append(part.optString("text"))
                 }
             }
-            else -> error("BYOK response content is unsupported")
+            else -> error(
+                message.optString("reasoning_content").takeIf(String::isNotBlank)?.let {
+                    "BYOK response contained reasoning but no final text"
+                } ?: "BYOK response content is unsupported",
+            )
         }.trim().ifBlank { error("BYOK response has no text") }
     }
 
-    private fun applyReasoning(body: JSONObject) {
-        if (reasoningEffort == ReasoningEffort.DEFAULT) return
-        val host = runCatching { URI(endpoint).host.orEmpty() }.getOrDefault("")
-        if (host.equals("openrouter.ai", ignoreCase = true)) {
-            body.put("reasoning", JSONObject().put("effort", openRouterEffort(reasoningEffort)))
-        } else {
-            body.put("reasoning_effort", openAiEffort(reasoningEffort))
+    private fun applyProviderOptions(body: JSONObject, options: OpenAiProviderOptions) {
+        options.openAiReasoningEffort?.let { body.put("reasoning_effort", it) }
+        options.openRouterReasoningEffort?.let { effort ->
+            body.put("reasoning", JSONObject().put("effort", effort))
         }
+        options.zaiThinkingEnabled?.let { enabled ->
+            body.put("thinking", JSONObject().put("type", if (enabled) "enabled" else "disabled"))
+        }
+        if (options.disableSampling) body.put("do_sample", false)
     }
 
-    private fun execute(body: JSONObject): HttpResult {
+    private fun execute(body: JSONObject, options: OpenAiProviderOptions): HttpResult {
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = CONNECT_TIMEOUT_MS
@@ -78,6 +83,7 @@ class OpenAiCompatibleCorrector(
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
+            if (options.sendEnglishAcceptLanguage) setRequestProperty("Accept-Language", "en-US,en")
             if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
         }
         return try {
@@ -91,25 +97,10 @@ class OpenAiCompatibleCorrector(
         }
     }
 
-    private fun openAiEffort(value: ReasoningEffort): String = when (value) {
-        ReasoningEffort.DEFAULT -> error("DEFAULT is omitted")
-        ReasoningEffort.NONE -> "none"
-        ReasoningEffort.MINIMAL -> "minimal"
-        ReasoningEffort.LOW -> "low"
-        ReasoningEffort.MEDIUM -> "medium"
-        ReasoningEffort.HIGH -> "high"
-        ReasoningEffort.XHIGH, ReasoningEffort.MAX -> "xhigh"
-    }
-
-    private fun openRouterEffort(value: ReasoningEffort): String = when (value) {
-        ReasoningEffort.DEFAULT -> error("DEFAULT is omitted")
-        ReasoningEffort.NONE -> "none"
-        ReasoningEffort.MINIMAL -> "minimal"
-        ReasoningEffort.LOW -> "low"
-        ReasoningEffort.MEDIUM -> "medium"
-        ReasoningEffort.HIGH -> "high"
-        ReasoningEffort.XHIGH -> "xhigh"
-        ReasoningEffort.MAX -> "max"
+    private fun optionalParameterRejected(value: String): Boolean {
+        val lower = value.lowercase()
+        return listOf("reasoning_effort", "reasoning", "thinking", "do_sample", "unknown field", "unsupported parameter")
+            .any(lower::contains)
     }
 
     private fun compact(value: String): String = value.take(500).replace(Regex("\\s+"), " ").trim()
