@@ -14,6 +14,7 @@ class AppCorrectionProfileTest {
         correctionRemoveFillers = true,
         correctionPolite = false,
         correctionBusinessPolite = false,
+        correctionLineBreakMode = LineBreakMode.NONE,
     )
 
     @Test
@@ -22,12 +23,25 @@ class AppCorrectionProfileTest {
             packageName = "com.google.android.gm",
             register = ProfileRegister.POLITE,
         )
-        val effective = profile.applyTo(global.copy(correctionAddPeriods = false))
+        val effective = profile.applyTo(global.copy(correctionAddPeriods = false, correctionLineBreakMode = LineBreakMode.SMART))
         assertTrue(effective.correctionPolite)
         assertFalse(effective.correctionBusinessPolite)
         assertTrue(effective.correctionAddCommas)
         assertFalse(effective.correctionAddPeriods)
         assertTrue(effective.correctionRemoveFillers)
+        assertEquals(LineBreakMode.SMART, effective.correctionLineBreakMode)
+        assertEquals(CorrectionMode.BYOK, effective.correctionMode)
+    }
+
+    @Test
+    fun perAppLineBreakCanOverrideWithoutFreezingOtherFields() {
+        val profile = AppCorrectionProfile(
+            packageName = "com.google.android.gm",
+            lineBreakMode = ProfileLineBreakMode.SMART_SPACED,
+        )
+        val effective = profile.applyTo(global.copy(correctionAddPeriods = false))
+        assertEquals(LineBreakMode.SMART_SPACED, effective.correctionLineBreakMode)
+        assertFalse(effective.correctionAddPeriods)
         assertEquals(CorrectionMode.BYOK, effective.correctionMode)
     }
 
@@ -65,6 +79,7 @@ class AppCorrectionProfileTest {
             addCommas = ProfileToggle.OFF,
             register = ProfileRegister.BUSINESS,
             correctionMode = ProfileCorrectionMode.NONE,
+            lineBreakMode = ProfileLineBreakMode.SMART_SPACED,
         )
         assertEquals(global, profile.applyTo(global))
     }
@@ -79,6 +94,7 @@ class AppCorrectionProfileTest {
             removeFillers = ProfileToggle.ON,
             register = ProfileRegister.BUSINESS,
             correctionMode = ProfileCorrectionMode.AUTO,
+            lineBreakMode = ProfileLineBreakMode.SMART_SPACED,
         )
         assertEquals(
             original,
@@ -96,52 +112,66 @@ class AppCorrectionProfileTest {
                     for (fillers in ProfileToggle.entries) {
                         for (register in ProfileRegister.entries) {
                             for (mode in ProfileCorrectionMode.entries) {
-                                val profile = AppCorrectionProfile(
-                                    packageName = "com.example.exhaustive",
-                                    enabled = enabled,
-                                    addCommas = commas,
-                                    addPeriods = periods,
-                                    removeFillers = fillers,
-                                    register = register,
-                                    correctionMode = mode,
-                                )
-                                val decoded = AppCorrectionProfileCodec.decode(
-                                    profile.packageName,
-                                    AppCorrectionProfileCodec.encode(profile),
-                                )
-                                assertEquals(profile, decoded)
+                                for (lineBreakMode in ProfileLineBreakMode.entries) {
+                                    val profile = AppCorrectionProfile(
+                                        packageName = "com.example.exhaustive",
+                                        enabled = enabled,
+                                        addCommas = commas,
+                                        addPeriods = periods,
+                                        removeFillers = fillers,
+                                        register = register,
+                                        correctionMode = mode,
+                                        lineBreakMode = lineBreakMode,
+                                    )
+                                    val decoded = AppCorrectionProfileCodec.decode(
+                                        profile.packageName,
+                                        AppCorrectionProfileCodec.encode(profile),
+                                    )
+                                    assertEquals(profile, decoded)
 
-                                val effective = profile.applyTo(
-                                    global.copy(
-                                        correctionPolite = true,
-                                        correctionBusinessPolite = false,
-                                    ),
-                                )
-                                assertFalse(
-                                    "register must never resolve to polite and business simultaneously: $profile",
-                                    effective.correctionPolite && effective.correctionBusinessPolite,
-                                )
-                                checked += 1
+                                    val effective = profile.applyTo(
+                                        global.copy(
+                                            correctionPolite = true,
+                                            correctionBusinessPolite = false,
+                                            correctionLineBreakMode = LineBreakMode.SMART,
+                                        ),
+                                    )
+                                    assertFalse(
+                                        "register must never resolve to polite and business simultaneously: $profile",
+                                        effective.correctionPolite && effective.correctionBusinessPolite,
+                                    )
+                                    checked += 1
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        assertEquals(1080, checked)
+        assertEquals(4320, checked)
     }
 
     @Test
     fun codecFallsBackPerFieldForFutureOrCorruptEnumValues() {
         val decoded = AppCorrectionProfileCodec.decode(
             "com.example.app",
-            "v1|enabled=1|commas=NOPE|periods=OFF|fillers=ON|register=WHAT|mode=BYOK",
+            "v1|enabled=1|commas=NOPE|periods=OFF|fillers=ON|register=WHAT|mode=BYOK|breaks=BAD",
         )!!
         assertEquals(ProfileToggle.INHERIT, decoded.addCommas)
         assertEquals(ProfileToggle.OFF, decoded.addPeriods)
         assertEquals(ProfileToggle.ON, decoded.removeFillers)
         assertEquals(ProfileRegister.INHERIT, decoded.register)
         assertEquals(ProfileCorrectionMode.BYOK, decoded.correctionMode)
+        assertEquals(ProfileLineBreakMode.INHERIT, decoded.lineBreakMode)
+    }
+
+    @Test
+    fun oldV1ProfilesWithoutBreakFieldRemainBackwardCompatible() {
+        val decoded = AppCorrectionProfileCodec.decode(
+            "com.example.old",
+            "v1|enabled=1|commas=ON|periods=OFF|fillers=ON|register=POLITE|mode=BYOK",
+        )!!
+        assertEquals(ProfileLineBreakMode.INHERIT, decoded.lineBreakMode)
     }
 
     @Test
