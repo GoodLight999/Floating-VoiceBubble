@@ -2,6 +2,7 @@ package com.goodlight.floatingvoicebubble.correction
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ByokEndpointResolverTest {
@@ -17,14 +18,33 @@ class ByokEndpointResolverTest {
     }
 
     @Test
-    fun addsV1ForVersionlessOpenAiCompatibleRoots() {
+    fun canonicalizesEveryCommonOpenRouterInputToApiV1() {
+        listOf(
+            "https://openrouter.ai",
+            "https://openrouter.ai/",
+            "https://openrouter.ai/api",
+            "https://openrouter.ai/v1",
+            "https://openrouter.ai/v1/models",
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/models",
+            "https://openrouter.ai/api/v1/chat/completion",
+        ).forEach { input ->
+            val resolved = ByokEndpointResolver.resolve(input)
+            assertEquals("https://openrouter.ai/api/v1/chat/completions", resolved.generationUrl)
+            assertEquals("https://openrouter.ai/api/v1/models", resolved.modelsUrl)
+            assertTrue(ByokEndpointResolver.isOpenRouter(input))
+        }
+    }
+
+    @Test
+    fun addsV1ForVersionlessGenericOpenAiCompatibleRoots() {
         val root = ByokEndpointResolver.resolve("https://llm.example.com")
         assertEquals("https://llm.example.com/v1/chat/completions", root.generationUrl)
         assertEquals("https://llm.example.com/v1/models", root.modelsUrl)
 
-        val apiRoot = ByokEndpointResolver.resolve("https://openrouter.ai/api")
-        assertEquals("https://openrouter.ai/api/v1/chat/completions", apiRoot.generationUrl)
-        assertEquals("https://openrouter.ai/api/v1/models", apiRoot.modelsUrl)
+        val apiRoot = ByokEndpointResolver.resolve("https://llm.example.com/api")
+        assertEquals("https://llm.example.com/api/v1/chat/completions", apiRoot.generationUrl)
+        assertEquals("https://llm.example.com/api/v1/models", apiRoot.modelsUrl)
     }
 
     @Test
