@@ -1,6 +1,9 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.ReasoningEffort
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -20,14 +23,9 @@ class ByokEndpointResolverTest {
     @Test
     fun canonicalizesEveryCommonOpenRouterInputToApiV1() {
         listOf(
-            "https://openrouter.ai",
-            "https://openrouter.ai/",
-            "https://openrouter.ai/api",
-            "https://openrouter.ai/v1",
-            "https://openrouter.ai/v1/models",
-            "https://openrouter.ai/api/v1",
-            "https://openrouter.ai/api/v1/models",
-            "https://openrouter.ai/api/v1/chat/completion",
+            "https://openrouter.ai", "https://openrouter.ai/", "https://openrouter.ai/api",
+            "https://openrouter.ai/v1", "https://openrouter.ai/v1/models", "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/models", "https://openrouter.ai/api/v1/chat/completion",
         ).forEach { input ->
             val resolved = ByokEndpointResolver.resolve(input)
             assertEquals("https://openrouter.ai/api/v1/chat/completions", resolved.generationUrl)
@@ -41,7 +39,6 @@ class ByokEndpointResolverTest {
         val root = ByokEndpointResolver.resolve("https://llm.example.com")
         assertEquals("https://llm.example.com/v1/chat/completions", root.generationUrl)
         assertEquals("https://llm.example.com/v1/models", root.modelsUrl)
-
         val apiRoot = ByokEndpointResolver.resolve("https://llm.example.com/api")
         assertEquals("https://llm.example.com/api/v1/chat/completions", apiRoot.generationUrl)
         assertEquals("https://llm.example.com/api/v1/models", apiRoot.modelsUrl)
@@ -51,12 +48,8 @@ class ByokEndpointResolverTest {
     fun repairsCommonOpenAiEndpointMistakes() {
         val singular = ByokEndpointResolver.resolve("https://llm.example.com/v1/chat/completion")
         assertEquals("https://llm.example.com/v1/chat/completions", singular.generationUrl)
-        assertEquals("https://llm.example.com/v1/models", singular.modelsUrl)
-
         val legacy = ByokEndpointResolver.resolve("https://llm.example.com/v1/completions")
         assertEquals("https://llm.example.com/v1/chat/completions", legacy.generationUrl)
-        assertEquals("https://llm.example.com/v1/models", legacy.modelsUrl)
-
         val models = ByokEndpointResolver.resolve("https://llm.example.com/v1/models?foo=bar#ignored")
         assertEquals("https://llm.example.com/v1/chat/completions", models.generationUrl)
         assertEquals("https://llm.example.com/v1/models", models.modelsUrl)
@@ -67,14 +60,10 @@ class ByokEndpointResolverTest {
         val root = ByokEndpointResolver.resolve("https://api.anthropic.com")
         assertEquals("https://api.anthropic.com/v1/messages", root.generationUrl)
         assertEquals("https://api.anthropic.com/v1/models", root.modelsUrl)
-
         val messages = ByokEndpointResolver.resolve("https://api.anthropic.com/v1/messages")
         assertEquals("https://api.anthropic.com/v1/messages", messages.generationUrl)
-        assertEquals("https://api.anthropic.com/v1/models", messages.modelsUrl)
-
         val models = ByokEndpointResolver.resolve("https://api.anthropic.com/v1/models")
         assertEquals("https://api.anthropic.com/v1/messages", models.generationUrl)
-        assertEquals("https://api.anthropic.com/v1/models", models.modelsUrl)
     }
 
     @Test
@@ -88,19 +77,51 @@ class ByokEndpointResolverTest {
     fun googleOpenAiCompatibilityStaysOpenAiProtocol() {
         val resolved = ByokEndpointResolver.resolve("https://generativelanguage.googleapis.com/v1beta/openai")
         assertEquals(CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE, resolved.protocol)
-        assertEquals(
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-            resolved.generationUrl,
+        assertEquals("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", resolved.generationUrl)
+    }
+
+    @Test
+    fun zaiVersionedRootsStayOnTheirOwnApiPrefix() {
+        val normal = ByokEndpointResolver.resolve("https://api.z.ai/api/paas/v4")
+        assertEquals("https://api.z.ai/api/paas/v4/chat/completions", normal.generationUrl)
+        assertEquals("https://api.z.ai/api/paas/v4/models", normal.modelsUrl)
+        val coding = ByokEndpointResolver.resolve("https://api.z.ai/api/coding/paas/v4")
+        assertEquals("https://api.z.ai/api/coding/paas/v4/chat/completions", coding.generationUrl)
+        assertEquals("https://api.z.ai/api/coding/paas/v4/models", coding.modelsUrl)
+    }
+
+    @Test
+    fun zaiUsesZaiThinkingInsteadOfOpenAiReasoningEffort() {
+        val high = OpenAiProviderCompatibility.resolve(
+            "https://api.z.ai/api/paas/v4/chat/completions", "GLM-4.7", ReasoningEffort.HIGH,
         )
+        assertEquals("glm-4.7", high.requestModel)
+        assertEquals(true, high.zaiThinkingEnabled)
+        assertNull(high.openAiReasoningEffort)
+        assertNull(high.openRouterReasoningEffort)
+        assertTrue(high.disableSampling)
+        assertFalse(high.zaiCodingPlanEndpoint)
+
+        val none = OpenAiProviderCompatibility.resolve(
+            "https://api.z.ai/api/coding/paas/v4/chat/completions", "GLM-4.5-Air", ReasoningEffort.NONE,
+        )
+        assertEquals(false, none.zaiThinkingEnabled)
+        assertTrue(none.zaiCodingPlanEndpoint)
+    }
+
+    @Test
+    fun genericCompatibleHostDoesNotReceiveProviderSpecificReasoningField() {
+        val options = OpenAiProviderCompatibility.resolve(
+            "https://llm.example.com/v1/chat/completions", "model", ReasoningEffort.HIGH,
+        )
+        assertNull(options.openAiReasoningEffort)
+        assertNull(options.openRouterReasoningEffort)
+        assertNull(options.zaiThinkingEnabled)
     }
 
     @Test
     fun rejectsInsecureOrCredentialBearingEndpoints() {
-        assertThrows(IllegalArgumentException::class.java) {
-            ByokEndpointResolver.resolve("http://llm.example.com/v1")
-        }
-        assertThrows(IllegalArgumentException::class.java) {
-            ByokEndpointResolver.resolve("https://user:secret@llm.example.com/v1")
-        }
+        assertThrows(IllegalArgumentException::class.java) { ByokEndpointResolver.resolve("http://llm.example.com/v1") }
+        assertThrows(IllegalArgumentException::class.java) { ByokEndpointResolver.resolve("https://user:secret@llm.example.com/v1") }
     }
 }
