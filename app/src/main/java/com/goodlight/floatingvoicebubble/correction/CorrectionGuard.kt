@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble.correction
 
 import com.goodlight.floatingvoicebubble.LineBreakMode
+import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -13,6 +14,7 @@ object CorrectionGuard {
             modelOutput,
             allowRegisterRewrite = preferences.registerRewriteRequested,
             ignoreLineBreaksForDistance = preferences.lineBreakRewriteRequested,
+            recognitionRepairMode = preferences.recognitionRepairMode,
         )
         if (!decision.accepted) return decision
         val cleaned = decision.text
@@ -31,6 +33,13 @@ object CorrectionGuard {
         if (preferences.lineBreakMode == LineBreakMode.NONE && newlineCount(cleaned) > newlineCount(raw)) {
             return decision.copy(text = raw, accepted = false, reason = "linebreak-not-allowed")
         }
+        if (
+            preferences.recognitionRepairMode == RecognitionRepairMode.OFF &&
+            !preferences.registerRewriteRequested &&
+            lexicalSkeleton(cleaned, preferences.removeFillers) != lexicalSkeleton(raw, preferences.removeFillers)
+        ) {
+            return decision.copy(text = raw, accepted = false, reason = "recognition-repair-off")
+        }
         return decision
     }
 
@@ -39,6 +48,7 @@ object CorrectionGuard {
         modelOutput: String,
         allowRegisterRewrite: Boolean = false,
         ignoreLineBreaksForDistance: Boolean = false,
+        recognitionRepairMode: RecognitionRepairMode = RecognitionRepairMode.NORMAL,
     ): Decision {
         val cleaned = sanitize(modelOutput)
         if (raw.isBlank()) return Decision(cleaned, cleaned.isNotBlank(), 0.0)
@@ -50,15 +60,28 @@ object CorrectionGuard {
         val distance = levenshtein(rawPoints, newPoints)
         val normalized = distance.toDouble() / max(rawPoints.size, newPoints.size).coerceAtLeast(1)
         val lengthDelta = abs(newPoints.size - rawPoints.size).toDouble() / rawPoints.size.coerceAtLeast(1)
-        val threshold = if (allowRegisterRewrite) {
-            // Register conversion is explicitly requested by the user. Japanese polite/business
-            // forms legitimately replace and expand short phrases far more than typo correction,
-            // so do not let the ordinary minimum-edit budget make this feature a no-op.
-            when { rawPoints.size <= 8 -> 0.96; rawPoints.size <= 20 -> 0.90; else -> 0.82 }
-        } else {
-            when { rawPoints.size <= 8 -> 0.72; rawPoints.size <= 20 -> 0.58; else -> 0.46 }
+        val threshold = when {
+            allowRegisterRewrite -> when {
+                rawPoints.size <= 8 -> 0.96
+                rawPoints.size <= 20 -> 0.90
+                else -> 0.82
+            }
+            recognitionRepairMode == RecognitionRepairMode.STRONG -> when {
+                rawPoints.size <= 8 -> 0.92
+                rawPoints.size <= 20 -> 0.84
+                else -> 0.72
+            }
+            else -> when {
+                rawPoints.size <= 8 -> 0.72
+                rawPoints.size <= 20 -> 0.58
+                else -> 0.46
+            }
         }
-        val maxLengthDelta = if (allowRegisterRewrite) 3.50 else 0.40
+        val maxLengthDelta = when {
+            allowRegisterRewrite -> 3.50
+            recognitionRepairMode == RecognitionRepairMode.STRONG -> 0.75
+            else -> 0.40
+        }
         return if (normalized <= threshold && lengthDelta <= maxLengthDelta) Decision(cleaned, true, normalized)
         else Decision(raw, false, normalized, "edit-budget-exceeded")
     }
@@ -71,6 +94,15 @@ object CorrectionGuard {
         if (text.length >= 2 && ((text.first() == '"' && text.last() == '"') || (text.first() == '「' && text.last() == '」'))) {
             text = text.substring(1, text.length - 1).trim()
         }
+        return text
+    }
+
+    private fun lexicalSkeleton(value: String, allowFillerRemoval: Boolean): String {
+        var text = value
+            .replace("\r", "")
+            .replace("\n", "")
+            .replace(Regex("[\\s、。,.!?！？・:：;；()（）『』「」【】\\[\\]]+"), "")
+        if (allowFillerRemoval) FILLERS.forEach { filler -> text = text.replace(filler, "") }
         return text
     }
 
