@@ -6,6 +6,7 @@ enum class ProfileToggle { INHERIT, ON, OFF }
 enum class ProfileRegister { INHERIT, PLAIN, POLITE, BUSINESS }
 enum class ProfileCorrectionMode { INHERIT, AUTO, BYOK, GEMMA, NONE }
 enum class ProfileLineBreakMode { INHERIT, NONE, SMART, SMART_SPACED }
+enum class ProfileRecognitionRepairMode { INHERIT, OFF, NORMAL, STRONG }
 
 data class AppCorrectionProfile(
     val packageName: String,
@@ -16,6 +17,7 @@ data class AppCorrectionProfile(
     val register: ProfileRegister = ProfileRegister.INHERIT,
     val correctionMode: ProfileCorrectionMode = ProfileCorrectionMode.INHERIT,
     val lineBreakMode: ProfileLineBreakMode = ProfileLineBreakMode.INHERIT,
+    val recognitionRepairMode: ProfileRecognitionRepairMode = ProfileRecognitionRepairMode.INHERIT,
 ) {
     fun applyTo(base: AppSettings): AppSettings {
         if (!enabled) return base
@@ -33,6 +35,7 @@ data class AppCorrectionProfile(
             correctionBusinessPolite = registerPair.second,
             correctionMode = correctionMode.resolve(base.correctionMode),
             correctionLineBreakMode = lineBreakMode.resolve(base.correctionLineBreakMode),
+            recognitionRepairMode = recognitionRepairMode.resolve(base.recognitionRepairMode),
         )
     }
 }
@@ -58,6 +61,13 @@ private fun ProfileLineBreakMode.resolve(global: LineBreakMode): LineBreakMode =
     ProfileLineBreakMode.SMART_SPACED -> LineBreakMode.SMART_SPACED
 }
 
+private fun ProfileRecognitionRepairMode.resolve(global: RecognitionRepairMode): RecognitionRepairMode = when (this) {
+    ProfileRecognitionRepairMode.INHERIT -> global
+    ProfileRecognitionRepairMode.OFF -> RecognitionRepairMode.OFF
+    ProfileRecognitionRepairMode.NORMAL -> RecognitionRepairMode.NORMAL
+    ProfileRecognitionRepairMode.STRONG -> RecognitionRepairMode.STRONG
+}
+
 /** Compact, deterministic format so profile persistence can be JVM-tested without Android JSON stubs. */
 object AppCorrectionProfileCodec {
     fun encode(profile: AppCorrectionProfile): String = listOf(
@@ -69,6 +79,7 @@ object AppCorrectionProfileCodec {
         "register=${profile.register.name}",
         "mode=${profile.correctionMode.name}",
         "breaks=${profile.lineBreakMode.name}",
+        "repair=${profile.recognitionRepairMode.name}",
     ).joinToString("|")
 
     fun decode(packageName: String, raw: String?): AppCorrectionProfile? {
@@ -88,6 +99,7 @@ object AppCorrectionProfileCodec {
             register = enumOr(values["register"], ProfileRegister.INHERIT),
             correctionMode = enumOr(values["mode"], ProfileCorrectionMode.INHERIT),
             lineBreakMode = enumOr(values["breaks"], ProfileLineBreakMode.INHERIT),
+            recognitionRepairMode = enumOr(values["repair"], ProfileRecognitionRepairMode.INHERIT),
         )
     }
 
@@ -120,8 +132,10 @@ class AppProfileStore(context: Context) {
 
     fun save(profile: AppCorrectionProfile) {
         require(AppCorrectionProfileCodec.isValidPackageName(profile.packageName)) { "アプリのpackage nameが不正です。" }
-        prefs.edit().putString(PROFILE_PREFIX + profile.packageName, AppCorrectionProfileCodec.encode(profile)).apply()
+        prefs.edit().putString(PROFILE_PREFIX + packageName(profile), AppCorrectionProfileCodec.encode(profile)).apply()
     }
+
+    private fun packageName(profile: AppCorrectionProfile): String = profile.packageName
 
     fun delete(packageName: String) {
         prefs.edit().remove(PROFILE_PREFIX + packageName).apply()
