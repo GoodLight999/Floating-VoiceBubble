@@ -33,11 +33,11 @@ internal fun QuickCorrectionControls(activity: MainActivity, modifier: Modifier 
 
     Column(modifier = modifier) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("音声の整え方", style = MaterialTheme.typography.titleSmall)
                 Text(
                     "選んだ処理だけを最終補正へ許可します",
@@ -45,8 +45,13 @@ internal fun QuickCorrectionControls(activity: MainActivity, modifier: Modifier 
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            TextButton(onClick = { activity.startActivity(Intent(activity, CorrectionSetupActivity::class.java)) }) {
-                Text("API / Gemma")
+            Row {
+                TextButton(onClick = { activity.startActivity(Intent(activity, AppProfilesActivity::class.java)) }) {
+                    Text("アプリ別")
+                }
+                TextButton(onClick = { activity.startActivity(Intent(activity, CorrectionSetupActivity::class.java)) }) {
+                    Text("API / Gemma")
+                }
             }
         }
 
