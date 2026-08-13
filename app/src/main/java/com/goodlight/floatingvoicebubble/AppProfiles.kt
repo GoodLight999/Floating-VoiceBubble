@@ -132,10 +132,8 @@ class AppProfileStore(context: Context) {
 
     fun save(profile: AppCorrectionProfile) {
         require(AppCorrectionProfileCodec.isValidPackageName(profile.packageName)) { "アプリのpackage nameが不正です。" }
-        prefs.edit().putString(PROFILE_PREFIX + packageName(profile), AppCorrectionProfileCodec.encode(profile)).apply()
+        prefs.edit().putString(PROFILE_PREFIX + profile.packageName, AppCorrectionProfileCodec.encode(profile)).apply()
     }
-
-    private fun packageName(profile: AppCorrectionProfile): String = profile.packageName
 
     fun delete(packageName: String) {
         prefs.edit().remove(PROFILE_PREFIX + packageName).apply()
