@@ -131,7 +131,6 @@ class ByokModelDiscovery {
             connectTimeout = 10_000
             readTimeout = 30_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("Accept-Encoding", "gzip")
             when (protocol) {
                 CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE -> {
                     if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
