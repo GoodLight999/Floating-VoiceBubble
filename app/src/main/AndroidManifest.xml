@@ -19,6 +19,10 @@
             android:exported="false" />
 
         <activity
+            android:name=".AppProfilesActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".CorrectionSetupActivity"
             android:exported="false" />
 
