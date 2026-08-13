@@ -14,6 +14,11 @@ data class FinalizationTrace(
     val correctionDistance: Double,
     val correctionError: String? = null,
     val correctionInputText: String = outcome.rawTranscript,
+    val modelOutputText: String? = null,
+    val correctionAttempted: Boolean = false,
+    val correctionChanged: Boolean = finalText != correctionInputText,
+    val correctionBypassed: Boolean = false,
+    val correctionDecisionReason: String? = null,
     val finalAsrId: String = "live-result",
     val finalAsrLatencyMs: Long? = null,
     val finalAsrRtf: Double? = null,
@@ -25,9 +30,7 @@ class SessionTraceStore(context: Context) {
     private val appContext = context.applicationContext
     val audioDir: File = File(appContext.noBackupFilesDir, "session-traces").apply { mkdirs() }
 
-    init {
-        migrateLegacyDirectory()
-    }
+    init { migrateLegacyDirectory() }
 
     fun save(trace: FinalizationTrace, enabled: Boolean) {
         trace.outcome.audioFile?.let(::awaitAudioFinalization)
@@ -36,7 +39,7 @@ class SessionTraceStore(context: Context) {
             return
         }
         val json = JSONObject()
-            .put("schema", 2)
+            .put("schema", 3)
             .put("sessionId", trace.outcome.sessionId)
             .put("liveRecognizer", trace.outcome.recognizerKind)
             .put("corrector", trace.correctorId)
@@ -54,9 +57,14 @@ class SessionTraceStore(context: Context) {
             .put("finalAsrError", trace.finalAsrError ?: JSONObject.NULL)
             .put("rawTranscript", trace.correctionInputText)
             .put("alternatives", JSONArray(listOf(trace.correctionInputText) + trace.outcome.alternatives))
+            .put("modelOutput", trace.modelOutputText ?: JSONObject.NULL)
             .put("finalText", trace.finalText)
+            .put("correctionAttempted", trace.correctionAttempted)
+            .put("correctionChanged", trace.correctionChanged)
+            .put("correctionBypassed", trace.correctionBypassed)
             .put("correctionAccepted", trace.correctionAccepted)
             .put("correctionDistance", trace.correctionDistance)
+            .put("correctionDecisionReason", trace.correctionDecisionReason ?: JSONObject.NULL)
             .put("correctionError", trace.correctionError ?: JSONObject.NULL)
             .put("audioFile", trace.outcome.audioFile?.name ?: JSONObject.NULL)
         val target = File(audioDir, "${trace.outcome.sessionId}.json")
@@ -98,17 +106,14 @@ class SessionTraceStore(context: Context) {
             if (size > 44L && size == previousSize) {
                 stableSamples++
                 if (stableSamples >= 2) return
-            } else {
-                stableSamples = 0
-            }
+            } else stableSamples = 0
             previousSize = size
             Thread.sleep(30)
         }
     }
 
     private fun prune(maxSessions: Int = 30) {
-        val jsonFiles = recentSessionMetadata(Int.MAX_VALUE)
-        jsonFiles.drop(maxSessions).forEach { json ->
+        recentSessionMetadata(Int.MAX_VALUE).drop(maxSessions).forEach { json ->
             val id = json.nameWithoutExtension
             json.delete()
             File(audioDir, "$id.wav").delete()
