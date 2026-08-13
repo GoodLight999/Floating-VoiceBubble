@@ -73,6 +73,37 @@ class SpeechRecognitionSession(
             if (!inputClosed) onState("音声認識を継続しています")
         }
 
+        override fun onSegmentResults(segmentResults: Bundle) {
+            if (delivered.get() || closed.get()) return
+            val candidates = candidatesFrom(segmentResults)
+            if (candidates.isEmpty()) return
+            accumulator.commit(candidates.first())
+            latestPartial = ""
+            latestAlternatives = emptyList()
+            consecutiveRestartErrors = 0
+            onPartial(accumulator.display())
+            if (!inputClosed) onState("続けて話せます")
+        }
+
+        override fun onEndOfSegmentedSession() {
+            recognizerListening = false
+            if (delivered.get() || closed.get()) return
+            if (inputClosed) {
+                val finalCandidates = accumulator.finalCandidates(latestAlternatives, latestPartial)
+                if (finalCandidates.isNotEmpty()) deliver(finalCandidates)
+                else fail("音声を文字として認識できませんでした。")
+            } else {
+                // EXTRA_SEGMENTED_SESSION is advisory for OEM recognizers. A provider that ends
+                // early despite an open caller-owned audio source gets the same lossless fallback
+                // as a non-segmented implementation: retain text, then reopen only recognition.
+                if (latestPartial.isNotBlank()) accumulator.commit(latestPartial)
+                latestPartial = ""
+                latestAlternatives = emptyList()
+                onPartial(accumulator.display())
+                scheduleAndroidRestart(ANDROID_RESTART_BASE_DELAY_MS)
+            }
+        }
+
         override fun onError(error: Int) {
             recognizerListening = false
             if (delivered.get() || closed.get()) return
@@ -83,9 +114,9 @@ class SpeechRecognitionSession(
                 return
             }
 
-            // Some Android/OEM recognizers impose their own speech-window boundary even when
-            // VoiceBubble still owns an open PCM source. Preserve the latest partial and reopen
-            // only the recognizer turn; never stop the caller-owned microphone session here.
+            // Some Android/OEM recognizers ignore segmented-session mode or impose their own
+            // speech window. Preserve the latest text and reopen only the recognizer turn; the
+            // caller-owned PCM capture remains continuous and is never discarded here.
             if (isRecoverableSegmentationError(error) && consecutiveRestartErrors < MAX_ANDROID_RESTART_ERRORS) {
                 if (latestPartial.isNotBlank()) accumulator.commit(latestPartial)
                 latestPartial = ""
@@ -102,10 +133,7 @@ class SpeechRecognitionSession(
         override fun onResults(results: Bundle) {
             recognizerListening = false
             if (delivered.get() || closed.get()) return
-            val candidates = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                ?.map(String::trim)
-                ?.filter(String::isNotEmpty)
-                .orEmpty()
+            val candidates = candidatesFrom(results)
             if (candidates.isNotEmpty()) latestAlternatives = candidates
 
             if (inputClosed) {
@@ -120,8 +148,8 @@ class SpeechRecognitionSession(
                 return
             }
 
-            // A provider final result is a segment, not the end of the VoiceBubble recording.
-            // This is the critical distinction that prevents long utterances from disappearing.
+            // Fallback for implementations that ignore EXTRA_SEGMENTED_SESSION and still return
+            // ordinary final results. Treat that final as one segment, never as VoiceBubble EOF.
             accumulator.commit(candidates.first())
             latestPartial = ""
             latestAlternatives = emptyList()
@@ -132,10 +160,7 @@ class SpeechRecognitionSession(
         }
 
         override fun onPartialResults(partialResults: Bundle) {
-            val candidates = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                ?.map(String::trim)
-                ?.filter(String::isNotEmpty)
-                .orEmpty()
+            val candidates = candidatesFrom(partialResults)
             if (candidates.isEmpty()) return
             latestPartial = candidates.first()
             latestAlternatives = candidates
@@ -165,8 +190,8 @@ class SpeechRecognitionSession(
             RecognitionBackend.SHERPA_STREAMING -> null
         }
         recognizerKind = when (backend) {
-            RecognitionBackend.ANDROID_ON_DEVICE -> "android-on-device-segmented"
-            RecognitionBackend.ANDROID_SYSTEM -> "android-system-segmented"
+            RecognitionBackend.ANDROID_ON_DEVICE -> "android-on-device-segmented-audio-source"
+            RecognitionBackend.ANDROID_SYSTEM -> "android-system-segmented-audio-source"
             RecognitionBackend.SHERPA_STREAMING -> "sherpa-nemotron35-${streamingModel!!.chunkMs}ms"
         }
 
@@ -233,16 +258,15 @@ class SpeechRecognitionSession(
         if (backend == RecognitionBackend.SHERPA_STREAMING) {
             sherpaEngine?.finish()
         } else {
-            // If a provider ended a segment just before the user stopped, there may be no active
-            // recognizer turn to finalize. The committed prefix is already a valid complete result.
-            if (!recognizerListening) {
-                val fallback = accumulator.finalCandidates(latestAlternatives, latestPartial)
-                if (fallback.isNotEmpty()) {
-                    deliver(fallback)
-                    return
+            // In supported segmented mode, closing the caller-owned audio stream is the official
+            // end-of-session signal. Do not immediately stopListening(), which can cut buffered
+            // tail audio. If an OEM ignores segmented mode, request finalization after a grace
+            // period while retaining the accumulated transcript as the timeout fallback.
+            mainHandler.postDelayed({
+                if (!delivered.get() && !closed.get() && inputClosed) {
+                    runCatching { recognizer?.stopListening() }
                 }
-            }
-            runCatching { recognizer?.stopListening() }
+            }, ANDROID_STOP_LISTENING_FALLBACK_DELAY_MS)
         }
 
         val timeout = if (backend == RecognitionBackend.SHERPA_STREAMING) {
@@ -268,6 +292,8 @@ class SpeechRecognitionSession(
         mainHandler.removeCallbacksAndMessages(null)
         capture.close()
         sherpaEngine?.close()
+        androidSource?.let { source -> runCatching { source.close() } }
+        androidSource = null
         recognizer?.let { speechRecognizer ->
             runCatching { speechRecognizer.cancel() }
             runCatching { speechRecognizer.destroy() }
@@ -298,6 +324,7 @@ class SpeechRecognitionSession(
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, capture.channelCount)
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
             putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, capture.sampleRate)
+            putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
             if (biasTerms.isNotEmpty()) {
                 putStringArrayListExtra(
                     RecognizerIntent.EXTRA_BIASING_STRINGS,
@@ -313,6 +340,12 @@ class SpeechRecognitionSession(
             fail(failure.message ?: "音声認識を再開できませんでした。")
         }
     }
+
+    private fun candidatesFrom(bundle: Bundle): List<String> =
+        bundle.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            ?.map(String::trim)
+            ?.filter(String::isNotEmpty)
+            .orEmpty()
 
     private fun deliver(candidates: List<String>) {
         if (!delivered.compareAndSet(false, true)) return
@@ -379,6 +412,7 @@ class SpeechRecognitionSession(
         private const val ANDROID_FINAL_RESULT_TIMEOUT_MS = 8_000L
         private const val SHERPA_FINAL_RESULT_TIMEOUT_MS = 20_000L
         private const val ANDROID_RESTART_BASE_DELAY_MS = 120L
+        private const val ANDROID_STOP_LISTENING_FALLBACK_DELAY_MS = 1_000L
         private const val MAX_ANDROID_RESTART_ERRORS = 4
     }
 }
