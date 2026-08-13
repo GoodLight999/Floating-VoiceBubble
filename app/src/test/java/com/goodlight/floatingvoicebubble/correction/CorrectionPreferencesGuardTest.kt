@@ -31,4 +31,20 @@ class CorrectionPreferencesGuardTest {
         val decision = CorrectionGuard.choose("やってくれ", "やってください", polite)
         assertTrue(decision.accepted)
     }
+
+    @Test
+    fun explicitBusinessRewriteAllowsNormalJapaneseExpansion() {
+        val business = CorrectionPreferences(businessPolite = true)
+        val decision = CorrectionGuard.choose("資料見て", "資料をご確認いただけますでしょうか", business)
+        assertTrue(decision.accepted)
+    }
+
+    @Test
+    fun explicitRegisterRewriteStillRejectsRunawayExpansion() {
+        val business = CorrectionPreferences(businessPolite = true)
+        val raw = "確認して"
+        val runaway = "ご確認ください。なお本件につきましては背景事情を踏まえ、今後の進め方や関係者への共有方法まで含めて慎重に検討する必要があると考えております。"
+        val decision = CorrectionGuard.choose(raw, runaway, business)
+        assertFalse(decision.accepted)
+    }
 }
