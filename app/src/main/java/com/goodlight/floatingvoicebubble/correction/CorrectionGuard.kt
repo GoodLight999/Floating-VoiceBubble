@@ -35,11 +35,14 @@ object CorrectionGuard {
         val normalized = distance.toDouble() / max(rawPoints.size, newPoints.size).coerceAtLeast(1)
         val lengthDelta = abs(newPoints.size - rawPoints.size).toDouble() / rawPoints.size.coerceAtLeast(1)
         val threshold = if (allowRegisterRewrite) {
-            when { rawPoints.size <= 8 -> 0.90; rawPoints.size <= 20 -> 0.82; else -> 0.72 }
+            // Register conversion is explicitly requested by the user. Japanese polite/business
+            // forms legitimately replace and expand short phrases far more than typo correction,
+            // so do not let the ordinary minimum-edit budget make this feature a no-op.
+            when { rawPoints.size <= 8 -> 0.96; rawPoints.size <= 20 -> 0.90; else -> 0.82 }
         } else {
             when { rawPoints.size <= 8 -> 0.72; rawPoints.size <= 20 -> 0.58; else -> 0.46 }
         }
-        val maxLengthDelta = if (allowRegisterRewrite) 0.65 else 0.40
+        val maxLengthDelta = if (allowRegisterRewrite) 3.50 else 0.40
         return if (normalized <= threshold && lengthDelta <= maxLengthDelta) Decision(cleaned, true, normalized)
         else Decision(raw, false, normalized, "edit-budget-exceeded")
     }
@@ -82,5 +85,5 @@ object CorrectionGuard {
         return previous[b.size]
     }
 
-    private val FILLERS = listOf("えー", "ええと", "えっと", "あのー", "そのー", "うーん", "まあ")
+    private val FILLERS = listOf("えー", "ええと", "えっと", "えーと", "あー", "あのー", "そのー", "うーん", "んー", "まあ", "まー")
 }
