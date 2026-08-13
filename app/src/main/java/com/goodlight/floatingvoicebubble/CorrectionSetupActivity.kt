@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.goodlight.floatingvoicebubble.correction.ByokEndpointResolver
 import com.goodlight.floatingvoicebubble.correction.ByokModelDiscovery
 import com.goodlight.floatingvoicebubble.correction.ByokModelInfo
 import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
@@ -132,7 +133,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         HorizontalDivider()
         Text("BYOK", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
-            "OpenAI互換は /v1 まで、Anthropic / Gemini はAPIルートまででも自動補完します。完全な生成URLでも動作します。",
+            "OpenAI互換はAPIルート・/api・/v1・完全URLのいずれでも補完します。Anthropic / Geminiも公式APIルートから自動補完します。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -143,6 +144,14 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        val resolvedPreview = runCatching { ByokEndpointResolver.resolve(endpoint) }.getOrNull()
+        resolvedPreview?.let { resolved ->
+            Text(
+                "生成: ${resolved.generationUrl}\nモデル一覧: ${resolved.modelsUrl}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         OutlinedTextField(
             value = apiKey,
             onValueChange = { apiKey = it },
