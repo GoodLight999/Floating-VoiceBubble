@@ -88,10 +88,10 @@ private fun AppProfilesScreen(activity: AppProfilesActivity) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("アプリ別設定", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("アプリごとに変える", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 Text(
-                    "変更した項目だけグローバル設定へ上書きします。",
+                    "ここで変えた項目だけ、そのアプリ専用になります。ほかの項目は普段の設定をそのまま使います。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -100,7 +100,7 @@ private fun AppProfilesScreen(activity: AppProfilesActivity) {
         }
 
         Text(
-            "入力先アプリはVoiceBubbleを使うと自動で候補へ記録されます。先に設定したい場合はpackage nameを直接追加できます。",
+            "VoiceBubbleを使ったアプリは自動で下に現れます。まだ使っていないアプリだけ、package nameを手入力できます。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -113,7 +113,7 @@ private fun AppProfilesScreen(activity: AppProfilesActivity) {
             OutlinedTextField(
                 value = manualPackage,
                 onValueChange = { manualPackage = it.trim() },
-                label = { Text("package name") },
+                label = { Text("package name（必要な場合だけ）") },
                 singleLine = true,
                 modifier = Modifier.weight(1f),
             )
@@ -148,7 +148,7 @@ private fun AppProfilesScreen(activity: AppProfilesActivity) {
 
         if (packages.isEmpty()) {
             Text(
-                "まだ入力先アプリの履歴がありません。Gmail等でキーボードを開きVoiceBubbleを一度使うと、ここへ自動で現れます。",
+                "まだ候補がありません。Gmailなどでキーボードを開き、VoiceBubbleを一度使うと自動で追加されます。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -171,14 +171,14 @@ private fun AppProfilesScreen(activity: AppProfilesActivity) {
                         Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                         Text(packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
-                            profile?.let(::profileSummary) ?: "グローバル設定を使用",
+                            profile?.let(::profileSummary) ?: "普段の設定をそのまま使用",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (profile?.enabled == true) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     TextButton(onClick = { editingPackage = if (editingPackage == packageName) null else packageName }) {
-                        Text(if (editingPackage == packageName) "閉じる" else "設定")
+                        Text(if (editingPackage == packageName) "閉じる" else "変更")
                     }
                 }
 
@@ -220,7 +220,7 @@ private fun AppProfileEditor(
         modifier = Modifier.fillMaxWidth().padding(start = 8.dp, bottom = 10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("補正エンジン", style = MaterialTheme.typography.labelLarge)
+        Text("補正方法", style = MaterialTheme.typography.labelLarge)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             ProfileCorrectionMode.entries.forEach { mode ->
                 FilterChip(
@@ -231,17 +231,28 @@ private fun AppProfileEditor(
             }
         }
 
-        ProfileToggleSelector("読点「、」", draft.addCommas) { draft = draft.copy(addCommas = it) }
-        ProfileToggleSelector("句点「。」", draft.addPeriods) { draft = draft.copy(addPeriods = it) }
-        ProfileToggleSelector("フィラー除去", draft.removeFillers) { draft = draft.copy(removeFillers = it) }
+        ProfileToggleSelector("読点 、", draft.addCommas) { draft = draft.copy(addCommas = it) }
+        ProfileToggleSelector("句点 。", draft.addPeriods) { draft = draft.copy(addPeriods = it) }
+        ProfileToggleSelector("えー・あの等を削除", draft.removeFillers) { draft = draft.copy(removeFillers = it) }
 
-        Text("語調", style = MaterialTheme.typography.labelLarge)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("話し方", style = MaterialTheme.typography.labelLarge)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             ProfileRegister.entries.forEach { register ->
                 FilterChip(
                     selected = draft.register == register,
                     onClick = { draft = draft.copy(register = register) },
                     label = { Text(registerLabel(register)) },
+                )
+            }
+        }
+
+        Text("改行", style = MaterialTheme.typography.labelLarge)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            ProfileLineBreakMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = draft.lineBreakMode == mode,
+                    onClick = { draft = draft.copy(lineBreakMode = mode) },
+                    label = { Text(lineBreakModeLabel(mode)) },
                 )
             }
         }
@@ -255,7 +266,7 @@ private fun AppProfileEditor(
             }
         }
         Text(
-            "「既定」はグローバル設定をそのまま継承します。「変更なし」はこのアプリだけ丁寧語/ビジネス敬語を明示的に無効化します。",
+            "「普段どおり」は全体設定を使います。「語調を変えない」は、このアプリだけ丁寧語・ビジネス敬語をOFFにします。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -275,7 +286,7 @@ private fun ProfileToggleSelector(label: String, value: ProfileToggle, onChange:
                     label = {
                         Text(
                             when (option) {
-                                ProfileToggle.INHERIT -> "既定"
+                                ProfileToggle.INHERIT -> "普段どおり"
                                 ProfileToggle.ON -> "ON"
                                 ProfileToggle.OFF -> "OFF"
                             },
@@ -300,21 +311,29 @@ private fun profileSummary(profile: AppCorrectionProfile): String {
         if (profile.addPeriods != ProfileToggle.INHERIT) add("。=${profile.addPeriods.name}")
         if (profile.removeFillers != ProfileToggle.INHERIT) add("フィラー=${profile.removeFillers.name}")
         if (profile.register != ProfileRegister.INHERIT) add("語調=${registerLabel(profile.register)}")
+        if (profile.lineBreakMode != ProfileLineBreakMode.INHERIT) add("改行=${lineBreakModeLabel(profile.lineBreakMode)}")
     }
-    return if (parts.isEmpty()) "個別設定あり（全項目を既定から継承）" else parts.joinToString(" / ")
+    return if (parts.isEmpty()) "個別設定あり（全項目は普段どおり）" else parts.joinToString(" / ")
 }
 
 private fun correctionModeLabel(mode: ProfileCorrectionMode): String = when (mode) {
-    ProfileCorrectionMode.INHERIT -> "既定"
+    ProfileCorrectionMode.INHERIT -> "普段どおり"
     ProfileCorrectionMode.AUTO -> "自動"
-    ProfileCorrectionMode.BYOK -> "BYOK"
-    ProfileCorrectionMode.GEMMA -> "Gemma"
+    ProfileCorrectionMode.BYOK -> "クラウドAPI"
+    ProfileCorrectionMode.GEMMA -> "端末内Gemma"
     ProfileCorrectionMode.NONE -> "補正なし"
 }
 
 private fun registerLabel(register: ProfileRegister): String = when (register) {
-    ProfileRegister.INHERIT -> "既定"
-    ProfileRegister.PLAIN -> "変更なし"
-    ProfileRegister.POLITE -> "丁寧語"
+    ProfileRegister.INHERIT -> "普段どおり"
+    ProfileRegister.PLAIN -> "語調を変えない"
+    ProfileRegister.POLITE -> "です・ます調"
     ProfileRegister.BUSINESS -> "ビジネス敬語"
+}
+
+private fun lineBreakModeLabel(mode: ProfileLineBreakMode): String = when (mode) {
+    ProfileLineBreakMode.INHERIT -> "普段どおり"
+    ProfileLineBreakMode.NONE -> "改行しない"
+    ProfileLineBreakMode.SMART -> "適宜改行"
+    ProfileLineBreakMode.SMART_SPACED -> "適宜改行＋空行"
 }
