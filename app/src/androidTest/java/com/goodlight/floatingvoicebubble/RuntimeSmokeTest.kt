@@ -53,6 +53,49 @@ class RuntimeSmokeTest {
     }
 
     @Test
+    fun appProfilesActivityStarts() {
+        val intent = Intent(context, AppProfilesActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val activity = instrumentation.startActivitySync(intent)
+        try {
+            assertTrue(activity is AppProfilesActivity)
+            assertFalse(activity.isFinishing)
+        } finally {
+            activity.finish()
+        }
+    }
+
+    @Test
+    fun appProfileStorePersistsAndAppliesOverrides() {
+        val packageName = "com.example.voicebubble.instrumentation${System.nanoTime()}"
+        val store = AppProfileStore(context)
+        val profile = AppCorrectionProfile(
+            packageName = packageName,
+            addPeriods = ProfileToggle.OFF,
+            register = ProfileRegister.POLITE,
+            correctionMode = ProfileCorrectionMode.GEMMA,
+        )
+        try {
+            store.save(profile)
+            assertEquals(profile, AppProfileStore(context).profile(packageName))
+            val effective = store.effectiveSettings(
+                AppSettings(
+                    correctionMode = CorrectionMode.BYOK,
+                    correctionAddPeriods = true,
+                    correctionPolite = false,
+                    correctionBusinessPolite = false,
+                ),
+                packageName,
+            )
+            assertFalse(effective.correctionAddPeriods)
+            assertTrue(effective.correctionPolite)
+            assertFalse(effective.correctionBusinessPolite)
+            assertEquals(CorrectionMode.GEMMA, effective.correctionMode)
+        } finally {
+            store.delete(packageName)
+        }
+    }
+
+    @Test
     fun sherpaNativeLibraryLoadsOnAndroidRuntime() {
         assertTrue(VersionInfo.version.isNotBlank())
         assertTrue(VersionInfo.gitSha1.isNotBlank())
