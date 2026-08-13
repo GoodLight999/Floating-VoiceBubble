@@ -10,6 +10,7 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.provider.Settings
 import android.speech.SpeechRecognizer
+import com.goodlight.floatingvoicebubble.AppProfileStore
 import com.goodlight.floatingvoicebubble.BuildConfig
 import com.goodlight.floatingvoicebubble.CorrectionMode
 import com.goodlight.floatingvoicebubble.FinalAsrMode
@@ -17,6 +18,7 @@ import com.goodlight.floatingvoicebubble.GemmaVariant
 import com.goodlight.floatingvoicebubble.RecognitionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService
+import com.goodlight.floatingvoicebubble.correction.ByokEndpointResolver
 import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
@@ -59,7 +61,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 5)
+        .put("schema", 6)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -175,6 +177,15 @@ class SelfDiagnostics(
                 "SQLite open/read OK; entries=$count"
             }
         }
+        results += probe("app-profile-store") {
+            val profileStore = AppProfileStore(appContext)
+            val health = profileStore.health()
+            check(health.healthy) {
+                "profile storage decode mismatch: serialized=${health.serializedProfiles}, decoded=${health.decodedProfiles}"
+            }
+            profileStore.profiles().forEach { profile -> profile.applyTo(settings) }
+            "profiles=${health.decodedProfiles}; recent=${health.recentPackages}; decode/apply OK"
+        }
         results += probe("trace-storage") {
             val dir = SessionTraceStore(appContext).audioDir.apply { mkdirs() }
             val file = File(dir, ".diagnostic-${System.nanoTime()}.tmp")
@@ -183,6 +194,20 @@ class SelfDiagnostics(
             check(file.delete()) { "temporary diagnostic file could not be deleted" }
             check(dir.canonicalPath.startsWith(appContext.noBackupFilesDir.canonicalPath)) { "trace directory is not under noBackupFilesDir" }
             "no-backup trace directory read/write/delete OK"
+        }
+
+        results += probe("byok-endpoint-resolution") {
+            val configured = ByokEndpointResolver.resolve(settings.byokEndpoint)
+            check(configured.generationUrl.startsWith("https://")) { "normalized generation endpoint is not HTTPS" }
+            check(configured.modelsUrl.startsWith("https://")) { "normalized model endpoint is not HTTPS" }
+            val versionless = ByokEndpointResolver.resolve("https://voicebubble.invalid")
+            check(versionless.generationUrl == "https://voicebubble.invalid/v1/chat/completions") {
+                "versionless OpenAI-compatible root did not normalize to /v1/chat/completions"
+            }
+            check(versionless.modelsUrl == "https://voicebubble.invalid/v1/models") {
+                "versionless OpenAI-compatible root did not normalize to /v1/models"
+            }
+            "protocol=${configured.protocol}; generation/models normalization OK"
         }
 
         val modelFile = settings.gemmaModelPath.takeIf(String::isNotBlank)?.let(::File)
