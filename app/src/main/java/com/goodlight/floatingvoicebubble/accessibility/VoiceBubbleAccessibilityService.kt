@@ -143,7 +143,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         if(!same(t)){clip(r.finalText);notice(r.finalText,"入力先が変わったためクリップボードへ保存しました",2400);return}
         val c=input?.currentInputConnection
         if(c==null){clip(r.finalText);notice(r.finalText,"入力欄が消えたためクリップボードへ保存しました",2400);return}
-        if(!runCatching{c.commitText(r.finalText,1,null)}.getOrDefault(false)){clip(r.finalText);notice(r.finalText,"直接入力できずクリップボードへ保存しました",2400);return}
+        if(!runCatching{c.commitText(r.finalText,1)}.getOrDefault(false)){clip(r.finalText);notice(r.finalText,"直接入力できずクリップボードへ保存しました",2400);return}
         val state=when{
             r.correctionBypassed->"補正なしで入力しました"
             r.correctionError!=null&&r.correctionChanged->"一部補正: ${short(r.correctionError)}"
@@ -154,16 +154,16 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             r.finalAsrError!=null->"最終認識を使えずリアルタイム認識で入力しました"
             else->"入力しました"
         }
-        val delay=if(r.correctionError!=null||!r.correctionAccepted)2400 else if(r.correctionAttempted&&!r.correctionChanged)1800 else 650
+        val delay:Long=if(r.correctionError!=null||!r.correctionAccepted)2400L else if(r.correctionAttempted&&!r.correctionChanged)1800L else 650L
         notice(r.finalText,state,delay)
     }
     private fun put(t:Target?,text:String,state:String){
-        val ok=same(t)&&(input?.currentInputConnection?.let{runCatching{it.commitText(text,1,null)}.getOrDefault(false)}==true)
+        val ok=same(t)&&(input?.currentInputConnection?.let{runCatching{it.commitText(text,1)}.getOrDefault(false)}==true)
         if(ok)notice(text,state,650)else{clip(text);notice(text,"$state（クリップボードへ保存）",2400)}
     }
     private fun recover(id:Long,t:Target?,text:String,x:Throwable){
         if(pending.remove(id)==null)return;targets.remove(id)
-        val ok=same(t)&&(input?.currentInputConnection?.let{runCatching{it.commitText(text,1,null)}.getOrDefault(false)}==true)
+        val ok=same(t)&&(input?.currentInputConnection?.let{runCatching{it.commitText(text,1)}.getOrDefault(false)}==true)
         val d=x.message?.takeIf(String::isNotBlank)?.let(::short)
         if(ok)notice(text,d?.let{"補正処理エラー: $it — 認識結果を入力"}?:"補正処理を完了できず認識結果を入力",2400)
         else{clip(text);notice(text,d?.let{"確定処理エラー: $it — クリップボードへ保存"}?:"確定処理エラーのためクリップボードへ保存",2400)}
