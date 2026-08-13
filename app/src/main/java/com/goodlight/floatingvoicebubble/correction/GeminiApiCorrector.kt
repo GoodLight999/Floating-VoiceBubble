@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.ReasoningEffort
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -10,6 +11,7 @@ class GeminiApiCorrector(
     private val endpoint: String,
     private val model: String,
     private val apiKey: String,
+    private val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
 ) : TextCorrector {
     override val id: String = "byok:gemini:$model"
 
@@ -19,6 +21,8 @@ class GeminiApiCorrector(
         require(apiKey.isNotBlank()) { "Gemini API key is not configured" }
 
         val target = targetUrl(endpoint, model)
+        val generationConfig = JSONObject().put("maxOutputTokens", 2048)
+        thinkingConfig()?.let { generationConfig.put("thinkingConfig", it) }
         val body = JSONObject()
             .put(
                 "systemInstruction",
@@ -38,17 +42,12 @@ class GeminiApiCorrector(
                         ),
                 ),
             )
-            .put(
-                "generationConfig",
-                JSONObject()
-                    .put("temperature", 0)
-                    .put("maxOutputTokens", 768),
-            )
+            .put("generationConfig", generationConfig)
 
         val connection = (URL(target).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 10_000
-            readTimeout = 45_000
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
@@ -80,6 +79,34 @@ class GeminiApiCorrector(
         }
     }
 
+    private fun thinkingConfig(): JSONObject? {
+        if (reasoningEffort == ReasoningEffort.DEFAULT) return null
+        val normalizedModel = model.removePrefix("models/").lowercase()
+        return if (normalizedModel.startsWith("gemini-2.5")) {
+            JSONObject().put("thinkingBudget", gemini25Budget(reasoningEffort))
+        } else {
+            JSONObject().put("thinkingLevel", gemini3Level(reasoningEffort))
+        }
+    }
+
+    private fun gemini3Level(value: ReasoningEffort): String = when (value) {
+        ReasoningEffort.DEFAULT -> error("DEFAULT is omitted")
+        ReasoningEffort.NONE, ReasoningEffort.MINIMAL -> "minimal"
+        ReasoningEffort.LOW -> "low"
+        ReasoningEffort.MEDIUM -> "medium"
+        ReasoningEffort.HIGH, ReasoningEffort.XHIGH, ReasoningEffort.MAX -> "high"
+    }
+
+    private fun gemini25Budget(value: ReasoningEffort): Int = when (value) {
+        ReasoningEffort.DEFAULT -> error("DEFAULT is omitted")
+        ReasoningEffort.NONE -> 0
+        ReasoningEffort.MINIMAL -> 512
+        ReasoningEffort.LOW -> 1024
+        ReasoningEffort.MEDIUM -> 4096
+        ReasoningEffort.HIGH -> 8192
+        ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 16384
+    }
+
     companion object {
         fun targetUrl(endpoint: String, model: String): String {
             val normalized = endpoint.trimEnd('/')
@@ -88,5 +115,8 @@ class GeminiApiCorrector(
             val encoded = URLEncoder.encode(modelName, Charsets.UTF_8.name()).replace("+", "%20")
             return "$normalized/models/$encoded:generateContent"
         }
+
+        private const val CONNECT_TIMEOUT_MS = 10_000
+        private const val READ_TIMEOUT_MS = 35_000
     }
 }
