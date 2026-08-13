@@ -55,8 +55,8 @@ class CorrectionPreferencesGuardTest {
 
     @Test
     fun strongModeAcceptsMultiWordAcousticRepairThatNormalBudgetRejects() {
-        val raw = "昨日の開発会議で現人の設計と温泉式の海鮮方針を話した"
-        val repaired = "昨日の開発会議でエンジンの設計と音声認識の改善方針を話した"
+        val raw = "現人の洗濯と温泉式の海鮮方針を原始と相談した"
+        val repaired = "エンジンの設計と音声認識の改善方針をチームと相談した"
         val normal = CorrectionGuard.choose(
             raw,
             repaired,
