@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.EditorInfo
+import com.goodlight.floatingvoicebubble.AppProfileStore
 import com.goodlight.floatingvoicebubble.AppSettings
 import com.goodlight.floatingvoicebubble.CorrectionMode
 import com.goodlight.floatingvoicebubble.FinalAsrMode
@@ -39,6 +40,7 @@ import java.util.concurrent.Executors
 
 class VoiceBubbleAccessibilityService : AccessibilityService() {
     private lateinit var settingsStore: SettingsStore
+    private lateinit var appProfileStore: AppProfileStore
     private lateinit var dictionary: PersonalDictionary
     private lateinit var traceStore: SessionTraceStore
     private lateinit var asrModelStore: AsrModelStore
@@ -70,6 +72,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         settingsStore = SettingsStore(this)
+        appProfileStore = AppProfileStore(this)
         dictionary = PersonalDictionary(this)
         traceStore = SessionTraceStore(this)
         asrModelStore = AsrModelStore(this)
@@ -177,7 +180,9 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             return
         }
 
-        val settings = settingsStore.load()
+        val targetPackageName = editor.packageName?.toString().orEmpty()
+        appProfileStore.recordInputApp(targetPackageName)
+        val settings = appProfileStore.effectiveSettings(settingsStore.load(), targetPackageName)
         val streamingModel = asrModelStore.resolve(settings.streamingAsrModelId)
         if (settings.offlineMode && streamingModel == null) {
             transientError("完全オフラインには真のストリーミングASRモデルが必要です。設定からNemotronモデルを導入してください。")
@@ -214,7 +219,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
         activeTarget = EditorTarget(
             generation = inputMethod.generation,
-            packageName = editor.packageName?.toString().orEmpty(),
+            packageName = targetPackageName,
             fieldId = editor.fieldId,
             fieldName = editor.fieldName,
         )
@@ -287,7 +292,10 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         } else {
             ""
         }
-        val settings = settingsStore.load()
+        val baseSettings = settingsStore.load()
+        val settings = expectedTarget?.packageName
+            ?.let { appProfileStore.effectiveSettings(baseSettings, it) }
+            ?: baseSettings
         val jobId = ++nextFinalizationId
         pendingFinalizations[jobId] = outcome.rawTranscript
         overlay.showFinalizing(outcome.rawTranscript)
