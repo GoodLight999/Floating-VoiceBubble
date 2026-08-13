@@ -392,6 +392,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             polite = settings.correctionPolite,
             businessPolite = settings.correctionBusinessPolite,
             lineBreakMode = settings.correctionLineBreakMode,
+            recognitionRepairMode = settings.recognitionRepairMode,
         )
         val request = CorrectionRequest(
             rawTranscript = correctionInput,
@@ -491,6 +492,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 "period-not-allowed" -> "句点OFFに反した変更を拒否し、認識結果を入力しました"
                 "filler-removal-not-allowed" -> "フィラー削除OFFに反した変更を拒否し、認識結果を入力しました"
                 "linebreak-not-allowed" -> "改行OFFに反した変更を拒否し、認識結果を入力しました"
+                "recognition-repair-off" -> "聞き取りミス修復OFFのため語句変更を拒否し、認識結果を入力しました"
                 else -> "内容の変更が大きすぎたため、認識結果を保護して入力しました"
             }
             else -> "入力しました"
