@@ -368,11 +368,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 .onFailure { failure -> correctionError = failure.message ?: failure.javaClass.simpleName }
                 .getOrDefault(correctionInput)
         }
-        val decision = CorrectionGuard.choose(
-            correctionInput,
-            modelOutput,
-            allowRegisterRewrite = preferences.registerRewriteRequested,
-        )
+        val decision = CorrectionGuard.choose(correctionInput, modelOutput, preferences)
         val finalText = decision.text
 
         relevant.filter { item -> finalText.contains(item.term) }
@@ -405,6 +401,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 finalAsrError = finalAsrError,
                 correctionError = correctionError,
                 correctionAccepted = decision.accepted,
+                correctionDecisionReason = decision.reason,
             )
         }
     }
@@ -416,6 +413,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         finalAsrError: String?,
         correctionError: String?,
         correctionAccepted: Boolean,
+        correctionDecisionReason: String?,
     ) {
         if (pendingFinalizations.remove(jobId) == null) return
 
@@ -442,10 +440,15 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val state = when {
             finalAsrError != null -> "最終ASRを使えず、live認識結果で入力しました"
             correctionError != null -> "補正失敗: ${compactError(correctionError)} — 認識結果を入力しました"
-            !correctionAccepted -> "補正が大きすぎたため、認識結果を保護して入力しました"
+            !correctionAccepted -> when (correctionDecisionReason) {
+                "comma-not-allowed" -> "読点追加OFFに反した補正を拒否し、認識結果を入力しました"
+                "period-not-allowed" -> "句点追加OFFに反した補正を拒否し、認識結果を入力しました"
+                "filler-removal-not-allowed" -> "フィラー除去OFFに反した補正を拒否し、認識結果を入力しました"
+                else -> "補正が大きすぎたため、認識結果を保護して入力しました"
+            }
             else -> "入力しました"
         }
-        val notice = if (correctionError != null) CLIPBOARD_NOTICE_MS else DIRECT_INSERT_NOTICE_MS
+        val notice = if (correctionError != null || !correctionAccepted) CLIPBOARD_NOTICE_MS else DIRECT_INSERT_NOTICE_MS
         showFinalizationNotice(finalText, state, notice)
     }
 
