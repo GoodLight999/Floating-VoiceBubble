@@ -1,16 +1,37 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.ReasoningEffort
 import java.net.URI
 
 object CloudCorrectorFactory {
     enum class Protocol { OPENAI_COMPATIBLE, ANTHROPIC, GEMINI }
 
-    fun create(endpoint: String, model: String, apiKey: String): TextCorrector {
+    fun create(
+        endpoint: String,
+        model: String,
+        apiKey: String,
+        reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
+    ): TextCorrector {
         val resolved = ByokEndpointResolver.resolve(endpoint)
         return when (resolved.protocol) {
-            Protocol.OPENAI_COMPATIBLE -> OpenAiCompatibleCorrector(resolved.generationUrl, model, apiKey)
-            Protocol.ANTHROPIC -> AnthropicCorrector(resolved.generationUrl, model, apiKey)
-            Protocol.GEMINI -> GeminiApiCorrector(resolved.generationUrl, model, apiKey)
+            Protocol.OPENAI_COMPATIBLE -> OpenAiCompatibleCorrector(
+                resolved.generationUrl,
+                model,
+                apiKey,
+                reasoningEffort,
+            )
+            Protocol.ANTHROPIC -> AnthropicCorrector(
+                resolved.generationUrl,
+                model,
+                apiKey,
+                reasoningEffort,
+            )
+            Protocol.GEMINI -> GeminiApiCorrector(
+                resolved.generationUrl,
+                model,
+                apiKey,
+                reasoningEffort,
+            )
         }
     }
 
