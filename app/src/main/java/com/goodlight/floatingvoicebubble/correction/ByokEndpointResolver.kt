@@ -24,7 +24,13 @@ object ByokEndpointResolver {
         }
     }
 
+    fun isOpenRouter(rawEndpoint: String): Boolean = runCatching {
+        URI(rawEndpoint.trim()).host.equals("openrouter.ai", ignoreCase = true)
+    }.getOrDefault(false)
+
     private fun resolveOpenAiCompatible(uri: URI): ResolvedByokEndpoint {
+        if (uri.host.equals("openrouter.ai", ignoreCase = true)) return resolveOpenRouter(uri)
+
         val base = withoutQueryOrFragment(uri).trimEnd('/')
         val path = uri.path.orEmpty().trimEnd('/')
         val lowerPath = path.lowercase()
@@ -42,13 +48,32 @@ object ByokEndpointResolver {
             lowerPath.endsWith("/v1") || lowerPath.endsWith("/api/v1") -> "$base/chat/completions"
             // Google exposes an OpenAI-compatible path under /v1beta/openai. Do not inject another /v1.
             versioned -> "$base/chat/completions"
-            // Most OpenAI-compatible servers expose their compatibility layer below /v1. Previously
-            // VoiceBubble appended only /chat/completions here, which breaks root URLs such as
-            // https://host.example or https://host.example/api when the real route is /v1/....
+            // Most OpenAI-compatible servers expose their compatibility layer below /v1.
             else -> "$base/v1/chat/completions"
         }
         val models = generation.removeSuffix("/chat/completions") + "/models"
         return ResolvedByokEndpoint(CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE, generation, models)
+    }
+
+    private fun resolveOpenRouter(uri: URI): ResolvedByokEndpoint {
+        val origin = origin(uri)
+        val path = uri.path.orEmpty().trimEnd('/').lowercase()
+        // OpenRouter's public OpenAI-compatible API is canonicalized below /api/v1.
+        // Accept root, /api, /v1, /api/v1, model-list URLs and chat-completion URLs alike.
+        val generation = when {
+            path.endsWith("/api/v1/chat/completions") -> "$origin/api/v1/chat/completions"
+            path.endsWith("/api/v1/chat/completion") -> "$origin/api/v1/chat/completions"
+            path.endsWith("/api/v1/completions") -> "$origin/api/v1/chat/completions"
+            path.endsWith("/api/v1/models") -> "$origin/api/v1/chat/completions"
+            path.endsWith("/v1/chat/completions") -> "$origin/api/v1/chat/completions"
+            path.endsWith("/v1/models") -> "$origin/api/v1/chat/completions"
+            else -> "$origin/api/v1/chat/completions"
+        }
+        return ResolvedByokEndpoint(
+            CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE,
+            generation,
+            "$origin/api/v1/models",
+        )
     }
 
     private fun resolveAnthropic(uri: URI): ResolvedByokEndpoint {
