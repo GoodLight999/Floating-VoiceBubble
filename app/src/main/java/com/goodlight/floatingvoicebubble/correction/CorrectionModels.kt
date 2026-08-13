@@ -24,6 +24,8 @@ data class CorrectionRequest(
     val surroundingContext: String,
     val dictionaryTerms: List<DictionaryTerm>,
     val preferences: CorrectionPreferences = CorrectionPreferences(),
+    /** Used only for a bounded retry/probe when a provider returned RAW unchanged. */
+    val forceCorrection: Boolean = false,
 )
 
 interface TextCorrector {
@@ -44,6 +46,7 @@ object CorrectionPrompt {
 - 固有名詞は個人辞書とN-best候補を強く参照する。
 - 周辺文脈は誤認識の判定に使ってよいが、話者が発言していない新しい事実・主張・理由を足してはいけない。
 - 確信できない箇所は原文を保存する。
+- 下記の「ユーザーが選択した整形」は許可リストではなく実行要求である。該当箇所が存在するなら必ず反映する。
 - 出力は訂正後本文のみ。説明、引用符、Markdown、JSONを付けない。
 """
 
@@ -60,21 +63,44 @@ object CorrectionPrompt {
                 "- 明白または文脈上かなり確度の高い音声認識誤りを直す。RAWが日本語として不自然で、N-best・周辺文脈・辞書・同一文中の語から意図語が強く推定できる場合は、文字列差が数文字あっても修復する。意味が変わる推測はしない。",
             )
             RecognitionRepairMode.STRONG -> appendLine(
-                "- 強めに復元する。複数語が連続して壊れていても、発音類似・N-best・周辺文脈・辞書・文意が同じ候補へ収束するなら大きく置換してよい。ただし話者の意図・事実・論旨を新しく作ってはいけない。候補が複数残るなら原文を優先する。",
+                "- 強めに復元する。不自然なRAWを丸写しして安全側へ逃げず、複数語が連続して壊れていても、発音類似・N-best・周辺文脈・辞書・文意が同じ候補へ収束するなら積極的に置換する。ただし話者の意図・事実・論旨を新しく作ってはいけない。候補が複数残るなら原文を優先する。",
+            )
+        }
+        if (request.forceCorrection) {
+            appendLine(
+                "- これは補正能力の確認または再試行である。RAWの単純な丸写しをしない。N-bestと明示整形を再確認し、根拠のある修正を必ず反映する。",
             )
         }
         appendLine()
         appendLine("ユーザーが選択した整形:")
-        appendLine(if (request.preferences.addCommas) "- 読点「、」を自然な位置へ追加してよい。" else "- 読点「、」を新たに追加しない。")
-        appendLine(if (request.preferences.addPeriods) "- 句点「。」を自然な文末へ追加してよい。" else "- 句点「。」を新たに追加しない。")
-        appendLine(if (request.preferences.removeFillers) "- 「えー」「あの」「そのー」等の意味を持たないフィラーを除去してよい。" else "- フィラーを勝手に削除しない。")
+        appendLine(
+            if (request.preferences.addCommas) {
+                "- 読点「、」が自然な可読性に必要な箇所には追加する。短すぎる文へ機械的に乱発はしない。"
+            } else {
+                "- 読点「、」を新たに追加しない。"
+            },
+        )
+        appendLine(
+            if (request.preferences.addPeriods) {
+                "- 句点「。」を自然な文末へ追加する。文末に句点等がなく通常の平叙文なら、原則として必ず句点を付ける。"
+            } else {
+                "- 句点「。」を新たに追加しない。"
+            },
+        )
+        appendLine(
+            if (request.preferences.removeFillers) {
+                "- 「えー」「えっと」「あのー」「そのー」等、意味を持たないフィラーは必ず除去する。意味を持つ語まで削らない。"
+            } else {
+                "- フィラーを勝手に削除しない。"
+            },
+        )
         when (request.preferences.lineBreakMode) {
             LineBreakMode.NONE -> appendLine("- 改行を新たに追加しない。原文の改行だけを保存する。")
             LineBreakMode.SMART -> appendLine(
-                "- 話題・文意の区切りが明確な場所だけに適宜1回の改行を入れてよい。短文ごとに細切れにはしない。空行は作らない。",
+                "- 話題・文意の区切りが明確な場所だけに適宜1回の改行を入れる。短文ごとに細切れにはしない。空行は作らない。",
             )
             LineBreakMode.SMART_SPACED -> appendLine(
-                "- 話題・文意の区切りが明確な場所だけに適宜2回改行して1行分の空行を入れてよい。短文ごとに細切れにはしない。",
+                "- 話題・文意の区切りが明確な場所だけに適宜2回改行して1行分の空行を入れる。短文ごとに細切れにはしない。",
             )
         }
         when {
@@ -101,6 +127,8 @@ object CorrectionPrompt {
         }
         appendLine(); appendLine("[SURROUNDING_CONTEXT]")
         appendLine(request.surroundingContext.takeLast(1_500).ifBlank { "(none)" })
-        appendLine(); appendLine("RAWを上記の明示設定だけに従って訂正し、本文だけを返してください。")
+        appendLine()
+        appendLine("選択された整形は『してもよい』ではなく要求事項です。該当箇所を必ず処理してください。")
+        appendLine("RAWを上記の明示設定だけに従って訂正し、本文だけを返してください。")
     }
 }
