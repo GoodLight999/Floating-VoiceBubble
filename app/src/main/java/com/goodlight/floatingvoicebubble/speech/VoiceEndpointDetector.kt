@@ -7,8 +7,10 @@ import kotlin.math.sqrt
 class VoiceEndpointDetector(
     private val sampleRate: Int = 16_000,
     private val speechStartMs: Int = 120,
-    private val trailingSilenceMs: Int = 900,
+    private val trailingSilenceMs: Int = 1_400,
     private val minimumSpeechMs: Int = 240,
+    private val longUtteranceMs: Int = 6_000,
+    private val longUtteranceTrailingSilenceMs: Int = 2_200,
 ) {
     private var noiseFloorDb = -58.0
     private var aboveThresholdMs = 0.0
@@ -41,7 +43,12 @@ class VoiceEndpointDetector(
 
         speechMs += frameMs
         if (db > keepThreshold) belowThresholdMs = 0.0 else belowThresholdMs += frameMs
-        return speechMs >= minimumSpeechMs && belowThresholdMs >= trailingSilenceMs
+        val requiredTrailingSilence = if (speechMs >= longUtteranceMs) {
+            longUtteranceTrailingSilenceMs
+        } else {
+            trailingSilenceMs
+        }
+        return speechMs >= minimumSpeechMs && belowThresholdMs >= requiredTrailingSilence
     }
 
     fun reset() {
