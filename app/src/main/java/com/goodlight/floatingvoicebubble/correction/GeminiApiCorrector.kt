@@ -116,7 +116,7 @@ class GeminiApiCorrector(
             return "$normalized/models/$encoded:generateContent"
         }
 
-        private const val CONNECT_TIMEOUT_MS = 10_000
-        private const val READ_TIMEOUT_MS = 35_000
+        private const val CONNECT_TIMEOUT_MS = 8_000
+        private const val READ_TIMEOUT_MS = 25_000
     }
 }
