@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.LineBreakMode
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -7,7 +8,12 @@ object CorrectionGuard {
     data class Decision(val text: String, val accepted: Boolean, val normalizedDistance: Double, val reason: String? = null)
 
     fun choose(raw: String, modelOutput: String, preferences: CorrectionPreferences): Decision {
-        val decision = choose(raw, modelOutput, allowRegisterRewrite = preferences.registerRewriteRequested)
+        val decision = choose(
+            raw,
+            modelOutput,
+            allowRegisterRewrite = preferences.registerRewriteRequested,
+            ignoreLineBreaksForDistance = preferences.lineBreakRewriteRequested,
+        )
         if (!decision.accepted) return decision
         val cleaned = decision.text
         if (!preferences.addCommas && cleaned.count { it == '、' } > raw.count { it == '、' }) {
@@ -22,15 +28,25 @@ object CorrectionGuard {
         ) {
             return decision.copy(text = raw, accepted = false, reason = "filler-removal-not-allowed")
         }
+        if (preferences.lineBreakMode == LineBreakMode.NONE && newlineCount(cleaned) > newlineCount(raw)) {
+            return decision.copy(text = raw, accepted = false, reason = "linebreak-not-allowed")
+        }
         return decision
     }
 
-    fun choose(raw: String, modelOutput: String, allowRegisterRewrite: Boolean = false): Decision {
+    fun choose(
+        raw: String,
+        modelOutput: String,
+        allowRegisterRewrite: Boolean = false,
+        ignoreLineBreaksForDistance: Boolean = false,
+    ): Decision {
         val cleaned = sanitize(modelOutput)
         if (raw.isBlank()) return Decision(cleaned, cleaned.isNotBlank(), 0.0)
         if (cleaned.isBlank()) return Decision(raw, false, 1.0, "empty-output")
         if (cleaned == raw) return Decision(raw, true, 0.0)
-        val rawPoints = raw.codePoints().toArray(); val newPoints = cleaned.codePoints().toArray()
+        val rawBasis = if (ignoreLineBreaksForDistance) stripLineBreaks(raw) else raw
+        val cleanedBasis = if (ignoreLineBreaksForDistance) stripLineBreaks(cleaned) else cleaned
+        val rawPoints = rawBasis.codePoints().toArray(); val newPoints = cleanedBasis.codePoints().toArray()
         val distance = levenshtein(rawPoints, newPoints)
         val normalized = distance.toDouble() / max(rawPoints.size, newPoints.size).coerceAtLeast(1)
         val lengthDelta = abs(newPoints.size - rawPoints.size).toDouble() / rawPoints.size.coerceAtLeast(1)
@@ -57,6 +73,10 @@ object CorrectionGuard {
         }
         return text
     }
+
+    private fun stripLineBreaks(value: String): String = value.replace("\r", "").replace("\n", "")
+
+    private fun newlineCount(value: String): Int = value.count { it == '\n' }
 
     private fun occurrences(text: String, needle: String): Int {
         if (needle.isEmpty()) return 0
