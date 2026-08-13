@@ -89,6 +89,14 @@ object AppCorrectionProfileCodec {
     private val PACKAGE_NAME = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
 }
 
+data class AppProfileStoreHealth(
+    val serializedProfiles: Int,
+    val decodedProfiles: Int,
+    val recentPackages: Int,
+) {
+    val healthy: Boolean get() = serializedProfiles == decodedProfiles
+}
+
 class AppProfileStore(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -113,6 +121,19 @@ class AppProfileStore(context: Context) {
         .mapNotNull(::profile)
         .sortedBy { it.packageName.lowercase() }
         .toList()
+
+    fun health(): AppProfileStoreHealth {
+        val snapshot = prefs.all
+        val serialized = snapshot.keys.count { it.startsWith(PROFILE_PREFIX) }
+        val decoded = snapshot.asSequence()
+            .filter { (key, value) -> key.startsWith(PROFILE_PREFIX) && value is String }
+            .count { (key, value) ->
+                AppCorrectionProfileCodec.decode(key.removePrefix(PROFILE_PREFIX), value as String) != null
+            }
+        val recents = snapshot.asSequence()
+            .count { (key, value) -> key.startsWith(RECENT_PREFIX) && value is Long }
+        return AppProfileStoreHealth(serialized, decoded, recents)
+    }
 
     fun recordInputApp(packageName: String, nowMs: Long = System.currentTimeMillis()) {
         if (!AppCorrectionProfileCodec.isValidPackageName(packageName)) return
