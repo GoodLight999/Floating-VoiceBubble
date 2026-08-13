@@ -15,6 +15,7 @@ enum class FinalAsrMode { LIVE_RESULT, REAZON_SPEECH }
 enum class CorrectionMode { AUTO, BYOK, GEMMA, NONE }
 enum class GemmaBackend { AUTO, GPU, CPU }
 enum class GemmaVariant { UNKNOWN, E2B, E4B }
+enum class RecognitionRepairMode { OFF, NORMAL, STRONG }
 
 enum class ReasoningEffort {
     DEFAULT,
@@ -42,6 +43,7 @@ data class AppSettings(
     val byokEndpoint: String = "https://api.openai.com/v1/chat/completions",
     val byokModel: String = "",
     val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
+    val recognitionRepairMode: RecognitionRepairMode = RecognitionRepairMode.NORMAL,
     val correctionAddCommas: Boolean = true,
     val correctionAddPeriods: Boolean = true,
     val correctionRemoveFillers: Boolean = true,
@@ -70,6 +72,10 @@ class SettingsStore(context: Context) {
             ?: "https://api.openai.com/v1/chat/completions",
         byokModel = prefs.getString("byok_model", "").orEmpty(),
         reasoningEffort = enumValueOr(prefs.getString("reasoning_effort", null), ReasoningEffort.DEFAULT),
+        recognitionRepairMode = enumValueOr(
+            prefs.getString("recognition_repair_mode", null),
+            RecognitionRepairMode.NORMAL,
+        ),
         correctionAddCommas = prefs.getBoolean("correction_add_commas", true),
         correctionAddPeriods = prefs.getBoolean("correction_add_periods", true),
         correctionRemoveFillers = prefs.getBoolean("correction_remove_fillers", true),
@@ -98,6 +104,7 @@ class SettingsStore(context: Context) {
             .putString("byok_endpoint", value.byokEndpoint)
             .putString("byok_model", value.byokModel)
             .putString("reasoning_effort", value.reasoningEffort.name)
+            .putString("recognition_repair_mode", value.recognitionRepairMode.name)
             .putBoolean("correction_add_commas", value.correctionAddCommas)
             .putBoolean("correction_add_periods", value.correctionAddPeriods)
             .putBoolean("correction_remove_fillers", value.correctionRemoveFillers)
