@@ -36,7 +36,10 @@ import com.goodlight.floatingvoicebubble.trace.FinalizationTrace
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import java.io.File
 import java.util.LinkedHashMap
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 class VoiceBubbleAccessibilityService : AccessibilityService() {
     private lateinit var settingsStore: SettingsStore
@@ -47,8 +50,14 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private lateinit var finalAsrModelStore: FinalAsrModelStore
     private lateinit var overlay: FloatingBubbleController
 
+    // Delivery remains serial so utterances cannot be inserted out of order.
     private val worker = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "VoiceBubble-Finalizer").apply { priority = Thread.NORM_PRIORITY - 1 }
+    }
+    // Potentially blocking model/native calls are isolated here and bounded with Future#get timeouts.
+    // A provider/native call that ignores interruption therefore cannot permanently block the serial finalizer.
+    private val inferenceWorker = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "VoiceBubble-BoundedInference").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
     private val warmupWorker = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "VoiceBubble-ASR-Warmup").apply { priority = Thread.NORM_PRIORITY - 1 }
@@ -117,6 +126,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         if (::overlay.isInitialized) overlay.detach()
         if (::dictionary.isInitialized) dictionary.close()
         worker.shutdownNow()
+        inferenceWorker.shutdownNow()
         warmupWorker.shutdownNow()
         super.onDestroy()
     }
@@ -153,13 +163,19 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             activeSession?.finishInput()
         } else if (available && activeSession == null && pendingFinalizations.isEmpty() && ::overlay.isInitialized) {
             overlay.showIdle()
+        } else if (available && activeSession == null && pendingFinalizations.isNotEmpty() && ::overlay.isInitialized) {
+            overlay.showFinalizingStack(pendingFinalizations.values.toList())
         }
     }
 
     private fun toggleRecording() {
         val session = activeSession
         if (session != null) {
-            overlay.showFinalizing(latestRaw, "発話を終了しました")
+            overlay.showListening(
+                latestRaw,
+                "発話を終了しています",
+                pendingFinalizations.values.toList(),
+            )
             session.finishInput()
         } else {
             startSession()
@@ -201,11 +217,11 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val correctionBackend = CorrectionBackendResolver.resolve(settings, gemmaAvailable)
         if (correctionBackend == CorrectionBackend.BYOK) {
             if (settings.byokModel.isBlank()) {
-                transientError("BYOKモデルが未設定です。設定画面でモデル一覧を取得して選択してください。")
+                transientError("補正モデルが未設定です。補正モデル画面でAPIから一覧を取得して選んでください。")
                 return
             }
             runCatching { ByokEndpointResolver.resolve(settings.byokEndpoint) }.onFailure { failure ->
-                transientError(failure.message ?: "BYOK API URLが不正です。")
+                transientError(failure.message ?: "API URLが不正です。")
                 return
             }
         }
@@ -224,7 +240,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             fieldName = editor.fieldName,
         )
         latestRaw = ""
-        overlay.showListening("", "録音を開始しています")
+        overlay.showListening("", "録音を開始しています", pendingFinalizations.values.toList())
         val token = ++sessionGeneration
 
         val session = runCatching {
@@ -239,11 +255,13 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 onPartial = { partial ->
                     if (token == sessionGeneration && activeSession != null) {
                         latestRaw = partial
-                        overlay.showListening(partial)
+                        overlay.showListening(partial, pending = pendingFinalizations.values.toList())
                     }
                 },
                 onState = { state ->
-                    if (token == sessionGeneration && activeSession != null) overlay.showListening(latestRaw, state)
+                    if (token == sessionGeneration && activeSession != null) {
+                        overlay.showListening(latestRaw, state, pendingFinalizations.values.toList())
+                    }
                 },
                 onComplete = { outcome -> onRecognitionComplete(token, outcome) },
                 onFailure = { message -> onRecognitionFailure(token, message) },
@@ -298,7 +316,20 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             ?: baseSettings
         val jobId = ++nextFinalizationId
         pendingFinalizations[jobId] = outcome.rawTranscript
-        overlay.showFinalizing(outcome.rawTranscript)
+        overlay.showFinalizingStack(pendingFinalizations.values.toList())
+
+        // Last-resort UI watchdog. Even a native/provider implementation that ignores interruption
+        // cannot leave an utterance visibly stuck forever. The normal bounded calls below should fire first.
+        rootViewHandler.postDelayed({
+            if (pendingFinalizations.containsKey(jobId)) {
+                recoverFinalization(
+                    jobId,
+                    expectedTarget,
+                    outcome.rawTranscript,
+                    TimeoutException("確定処理が${FINALIZATION_WATCHDOG_MS / 1000}秒を超えました"),
+                )
+            }
+        }, FINALIZATION_WATCHDOG_MS)
 
         worker.execute {
             try {
@@ -332,7 +363,11 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     finalAsrError = if (model == null) "ReazonSpeech model is missing" else "recorded WAV is missing"
                     outcome.rawTranscript
                 } else {
-                    runCatching { SherpaFinalAsrEngine.decode(model, audio) }
+                    runCatching {
+                        runBounded(FINAL_ASR_TIMEOUT_MS, "最終ASR") {
+                            SherpaFinalAsrEngine.decode(model, audio)
+                        }
+                    }
                         .onSuccess { decoded ->
                             finalAsrId = decoded.engineId
                             finalAsrLatencyMs = decoded.elapsedMs
@@ -356,6 +391,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             removeFillers = settings.correctionRemoveFillers,
             polite = settings.correctionPolite,
             businessPolite = settings.correctionBusinessPolite,
+            lineBreakMode = settings.correctionLineBreakMode,
         )
         val request = CorrectionRequest(
             rawTranscript = correctionInput,
@@ -372,7 +408,9 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val modelOutput = if (corrector == null) {
             correctionInput
         } else {
-            runCatching { corrector.correct(request) }
+            runCatching {
+                runBounded(CORRECTION_TIMEOUT_MS, "補正モデル") { corrector.correct(request) }
+            }
                 .onFailure { failure -> correctionError = failure.message ?: failure.javaClass.simpleName }
                 .getOrDefault(correctionInput)
         }
@@ -446,13 +484,14 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         }
 
         val state = when {
-            finalAsrError != null -> "最終ASRを使えず、live認識結果で入力しました"
+            finalAsrError != null -> "最終認識を使えず、リアルタイム認識結果で入力しました"
             correctionError != null -> "補正失敗: ${compactError(correctionError)} — 認識結果を入力しました"
             !correctionAccepted -> when (correctionDecisionReason) {
-                "comma-not-allowed" -> "読点追加OFFに反した補正を拒否し、認識結果を入力しました"
-                "period-not-allowed" -> "句点追加OFFに反した補正を拒否し、認識結果を入力しました"
-                "filler-removal-not-allowed" -> "フィラー除去OFFに反した補正を拒否し、認識結果を入力しました"
-                else -> "補正が大きすぎたため、認識結果を保護して入力しました"
+                "comma-not-allowed" -> "読点OFFに反した変更を拒否し、認識結果を入力しました"
+                "period-not-allowed" -> "句点OFFに反した変更を拒否し、認識結果を入力しました"
+                "filler-removal-not-allowed" -> "フィラー削除OFFに反した変更を拒否し、認識結果を入力しました"
+                "linebreak-not-allowed" -> "改行OFFに反した変更を拒否し、認識結果を入力しました"
+                else -> "内容の変更が大きすぎたため、認識結果を保護して入力しました"
             }
             else -> "入力しました"
         }
@@ -476,7 +515,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         }
 
         if (dispatchSucceeded) {
-            showFinalizationNotice(fallbackText, "確定処理エラーのためlive認識結果を入力しました", CLIPBOARD_NOTICE_MS)
+            showFinalizationNotice(fallbackText, "補正処理を完了できなかったため、認識結果を入力しました", CLIPBOARD_NOTICE_MS)
             return
         }
 
@@ -491,10 +530,20 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     }
 
     private fun showFinalizationNotice(text: String, state: String, delayMs: Long) {
-        // Never cover a new live transcript with an older session's correction result.
-        if (activeSession == null && bubbleAvailable) {
-            overlay.showFinalizing(text, state)
-            returnToIdleAfter(delayMs)
+        if (!bubbleAvailable) return
+        when {
+            activeSession != null -> overlay.showListening(
+                latestRaw,
+                pending = pendingFinalizations.values.toList(),
+            )
+            pendingFinalizations.isNotEmpty() -> overlay.showFinalizingStack(
+                pendingFinalizations.values.toList(),
+                state,
+            )
+            else -> {
+                overlay.showFinalizing(text, state)
+                returnToIdleAfter(delayMs)
+            }
         }
     }
 
@@ -506,6 +555,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 settings.byokEndpoint,
                 settings.byokModel,
                 settingsStore.apiKey(),
+                settings.reasoningEffort,
             )
             CorrectionBackend.GEMMA -> GemmaCorrector(
                 this,
@@ -524,7 +574,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             activeTarget = null
             latestRaw = ""
             if (pendingFinalizations.isEmpty()) overlay.showIdle()
-            else overlay.showFinalizing(pendingFinalizations.values.last(), "前の発話を整えています")
+            else overlay.showFinalizingStack(pendingFinalizations.values.toList(), "前の発話を処理しています")
             return
         }
 
@@ -551,9 +601,9 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         rootViewHandler.postDelayed({
             when {
                 activeSession != null || !bubbleAvailable -> Unit
-                pendingFinalizations.isNotEmpty() -> overlay.showFinalizing(
-                    pendingFinalizations.values.last(),
-                    "前の発話を整えています",
+                pendingFinalizations.isNotEmpty() -> overlay.showFinalizingStack(
+                    pendingFinalizations.values.toList(),
+                    "前の発話を処理しています",
                 )
                 else -> overlay.showIdle()
             }
@@ -564,6 +614,22 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         if (!::overlay.isInitialized) return
         overlay.showError(message)
         returnToIdleAfter(ERROR_NOTICE_MS)
+    }
+
+    private fun <T> runBounded(timeoutMs: Long, label: String, block: () -> T): T {
+        val future = inferenceWorker.submit<T> { block() }
+        return try {
+            future.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (timeout: TimeoutException) {
+            future.cancel(true)
+            throw TimeoutException("$label が${timeoutMs / 1000}秒以内に応答しませんでした")
+        } catch (execution: ExecutionException) {
+            throw (execution.cause ?: execution)
+        } catch (interrupted: InterruptedException) {
+            future.cancel(true)
+            Thread.currentThread().interrupt()
+            throw interrupted
+        }
     }
 
     private fun isSameTarget(expected: EditorTarget?): Boolean {
@@ -611,6 +677,9 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         private const val CLIPBOARD_NOTICE_MS = 2_200L
         private const val ERROR_NOTICE_MS = 3_000L
         private const val IME_WINDOW_RECHECK_MS = 180L
+        private const val CORRECTION_TIMEOUT_MS = 25_000L
+        private const val FINAL_ASR_TIMEOUT_MS = 30_000L
+        private const val FINALIZATION_WATCHDOG_MS = 45_000L
         private const val MAX_ERROR_DETAIL_CHARS = 92
     }
 }
