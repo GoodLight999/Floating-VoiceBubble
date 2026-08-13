@@ -16,11 +16,22 @@ class ByokEndpointResolverTest {
     }
 
     @Test
-    fun normalizesAnthropicAndGeminiOfficialBases() {
-        val anthropic = ByokEndpointResolver.resolve("https://api.anthropic.com")
-        assertEquals("https://api.anthropic.com/v1/messages", anthropic.generationUrl)
-        assertEquals("https://api.anthropic.com/v1/models", anthropic.modelsUrl)
+    fun normalizesAnthropicBaseMessagesAndModelsUrls() {
+        val root = ByokEndpointResolver.resolve("https://api.anthropic.com")
+        assertEquals("https://api.anthropic.com/v1/messages", root.generationUrl)
+        assertEquals("https://api.anthropic.com/v1/models", root.modelsUrl)
 
+        val messages = ByokEndpointResolver.resolve("https://api.anthropic.com/v1/messages")
+        assertEquals("https://api.anthropic.com/v1/messages", messages.generationUrl)
+        assertEquals("https://api.anthropic.com/v1/models", messages.modelsUrl)
+
+        val models = ByokEndpointResolver.resolve("https://api.anthropic.com/v1/models")
+        assertEquals("https://api.anthropic.com/v1/messages", models.generationUrl)
+        assertEquals("https://api.anthropic.com/v1/models", models.modelsUrl)
+    }
+
+    @Test
+    fun normalizesGeminiOfficialBase() {
         val gemini = ByokEndpointResolver.resolve("https://generativelanguage.googleapis.com/v1beta")
         assertEquals("https://generativelanguage.googleapis.com/v1beta", gemini.generationUrl)
         assertEquals("https://generativelanguage.googleapis.com/v1beta/models", gemini.modelsUrl)
