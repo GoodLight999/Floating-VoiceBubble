@@ -145,10 +145,8 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     }
     private fun deliver(id:Long,t:Target?,r:FinalizationResult){
         if(pending.remove(id)==null)return;targets.remove(id)
-        if(!same(t)){clip(r.finalText);notice(r.finalText,"入力先が変わったためクリップボードへ保存しました",2400);return}
-        val c=input?.currentInputConnection
-        if(c==null){clip(r.finalText);notice(r.finalText,"入力欄が消えたためクリップボードへ保存しました",2400);return}
-        if(!runCatching{c.commitText(r.finalText,1)}.getOrDefault(false)){clip(r.finalText);notice(r.finalText,"直接入力できずクリップボードへ保存しました",2400);return}
+        val commit=commit(t,r.finalText)
+        if(commit==CommitResult.FAILED){clip(r.finalText);notice(r.finalText,"直接入力できずクリップボードへ保存しました",2400);return}
         val state=when{
             r.correctionBypassed->"補正なしで入力しました"
             r.correctionError!=null&&r.correctionChanged->"一部補正: ${short(r.correctionError)}"
@@ -159,19 +157,36 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             r.finalAsrError!=null->"最終認識を使えずリアルタイム認識で入力しました"
             else->"入力しました"
         }
-        val delay:Long=if(r.correctionError!=null||!r.correctionAccepted)2400L else if(r.correctionAttempted&&!r.correctionChanged)1800L else 650L
-        notice(r.finalText,state,delay)
+        val suffix=if(commit==CommitResult.UNVERIFIED)"（反映確認不可）" else ""
+        val delay:Long=if(r.correctionError!=null||!r.correctionAccepted)2400L else if(r.correctionAttempted&&!r.correctionChanged||commit==CommitResult.UNVERIFIED)1800L else 650L
+        notice(r.finalText,state+suffix,delay)
     }
     private fun put(t:Target?,text:String,state:String){
-        val ok=same(t)&&(input?.currentInputConnection?.let{runCatching{it.commitText(text,1)}.getOrDefault(false)}==true)
-        if(ok)notice(text,state,650)else{clip(text);notice(text,"$state（クリップボードへ保存）",2400)}
+        when(val result=commit(t,text)){
+            CommitResult.FAILED->{clip(text);notice(text,"$state（クリップボードへ保存）",2400)}
+            CommitResult.UNVERIFIED->notice(text,"$state（反映確認不可）",1800)
+            CommitResult.VERIFIED->notice(text,state,650)
+        }
     }
     private fun recover(id:Long,t:Target?,text:String,x:Throwable){
         if(pending.remove(id)==null)return;targets.remove(id)
-        val ok=same(t)&&(input?.currentInputConnection?.let{runCatching{it.commitText(text,1)}.getOrDefault(false)}==true)
+        val result=commit(t,text)
         val d=x.message?.takeIf(String::isNotBlank)?.let(::short)
-        if(ok)notice(text,d?.let{"補正処理エラー: $it — 認識結果を入力"}?:"補正処理を完了できず認識結果を入力",2400)
-        else{clip(text);notice(text,d?.let{"確定処理エラー: $it — クリップボードへ保存"}?:"確定処理エラーのためクリップボードへ保存",2400)}
+        if(result!=CommitResult.FAILED){
+            val suffix=if(result==CommitResult.UNVERIFIED)"（反映確認不可）" else ""
+            notice(text,(d?.let{"補正処理エラー: $it — 認識結果を入力"}?:"補正処理を完了できず認識結果を入力")+suffix,2400)
+        }else{clip(text);notice(text,d?.let{"確定処理エラー: $it — クリップボードへ保存"}?:"確定処理エラーのためクリップボードへ保存",2400)}
+    }
+    private fun commit(t:Target?,text:String):CommitResult{
+        if(!same(t))return CommitResult.FAILED
+        val c=input?.currentInputConnection?:return CommitResult.FAILED
+        return runCatching{
+            c.commitText(text,1,null)
+            if(text.isEmpty())return@runCatching CommitResult.VERIFIED
+            val tail=text.takeLast(96)
+            val after=c.getSurroundingText(maxOf(128,tail.length+32),0,0)?.text?.toString()
+            if(after?.endsWith(tail)==true)CommitResult.VERIFIED else CommitResult.UNVERIFIED
+        }.getOrDefault(CommitResult.FAILED)
     }
     private fun notice(text:String,state:String,delay:Long){
         if(!bubbleVisible)return
@@ -190,6 +205,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         return t.packageName==e.packageName?.toString().orEmpty()&&t.fieldId==e.fieldId&&t.fieldName==e.fieldName
     }
     private fun short(s:String)=s.replace(Regex("\\s+")," ").trim().take(92)
+    private enum class CommitResult{VERIFIED,UNVERIFIED,FAILED}
     private data class Target(val generation:Long,val packageName:String,val fieldId:Int,val fieldName:String?)
     private class TrackingInputMethod(service:AccessibilityService,val changed:(Boolean)->Unit):InputMethod(service){
         var generation=0L;private set
