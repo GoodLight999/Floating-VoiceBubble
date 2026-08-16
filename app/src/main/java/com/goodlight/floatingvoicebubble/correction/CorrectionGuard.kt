@@ -63,14 +63,14 @@ object CorrectionGuard {
 
         // Character edit distance is intentionally diagnostic only. Japanese ASR can corrupt an
         // entire phrase while preserving the intended meaning and approximate length, so rejecting
-        // a correction merely because many code points changed systematically defeats STRONG repair.
+        // a correction merely because many code points changed systematically defeats ASR repair.
         // Safety is enforced by explicit user-option invariants above and coarse runaway bounds here.
         val rawLength = rawPoints.size.coerceAtLeast(1)
         val newLength = newPoints.size
         val maxLength = when {
             allowRegisterRewrite -> max(rawLength * 4, rawLength + 48)
             recognitionRepairMode == RecognitionRepairMode.STRONG -> max(rawLength * 3, rawLength + 40)
-            else -> max(rawLength * 2, rawLength + 32)
+            else -> max(rawLength * 2, rawLength + 16)
         }
         if (newLength > maxLength) {
             return Decision(raw, false, normalized, "runaway-expansion")
