@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.LineBreakMode
 import com.goodlight.floatingvoicebubble.ReasoningEffort
 import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import org.junit.Assert.assertEquals
@@ -109,6 +110,16 @@ class ByokEndpointResolverTest {
     }
 
     @Test
+    fun zaiDefaultExplicitlyDisablesThinkingForLowLatencyCorrection() {
+        val options = OpenAiProviderCompatibility.resolve(
+            "https://api.z.ai/api/coding/paas/v4/chat/completions", "GLM-4.7", ReasoningEffort.DEFAULT,
+        )
+        assertEquals(false, options.zaiThinkingEnabled)
+        assertTrue(options.disableSampling)
+        assertTrue(options.zaiCodingPlanEndpoint)
+    }
+
+    @Test
     fun genericCompatibleHostDoesNotReceiveProviderSpecificReasoningField() {
         val options = OpenAiProviderCompatibility.resolve(
             "https://llm.example.com/v1/chat/completions", "model", ReasoningEffort.HIGH,
@@ -131,16 +142,28 @@ class ByokEndpointResolverTest {
     }
 
     @Test
-    fun strongRepairRetriesRawEchoOnlyWhenNBestHasEvidence() {
+    fun strongRepairRetriesRawEchoEvenWithoutNBestDisagreement() {
         val request = CorrectionRequest(
             rawTranscript = "取り合いが聞き取りミスをした",
-            alternatives = listOf("取り合いが聞き取りミスをした", "聞き取りAIが聞き取りミスをした"),
+            alternatives = listOf("取り合いが聞き取りミスをした"),
             surroundingContext = "音声認識AIの話",
             dictionaryTerms = emptyList(),
             preferences = CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.STRONG),
         )
-        assertTrue(CorrectionPostProcessor.shouldRetryStrongNoOp(request, request.rawTranscript))
-        assertFalse(CorrectionPostProcessor.shouldRetryStrongNoOp(request.copy(alternatives = listOf(request.rawTranscript)), request.rawTranscript))
+        assertTrue(CorrectionPostProcessor.shouldRetryNoOp(request, request.rawTranscript))
+    }
+
+    @Test
+    fun requestedLineBreakGetsDeterministicFallbackWhenModelReturnsFlatText() {
+        val raw = "今日は音声入力の補正について話します。句読点も直したいです。聞き取りミスも積極的に直したいです。さらに長い文章では改行も入れて読みやすくしたいです。"
+        val prefs = CorrectionPreferences(
+            addPeriods = true,
+            removeFillers = false,
+            lineBreakMode = LineBreakMode.SMART,
+        )
+        val output = CorrectionPostProcessor.apply(raw, raw, prefs)
+        assertTrue(output.contains('\n'))
+        assertEquals(raw.replace("\n", ""), output.replace("\n", ""))
     }
 
     @Test
