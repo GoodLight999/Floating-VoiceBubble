@@ -113,15 +113,18 @@ class FinalizationEngine(
         val attempted = corrector != null
         var modelOutput: String? = null
         if (corrector != null) {
-            modelOutput = runCatching { bounded(CORRECTION_TIMEOUT_MS, "補正モデル") { corrector.correct(request) } }
-                .onFailure { correctionError = it.message ?: it.javaClass.simpleName }
-                .getOrNull()
-            if (modelOutput != null && CorrectionPostProcessor.shouldRetryStrongNoOp(request, modelOutput!!)) {
+            modelOutput = runCatching {
+                bounded(CORRECTION_FIRST_ATTEMPT_TIMEOUT_MS, "補正モデル") { corrector.correct(request) }
+            }.onFailure { correctionError = it.message ?: it.javaClass.simpleName }.getOrNull()
+
+            if (modelOutput != null && CorrectionPostProcessor.shouldRetryNoOp(request, modelOutput!!)) {
+                val firstOutput = modelOutput
                 modelOutput = runCatching {
-                    bounded(CORRECTION_TIMEOUT_MS, "補正モデル再試行") {
+                    bounded(CORRECTION_RETRY_TIMEOUT_MS, "補正モデル再試行") {
                         corrector.correct(request.copy(forceCorrection = true))
                     }
-                }.onFailure { correctionError = it.message ?: it.javaClass.simpleName }.getOrNull() ?: modelOutput
+                }.onFailure { correctionError = it.message ?: it.javaClass.simpleName }
+                    .getOrNull() ?: firstOutput
             }
         } else if (settings.correctionMode != CorrectionMode.NONE && correctionError == null) {
             correctionError = "補正バックエンドが利用できません"
@@ -213,12 +216,17 @@ class FinalizationEngine(
         } catch (execution: ExecutionException) {
             throw (execution.cause ?: execution)
         } catch (interrupted: InterruptedException) {
-            future.cancel(true); Thread.currentThread().interrupt(); throw interrupted
+            future.cancel(true)
+            Thread.currentThread().interrupt()
+            throw interrupted
         }
     }
 
     companion object {
-        private const val CORRECTION_TIMEOUT_MS = 25_000L
+        // The accessibility-service watchdog is 45 seconds. Keep the entire possible two-attempt
+        // correction window below it so a useful retry cannot be discarded by the outer watchdog.
+        private const val CORRECTION_FIRST_ATTEMPT_TIMEOUT_MS = 30_000L
+        private const val CORRECTION_RETRY_TIMEOUT_MS = 10_000L
         private const val FINAL_ASR_TIMEOUT_MS = 30_000L
     }
 }
