@@ -34,8 +34,11 @@ object OpenAiProviderCompatibility {
             requestModel = if (isZai) model.lowercase(Locale.ROOT) else model,
             openAiReasoningEffort = if (isOpenAi) effort?.let(::openAiEffort) else null,
             openRouterReasoningEffort = if (isOpenRouter) effort?.let(::openRouterEffort) else null,
-            zaiThinkingEnabled = if (isZai) effort?.let(::zaiThinkingEnabled) else null,
-            // Z.AI documents do_sample=false as the deterministic path; this avoids relying on
+            // Z.AI's thinking control is binary. Voice correction is a low-latency editing task, so
+            // DEFAULT must not silently inherit a provider-side thinking default. Users can still
+            // explicitly request LOW or deeper reasoning and receive thinking mode.
+            zaiThinkingEnabled = if (isZai) zaiThinkingEnabled(reasoningEffort) else null,
+            // Z.AI documents do_sample=false as its deterministic path. This avoids relying on
             // temperature semantics and keeps lightweight GLM variants compatible.
             disableSampling = isZai,
             sendEnglishAcceptLanguage = isZai,
@@ -44,7 +47,7 @@ object OpenAiProviderCompatibility {
     }
 
     private fun zaiThinkingEnabled(value: ReasoningEffort): Boolean = when (value) {
-        ReasoningEffort.DEFAULT -> error("DEFAULT is omitted")
+        ReasoningEffort.DEFAULT,
         ReasoningEffort.NONE,
         ReasoningEffort.MINIMAL -> false
         ReasoningEffort.LOW,
