@@ -2,7 +2,6 @@ package com.goodlight.floatingvoicebubble.correction
 
 import com.goodlight.floatingvoicebubble.LineBreakMode
 import com.goodlight.floatingvoicebubble.RecognitionRepairMode
-import kotlin.math.abs
 import kotlin.math.max
 
 object CorrectionGuard {
@@ -54,36 +53,44 @@ object CorrectionGuard {
         if (raw.isBlank()) return Decision(cleaned, cleaned.isNotBlank(), 0.0)
         if (cleaned.isBlank()) return Decision(raw, false, 1.0, "empty-output")
         if (cleaned == raw) return Decision(raw, true, 0.0)
+
         val rawBasis = if (ignoreLineBreaksForDistance) stripLineBreaks(raw) else raw
         val cleanedBasis = if (ignoreLineBreaksForDistance) stripLineBreaks(cleaned) else cleaned
-        val rawPoints = rawBasis.codePoints().toArray(); val newPoints = cleanedBasis.codePoints().toArray()
+        val rawPoints = rawBasis.codePoints().toArray()
+        val newPoints = cleanedBasis.codePoints().toArray()
         val distance = levenshtein(rawPoints, newPoints)
         val normalized = distance.toDouble() / max(rawPoints.size, newPoints.size).coerceAtLeast(1)
-        val lengthDelta = abs(newPoints.size - rawPoints.size).toDouble() / rawPoints.size.coerceAtLeast(1)
-        val threshold = when {
-            allowRegisterRewrite -> when {
-                rawPoints.size <= 8 -> 0.96
-                rawPoints.size <= 20 -> 0.90
-                else -> 0.82
-            }
-            recognitionRepairMode == RecognitionRepairMode.STRONG -> when {
-                rawPoints.size <= 8 -> 0.92
-                rawPoints.size <= 20 -> 0.84
-                else -> 0.72
-            }
-            else -> when {
-                rawPoints.size <= 8 -> 0.72
-                rawPoints.size <= 20 -> 0.58
-                else -> 0.46
+
+        // Character edit distance is intentionally diagnostic only. Japanese ASR can corrupt an
+        // entire phrase while preserving the intended meaning and approximate length, so rejecting
+        // a correction merely because many code points changed systematically defeats STRONG repair.
+        // Safety is enforced by explicit user-option invariants above and coarse runaway bounds here.
+        val rawLength = rawPoints.size.coerceAtLeast(1)
+        val newLength = newPoints.size
+        val maxLength = when {
+            allowRegisterRewrite -> max(rawLength * 4, rawLength + 48)
+            recognitionRepairMode == RecognitionRepairMode.STRONG -> max(rawLength * 3, rawLength + 40)
+            else -> max(rawLength * 2, rawLength + 32)
+        }
+        if (newLength > maxLength) {
+            return Decision(raw, false, normalized, "runaway-expansion")
+        }
+
+        // A large contraction is much more characteristic of summarization/content loss than ASR
+        // repair. Do not apply this to short utterances where removing fillers can be proportionally
+        // large, and keep the threshold deliberately coarse rather than lexical-distance based.
+        if (rawLength >= 32) {
+            val minLength = when {
+                allowRegisterRewrite -> (rawLength * 0.35).toInt()
+                recognitionRepairMode == RecognitionRepairMode.STRONG -> (rawLength * 0.42).toInt()
+                else -> (rawLength * 0.50).toInt()
+            }.coerceAtLeast(1)
+            if (newLength < minLength) {
+                return Decision(raw, false, normalized, "runaway-contraction")
             }
         }
-        val maxLengthDelta = when {
-            allowRegisterRewrite -> 3.50
-            recognitionRepairMode == RecognitionRepairMode.STRONG -> 0.75
-            else -> 0.40
-        }
-        return if (normalized <= threshold && lengthDelta <= maxLengthDelta) Decision(cleaned, true, normalized)
-        else Decision(raw, false, normalized, "edit-budget-exceeded")
+
+        return Decision(cleaned, true, normalized)
     }
 
     fun sanitize(value: String): String {
@@ -125,14 +132,17 @@ object CorrectionGuard {
     private fun levenshtein(a: IntArray, b: IntArray): Int {
         if (a.isEmpty()) return b.size
         if (b.isEmpty()) return a.size
-        var previous = IntArray(b.size + 1) { it }; var current = IntArray(b.size + 1)
+        var previous = IntArray(b.size + 1) { it }
+        var current = IntArray(b.size + 1)
         for (i in a.indices) {
             current[0] = i + 1
             for (j in b.indices) {
                 val cost = if (a[i] == b[j]) 0 else 1
                 current[j + 1] = minOf(current[j] + 1, previous[j + 1] + 1, previous[j] + cost)
             }
-            val swap = previous; previous = current; current = swap
+            val swap = previous
+            previous = current
+            current = swap
         }
         return previous[b.size]
     }
