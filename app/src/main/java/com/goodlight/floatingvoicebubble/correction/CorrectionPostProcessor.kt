@@ -2,6 +2,9 @@ package com.goodlight.floatingvoicebubble.correction
 
 import com.goodlight.floatingvoicebubble.LineBreakMode
 import com.goodlight.floatingvoicebubble.RecognitionRepairMode
+import java.text.BreakIterator
+import java.util.Locale
+import kotlin.math.abs
 
 /**
  * Deterministic last-mile rules for user-selected formatting.
@@ -29,8 +32,6 @@ object CorrectionPostProcessor {
         if (sanitized != request.rawTranscript.trim()) return false
         if (request.preferences.recognitionRepairMode == RecognitionRepairMode.STRONG) return true
         if (request.alternatives.any { it.isNotBlank() && it.trim() != request.rawTranscript.trim() }) return true
-        if (request.preferences.removeFillers && LEADING_FILLER.containsMatchIn(request.rawTranscript.trim())) return true
-        if (request.preferences.addPeriods && !hasTerminalPunctuation(request.rawTranscript)) return true
         if (
             request.preferences.addCommas &&
             request.rawTranscript.length >= COMMA_RETRY_MIN_CHARS &&
@@ -92,17 +93,23 @@ object CorrectionPostProcessor {
 
     /**
      * The model gets first choice of semantic boundaries. If it returned no line break at all while
-     * the user explicitly requested them, add conservative paragraph breaks at sentence boundaries.
-     * This never invents punctuation or words and therefore cannot alter the utterance's meaning.
+     * the user explicitly requested them, add conservative paragraph breaks. Sentence boundaries are
+     * preferred; for punctuation-free long Japanese dictation, Unicode line-break opportunities are
+     * the final fallback. Only whitespace/newlines change — transcript characters are preserved.
      */
     private fun ensureRequestedLineBreaks(value: String, mode: LineBreakMode): String {
         if (mode == LineBreakMode.NONE || value.contains('\n')) return value
+        val separator = if (mode == LineBreakMode.SMART_SPACED) "\n\n" else "\n"
         val sentences = splitSentences(value)
-        if (sentences.size < 2) return value
-        val totalLength = sentences.sumOf(String::length)
+        val totalLength = sentences.sumOf { it.length }
+
+        if (sentences.size < 2) {
+            if (value.length < FORCE_ONE_BREAK_CHARS) return value
+            val boundary = fallbackLineBoundary(value) ?: return value
+            return insertBreak(value, boundary, separator)
+        }
         if (totalLength < MIN_LINE_BREAK_TEXT_CHARS) return value
 
-        val separator = if (mode == LineBreakMode.SMART_SPACED) "\n\n" else "\n"
         val target = if (mode == LineBreakMode.SMART_SPACED) SPACED_TARGET_CHARS else SMART_TARGET_CHARS
         val builder = StringBuilder(value.length + sentences.size * separator.length)
         var currentParagraphLength = 0
@@ -121,17 +128,17 @@ object CorrectionPostProcessor {
         }
 
         if (breaks > 0) return builder.toString()
-
-        // Several short sentences can still form a long dictation. In that case insert exactly one
-        // break at the sentence boundary closest to the midpoint instead of leaving the option inert.
         if (totalLength < FORCE_ONE_BREAK_CHARS) return value
+
+        // Several short sentences can still form a long dictation. Insert exactly one break at the
+        // sentence boundary nearest the midpoint rather than leaving the option inert.
         var cumulative = 0
         var bestBoundary = 0
         var bestDistance = Int.MAX_VALUE
         val midpoint = totalLength / 2
         for (index in 0 until sentences.lastIndex) {
             cumulative += sentences[index].length
-            val distance = kotlin.math.abs(cumulative - midpoint)
+            val distance = abs(cumulative - midpoint)
             if (distance < bestDistance) {
                 bestDistance = distance
                 bestBoundary = index
@@ -143,6 +150,56 @@ object CorrectionPostProcessor {
                 if (index == bestBoundary) append(separator)
             }
         }
+    }
+
+    private fun fallbackLineBoundary(value: String): Int? {
+        val midpoint = value.length / 2
+        val minBoundary = (value.length * 0.28).toInt().coerceAtLeast(MIN_SIDE_CHARS)
+        val maxBoundary = (value.length * 0.72).toInt().coerceAtMost(value.length - MIN_SIDE_CHARS)
+        if (minBoundary >= maxBoundary) return null
+
+        // Prefer visible clause/topic separators if the provider supplied them.
+        val preferred = mutableListOf<Int>()
+        value.forEachIndexed { index, char ->
+            if (char in CLAUSE_BOUNDARIES) preferred += index + 1
+        }
+        TOPIC_BOUNDARIES.forEach { marker ->
+            var from = 0
+            while (true) {
+                val index = value.indexOf(marker, from)
+                if (index < 0) break
+                preferred += index
+                from = index + marker.length
+            }
+        }
+        preferred.filter { it in minBoundary..maxBoundary }
+            .minByOrNull { abs(it - midpoint) }
+            ?.let { return it }
+
+        // Punctuation-free Japanese has few lexical delimiters. BreakIterator applies Unicode line
+        // breaking rules and avoids illegal boundaries better than cutting at an arbitrary code unit.
+        val iterator = BreakIterator.getLineInstance(Locale.JAPANESE).apply { setText(value) }
+        var boundary = iterator.first()
+        var best: Int? = null
+        var bestDistance = Int.MAX_VALUE
+        while (boundary != BreakIterator.DONE) {
+            if (boundary in minBoundary..maxBoundary) {
+                val distance = abs(boundary - midpoint)
+                if (distance < bestDistance) {
+                    best = boundary
+                    bestDistance = distance
+                }
+            }
+            boundary = iterator.next()
+        }
+        return best
+    }
+
+    private fun insertBreak(value: String, boundary: Int, separator: String): String {
+        val left = value.substring(0, boundary).trimEnd()
+        val right = value.substring(boundary).trimStart()
+        if (left.isBlank() || right.isBlank()) return value
+        return left + separator + right
     }
 
     private fun splitSentences(value: String): List<String> {
@@ -169,10 +226,13 @@ object CorrectionPostProcessor {
     )
     private const val TERMINAL_PUNCTUATION = "。．.!！?？…」』）)]}"
     private const val SENTENCE_BOUNDARIES = "。.!！?？"
+    private const val CLAUSE_BOUNDARIES = "、,；;：:"
+    private val TOPIC_BOUNDARIES = listOf("ちなみに", "それから", "そして", "ところで", "一方で", "ただ", "つまり", "なので", "だから", "あと")
     private const val COMMA_RETRY_MIN_CHARS = 24
     private const val LINE_BREAK_RETRY_MIN_CHARS = 32
     private const val MIN_LINE_BREAK_TEXT_CHARS = 24
     private const val FORCE_ONE_BREAK_CHARS = 36
+    private const val MIN_SIDE_CHARS = 12
     private const val SMART_TARGET_CHARS = 42
     private const val SPACED_TARGET_CHARS = 52
     private const val MAX_PARAGRAPH_CHARS = 84
