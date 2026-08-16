@@ -21,6 +21,7 @@ class OpenAiCompatibleCorrector(
         val options = OpenAiProviderCompatibility.resolve(endpoint, model, reasoningEffort)
         val body = JSONObject()
             .put("model", options.requestModel)
+            .put("stream", false)
             .put(
                 "messages",
                 JSONArray()
@@ -28,6 +29,13 @@ class OpenAiCompatibleCorrector(
                     .put(JSONObject().put("role", "user").put("content", CorrectionPrompt.user(request))),
             )
         applyProviderOptions(body, options)
+        if (options.zaiThinkingEnabled != null) {
+            // Correction output should stay close to the transcript. A bounded output budget prevents
+            // a provider's very large generation default from turning a tiny edit into a long-running
+            // request while remaining generous for long Japanese dictation.
+            val transcriptPoints = request.rawTranscript.codePointCount(0, request.rawTranscript.length)
+            body.put("max_tokens", (transcriptPoints * 6 + 512).coerceIn(1024, 8192))
+        }
 
         var result = execute(body, options)
         if (result.status in listOf(400, 422) && optionalParameterRejected(result.text)) {
@@ -109,6 +117,6 @@ class OpenAiCompatibleCorrector(
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 8_000
-        private const val READ_TIMEOUT_MS = 25_000
+        private const val READ_TIMEOUT_MS = 30_000
     }
 }
