@@ -54,7 +54,7 @@ class CorrectionPreferencesGuardTest {
     }
 
     @Test
-    fun strongModeAcceptsMultiWordAcousticRepairThatNormalBudgetRejects() {
+    fun normalAndStrongAcceptMultiWordAcousticRepairAtComparableScale() {
         val raw = "現人の洗濯と温泉式の海鮮方針を原始と相談した"
         val repaired = "エンジンの設計と音声認識の改善方針をチームと相談した"
         val normal = CorrectionGuard.choose(
@@ -67,8 +67,10 @@ class CorrectionPreferencesGuardTest {
             repaired,
             CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.STRONG),
         )
-        assertFalse(normal.accepted)
+        assertTrue(normal.accepted)
         assertTrue(strong.accepted)
+        assertEquals(repaired, normal.text)
+        assertEquals(repaired, strong.text)
     }
 
     @Test
@@ -78,6 +80,16 @@ class CorrectionPreferencesGuardTest {
         val runaway = "確認して、その結果を関係者全員へ共有し、今後の計画と予算と担当者まで決定したうえで明日の会議資料も作成しておいてください"
         val decision = CorrectionGuard.choose(raw, runaway, strong)
         assertFalse(decision.accepted)
+        assertEquals("runaway-expansion", decision.reason)
+    }
+
+    @Test
+    fun longUtteranceRejectsSummaryLikeContraction() {
+        val raw = "今日は音声入力アプリの補正について話していて句読点と改行と聞き取りミスの修復を全部ちゃんと動くようにしたいという話をしている"
+        val summarized = "補正を改善したい。"
+        val decision = CorrectionGuard.choose(raw, summarized, CorrectionPreferences())
+        assertFalse(decision.accepted)
+        assertEquals("runaway-contraction", decision.reason)
     }
 
     @Test
@@ -99,16 +111,16 @@ class CorrectionPreferencesGuardTest {
     }
 
     @Test
-    fun lineBreakPermissionDoesNotPermitUnrelatedRewrite() {
+    fun lineBreakPermissionDoesNotPermitRunawayExpansion() {
         val preferences = CorrectionPreferences(lineBreakMode = LineBreakMode.SMART)
         val raw = "今日は晴れ。明日は雨。"
-        val rewritten = "今日は晴れ。\n明日は雨なので外出をやめて家でゆっくり過ごすことにしました。"
+        val rewritten = "今日は晴れ。\n明日は雨なので外出をやめ、予定をすべて取り消し、関係者へ連絡し、買い物も済ませ、家で一日中ゆっくり過ごすことにしました。さらに来週の予定も変更します。"
         val decision = CorrectionGuard.choose(raw, rewritten, preferences)
         assertFalse(decision.accepted)
     }
 
     @Test
-    fun explicitPoliteRewriteGetsLargerEditBudget() {
+    fun explicitPoliteRewriteGetsLargerStructuralBudget() {
         val polite = CorrectionPreferences(polite = true)
         val decision = CorrectionGuard.choose("やってくれ", "やってください", polite)
         assertTrue(decision.accepted)
