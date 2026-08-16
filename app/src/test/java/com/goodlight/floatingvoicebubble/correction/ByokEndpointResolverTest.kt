@@ -167,6 +167,19 @@ class ByokEndpointResolverTest {
     }
 
     @Test
+    fun punctuationFreeLongJapaneseStillGetsRequestedLineBreakWithoutChangingCharacters() {
+        val raw = "今日は音声入力アプリの補正についてかなり長めに話していて聞き取りミスをもっと積極的に直してほしいし読みやすい場所にはちゃんと改行も入れてほしいという話をしています"
+        val prefs = CorrectionPreferences(
+            addPeriods = false,
+            removeFillers = false,
+            lineBreakMode = LineBreakMode.SMART_SPACED,
+        )
+        val output = CorrectionPostProcessor.apply(raw, raw, prefs)
+        assertTrue(output.contains("\n\n"))
+        assertEquals(raw, output.replace("\n", ""))
+    }
+
+    @Test
     fun rejectsInsecureOrCredentialBearingEndpoints() {
         assertThrows(IllegalArgumentException::class.java) { ByokEndpointResolver.resolve("http://llm.example.com/v1") }
         assertThrows(IllegalArgumentException::class.java) { ByokEndpointResolver.resolve("https://user:secret@llm.example.com/v1") }
