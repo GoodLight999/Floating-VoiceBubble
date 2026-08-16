@@ -34,7 +34,7 @@ class FloatingBubbleController(
     private val root = FrameLayout(service)
     private val card = LinearLayout(service)
     private val status = TextView(service)
-    private val raw = action("そのまま入力", TEXT, ACTION_SURFACE) { onCommitRaw() }
+    private val raw = action("補正せず入力", TEXT, ACTION_SURFACE) { onCommitRaw() }
     private val cancel = action("破棄", ACCENT_SOFT, Color.TRANSPARENT) { onCancel() }
     private val transcript = TextView(service)
     private val scroll = ScrollView(service)
@@ -67,7 +67,7 @@ class FloatingBubbleController(
             background = bg(CARD, 22f); elevation = dp(12).toFloat()
             alpha = 0f; scaleX = .96f; scaleY = .96f; visibility = View.GONE
         }
-        status.apply { setTextColor(MUTED); textSize = 12f; typeface = Typeface.DEFAULT_BOLD; text = "●  待機中" }
+        status.apply { setTextColor(MUTED); textSize = 10.5f; typeface = Typeface.DEFAULT_BOLD; text = "●  待機中" }
         card.addView(status, LinearLayout.LayoutParams(-1, dp(38)))
         val actions = LinearLayout(service).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -76,7 +76,7 @@ class FloatingBubbleController(
             addView(cancel, LinearLayout.LayoutParams(0, dp(48), 1f))
         }
         card.addView(actions, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
-        transcript.apply { setTextColor(TEXT); textSize = 16f; setLineSpacing(0f, 1.2f); setTextIsSelectable(false) }
+        transcript.apply { setTextColor(TEXT); textSize = 17f; setLineSpacing(0f, 1.2f); setTextIsSelectable(false) }
         scroll.apply { isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER; addView(transcript, FrameLayout.LayoutParams(-1, -2)) }
         card.addView(scroll, LinearLayout.LayoutParams(-1, dp(146)))
         root.addView(card, FrameLayout.LayoutParams(dp(CARD_DP), dp(CARD_HEIGHT_DP), Gravity.TOP or Gravity.START))
@@ -106,7 +106,7 @@ class FloatingBubbleController(
     fun detach() { if (attached) { runCatching { wm.removeView(root) }; runCatching { wm.removeView(dismissRoot) }; attached = false } }
     fun setInputAvailable(available: Boolean, resetDismissal: Boolean = false) {
         inputAvailable = available; if (available && resetDismissal) dismissedForInput = false
-        if (!available) { hideDismiss(); if (expanded) collapse() }; refresh()
+        if (!available) { hideDismiss(); if (expanded) collapse() }; refresh(resetDismissal)
     }
     fun acknowledgeTap() { mic.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
     fun showIdle() { mic.text = "●"; mic.setTextColor(Color.WHITE); mic.background = bg(ACCENT, 28f); buttons(false); if (expanded) collapse(); refresh() }
@@ -142,14 +142,17 @@ class FloatingBubbleController(
         if (items.size > MAX_PENDING) { append("\n\n"); meta("ほか ${items.size - MAX_PENDING}件を処理中") }
     }
     private fun SpannableStringBuilder.meta(s: String) {
-        val start = length; append(s); setSpan(RelativeSizeSpan(.72f), start, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        val start = length; append(s); setSpan(RelativeSizeSpan(.62f), start, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         setSpan(ForegroundColorSpan(MUTED), start, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE); setSpan(StyleSpan(Typeface.BOLD), start, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
     private fun SpannableStringBuilder.placeholder(s: String) {
-        val start = length; append(s); setSpan(RelativeSizeSpan(.88f), start, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE); setSpan(ForegroundColorSpan(MUTED), start, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        val start = length; append(s); setSpan(RelativeSizeSpan(.82f), start, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE); setSpan(ForegroundColorSpan(MUTED), start, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
     private fun visible() = attached && inputAvailable && !dismissedForInput
-    private fun refresh() { if (attached) root.visibility = if (visible()) View.VISIBLE else View.GONE }
+    private fun refresh(resetDismissal: Boolean = false) {
+        if (resetDismissal && inputAvailable) dismissedForInput = false
+        if (attached) root.visibility = if (visible()) View.VISIBLE else View.GONE
+    }
     private fun expand() {
         if (expanded) return; expanded = true; val right = params.x + params.width; params.width = dp(CARD_DP); params.height = dp(CARD_HEIGHT_DP)
         params.x = (right - params.width).coerceAtLeast(0); clamp(); if (attached) wm.updateViewLayout(root, params); card.visibility = View.VISIBLE
