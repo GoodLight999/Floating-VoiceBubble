@@ -3,6 +3,8 @@ package com.goodlight.floatingvoicebubble.correction
 import com.goodlight.floatingvoicebubble.LineBreakMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -21,7 +23,7 @@ class CorrectionPostProcessorTest {
     }
 
     @Test
-    fun punctuationFreeLongJapaneseStillGetsMultipleSmartBreaks() {
+    fun punctuationFreeLongJapaneseUsesLinguisticBoundariesRatherThanArbitraryWidth() {
         val raw = "これは句読点がほとんど入らない音声認識結果を想定した長い日本語の発話でありユーザーが適宜改行を選んだならモデルが改行を返さなかった場合でもアプリ側で読みやすい長さへ分割される必要がありさらに一度だけ改行して残りが巨大な段落になる挙動も避けなければならないので十分に長い入力では複数の改行が必要になる"
         val output = CorrectionPostProcessor.apply(
             raw,
@@ -31,6 +33,32 @@ class CorrectionPostProcessorTest {
 
         assertTrue(output.count { it == '\n' } >= 2)
         assertEquals(raw, output.replace("\n", ""))
+    }
+
+    @Test
+    fun exactUserComplaintDoesNotSplitAfterDiscourseMarker() {
+        val raw = "というかそもそもシステム的な強制的な一切文脈を考えていないクソみたいな解釈しかされないことばかりそもそもまともに新しいバージョンになってからLMによる補正が働いてる様子が見えない"
+        val output = CorrectionPostProcessor.apply(
+            raw,
+            raw,
+            CorrectionPreferences(addPeriods = false, lineBreakMode = LineBreakMode.SMART_SPACED),
+        )
+
+        assertFalse(output.contains("そもそも\n\nまともに"))
+        assertTrue(output.contains("ことばかり\n\nそもそも"))
+        assertEquals(raw, output.replace("\n", ""))
+    }
+
+    @Test
+    fun noLinguisticBoundaryMeansNoBlindMidpointSplit() {
+        val raw = "超高精度音声入力補正性能検証継続実行結果確認専用長文文字列音声認識候補比較評価処理継続確認専用長文文字列補正性能検証継続実行結果確認専用"
+        val output = CorrectionPostProcessor.apply(
+            raw,
+            raw,
+            CorrectionPreferences(addPeriods = false, lineBreakMode = LineBreakMode.SMART),
+        )
+
+        assertEquals(raw, output)
     }
 
     @Test
@@ -82,5 +110,20 @@ class CorrectionPostProcessorTest {
             CorrectionPreferences(addPeriods = false, lineBreakMode = LineBreakMode.NONE),
         )
         assertEquals(raw, output)
+    }
+
+    @Test
+    fun semanticProbeRejectsNonEmptyRawEcho() {
+        val request = CorrectionPostProcessor.correctionProbeRequest()
+        val failure = CorrectionPostProcessor.probeFailure(request.rawTranscript)
+
+        assertNotNull(failure)
+        assertTrue(failure!!.contains("聞き取りAI") || failure.contains("RAW"))
+    }
+
+    @Test
+    fun semanticProbeAcceptsContextAwareRepair() {
+        val output = "音声入力の聞き取りAIがだいぶがっつり聞き取りミスをした。"
+        assertNull(CorrectionPostProcessor.probeFailure(output))
     }
 }
