@@ -1,16 +1,13 @@
 package com.goodlight.floatingvoicebubble
 
 import android.content.Intent
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -23,7 +20,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
@@ -33,120 +29,106 @@ internal fun QuickCorrectionControls(activity: MainActivity, modifier: Modifier 
     val store = remember(activity) { SettingsStore(activity) }
     var settings by remember { mutableStateOf(store.load()) }
 
-    Column(modifier = modifier) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 6.dp, top = 10.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text("文章をどう整える？", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text(
-                    "聞き間違いの修復と、句読点・語調・改行をここで決めます。話していない内容は足しません。",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+            Text("AI補正", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Row {
                 TextButton(onClick = { activity.startActivity(Intent(activity, AppProfilesActivity::class.java)) }) {
                     Text("アプリ別")
                 }
                 TextButton(onClick = { activity.startActivity(Intent(activity, CorrectionSetupActivity::class.java)) }) {
-                    Text("補正モデル")
+                    Text("モデル")
                 }
             }
         }
 
-        Text(
-            "聞き取りミスを直す",
-            modifier = Modifier.padding(start = 20.dp, top = 8.dp),
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            "「標準」は明白な誤変換を修復。「強め」は複数語が崩れた発話も前後文脈・候補・辞書から復元します。",
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        FlowRow(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            RecognitionRepairMode.entries.forEach { mode ->
+        QuickLabel("使用する補正")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            CorrectionMode.entries.forEach { mode ->
                 FilterChip(
-                    selected = settings.recognitionRepairMode == mode,
-                    onClick = { settings = store.update { it.copy(recognitionRepairMode = mode) } },
-                    label = {
-                        Text(
-                            when (mode) {
-                                RecognitionRepairMode.OFF -> "直さない"
-                                RecognitionRepairMode.NORMAL -> "標準"
-                                RecognitionRepairMode.STRONG -> "強め"
-                            },
-                        )
-                    },
+                    selected = settings.correctionMode == mode,
+                    onClick = { settings = store.update { it.copy(correctionMode = mode) } },
+                    label = { Text(correctionModeLabel(mode)) },
                 )
             }
         }
 
-        FlowRow(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-            verticalArrangement = Arrangement.spacedBy(0.dp),
-        ) {
-            CorrectionCheck("読点 、", settings.correctionAddCommas) { checked ->
-                settings = store.update { it.copy(correctionAddCommas = checked) }
-            }
-            CorrectionCheck("句点 。", settings.correctionAddPeriods) { checked ->
-                settings = store.update { it.copy(correctionAddPeriods = checked) }
-            }
-            CorrectionCheck("えー・あの等を削除", settings.correctionRemoveFillers) { checked ->
-                settings = store.update { it.copy(correctionRemoveFillers = checked) }
-            }
-            CorrectionCheck("です・ます調", settings.correctionPolite) { checked ->
-                settings = store.update {
-                    it.copy(correctionPolite = checked, correctionBusinessPolite = if (checked) false else it.correctionBusinessPolite)
-                }
-            }
-            CorrectionCheck("ビジネス敬語", settings.correctionBusinessPolite) { checked ->
-                settings = store.update {
-                    it.copy(correctionBusinessPolite = checked, correctionPolite = if (checked) false else it.correctionPolite)
-                }
+        QuickLabel("聞き取りミス修復")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            RecognitionRepairMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = settings.recognitionRepairMode == mode,
+                    onClick = { settings = store.update { it.copy(recognitionRepairMode = mode) } },
+                    label = { Text(repairLabel(mode)) },
+                )
             }
         }
 
+        QuickLabel("シンキング深度")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            ReasoningEffort.entries.forEach { effort ->
+                FilterChip(
+                    selected = settings.reasoningEffort == effort,
+                    onClick = { settings = store.update { it.copy(reasoningEffort = effort) } },
+                    label = { Text(reasoningLabel(effort)) },
+                )
+            }
+        }
         Text(
-            "改行",
-            modifier = Modifier.padding(start = 20.dp, top = 4.dp),
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            "長めに話したとき、話題の切れ目だけで文章を分けます。",
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+            "クラウド補正で使用。対応APIでは推論量を直接指定します。Z.AIは既定/なし/最小=thinking OFF、低以上=ONです。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
-        FlowRow(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+
+        QuickLabel("整形")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            ToggleChip("読点 、", settings.correctionAddCommas) { checked ->
+                settings = store.update { it.copy(correctionAddCommas = checked) }
+            }
+            ToggleChip("句点 。", settings.correctionAddPeriods) { checked ->
+                settings = store.update { it.copy(correctionAddPeriods = checked) }
+            }
+            ToggleChip("フィラー削除", settings.correctionRemoveFillers) { checked ->
+                settings = store.update { it.copy(correctionRemoveFillers = checked) }
+            }
+        }
+
+        QuickLabel("口調")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            FilterChip(
+                selected = !settings.correctionPolite && !settings.correctionBusinessPolite,
+                onClick = {
+                    settings = store.update { it.copy(correctionPolite = false, correctionBusinessPolite = false) }
+                },
+                label = { Text("そのまま") },
+            )
+            FilterChip(
+                selected = settings.correctionPolite,
+                onClick = {
+                    settings = store.update { it.copy(correctionPolite = true, correctionBusinessPolite = false) }
+                },
+                label = { Text("です・ます") },
+            )
+            FilterChip(
+                selected = settings.correctionBusinessPolite,
+                onClick = {
+                    settings = store.update { it.copy(correctionBusinessPolite = true, correctionPolite = false) }
+                },
+                label = { Text("ビジネス敬語") },
+            )
+        }
+
+        QuickLabel("改行")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             LineBreakMode.entries.forEach { mode ->
                 FilterChip(
                     selected = settings.correctionLineBreakMode == mode,
                     onClick = { settings = store.update { it.copy(correctionLineBreakMode = mode) } },
-                    label = {
-                        Text(
-                            when (mode) {
-                                LineBreakMode.NONE -> "改行しない"
-                                LineBreakMode.SMART -> "適宜改行"
-                                LineBreakMode.SMART_SPACED -> "適宜改行＋空行"
-                            },
-                        )
-                    },
+                    label = { Text(lineBreakLabel(mode)) },
                 )
             }
         }
@@ -155,15 +137,41 @@ internal fun QuickCorrectionControls(activity: MainActivity, modifier: Modifier 
 }
 
 @Composable
-private fun CorrectionCheck(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier
-            .heightIn(min = 48.dp)
-            .clickable(role = Role.Checkbox) { onChecked(!checked) }
-            .padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Checkbox(checked = checked, onCheckedChange = onChecked)
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-    }
+private fun QuickLabel(text: String) {
+    Text(text, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+}
+
+@Composable
+private fun ToggleChip(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    FilterChip(selected = checked, onClick = { onChecked(!checked) }, label = { Text(label) })
+}
+
+private fun correctionModeLabel(mode: CorrectionMode): String = when (mode) {
+    CorrectionMode.AUTO -> "自動"
+    CorrectionMode.BYOK -> "クラウド"
+    CorrectionMode.GEMMA -> "端末内Gemma"
+    CorrectionMode.NONE -> "補正なし"
+}
+
+private fun repairLabel(mode: RecognitionRepairMode): String = when (mode) {
+    RecognitionRepairMode.OFF -> "なし"
+    RecognitionRepairMode.NORMAL -> "標準"
+    RecognitionRepairMode.STRONG -> "強め"
+}
+
+private fun reasoningLabel(value: ReasoningEffort): String = when (value) {
+    ReasoningEffort.DEFAULT -> "既定"
+    ReasoningEffort.NONE -> "なし"
+    ReasoningEffort.MINIMAL -> "最小"
+    ReasoningEffort.LOW -> "低"
+    ReasoningEffort.MEDIUM -> "中"
+    ReasoningEffort.HIGH -> "高"
+    ReasoningEffort.XHIGH -> "xhigh"
+    ReasoningEffort.MAX -> "max"
+}
+
+private fun lineBreakLabel(mode: LineBreakMode): String = when (mode) {
+    LineBreakMode.NONE -> "なし"
+    LineBreakMode.SMART -> "適宜改行"
+    LineBreakMode.SMART_SPACED -> "改行＋空行"
 }
