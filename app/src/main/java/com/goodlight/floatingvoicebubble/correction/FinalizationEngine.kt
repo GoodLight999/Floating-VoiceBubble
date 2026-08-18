@@ -138,8 +138,8 @@ class FinalizationEngine(
                 bounded(CORRECTION_FIRST_ATTEMPT_TIMEOUT_MS, "補正モデル") { corrector.correct(request) }
             }.onFailure { correctionError = it.message ?: it.javaClass.simpleName }.getOrNull()
 
-            if (modelOutput != null && CorrectionPostProcessor.shouldRetryNoOp(request, modelOutput!!)) {
-                val firstOutput = modelOutput
+            val firstOutput = modelOutput
+            if (firstOutput != null && CorrectionPostProcessor.shouldRetryNoOp(request, firstOutput)) {
                 modelOutput = runCatching {
                     bounded(CORRECTION_RETRY_TIMEOUT_MS, "補正モデル再試行") {
                         corrector.correct(request.copy(forceCorrection = true))

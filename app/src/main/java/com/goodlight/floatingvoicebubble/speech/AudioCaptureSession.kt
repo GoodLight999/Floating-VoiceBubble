@@ -42,7 +42,9 @@ class AudioCaptureSession(
 
     @Volatile
     private var audioRecord: AudioRecord? = null
-    private var wavFile: File? = null
+    private var expectedWav: File? = null
+    @Volatile
+    private var finalizedWav: File? = null
 
     fun detachRecognizerAudioSource(): ParcelFileDescriptor =
         pipe?.get(0) ?: error("Recognizer audio pipe is disabled for this session")
@@ -57,7 +59,8 @@ class AudioCaptureSession(
         outputDir.mkdirs()
         val raw = File(outputDir, "$sessionId.pcm")
         val wav = File(outputDir, "$sessionId.wav")
-        wavFile = wav
+        expectedWav = wav
+        finalizedWav = null
 
         val queriedMinBuffer = AudioRecord.getMinBufferSize(
             sampleRate,
@@ -120,11 +123,11 @@ class AudioCaptureSession(
         runCatching { pipe?.get(1)?.close() }
     }
 
-    fun expectedWavFile(): File? = wavFile
+    fun expectedWavFile(): File? = expectedWav
 
     fun awaitFinalizedWav(timeoutMs: Long = WAV_FINALIZE_TIMEOUT_MS): File? {
-        finalized.await(timeoutMs, TimeUnit.MILLISECONDS)
-        return wavFile?.takeIf { it.isFile && it.length() > WAV_HEADER_BYTES }
+        if (!finalized.await(timeoutMs, TimeUnit.MILLISECONDS)) return null
+        return finalizedWav
     }
 
     override fun close() {
@@ -184,9 +187,19 @@ class AudioCaptureSession(
             runCatching { record.stop() }
             runCatching { record.release() }
             audioRecord = null
-            // The final ASR consumes this exact WAV. Count down only after wrapping finishes so
-            // the finalizer can never race a half-written diagnostic/final-ASR file.
-            runCatching { wrapPcmAsWav(raw, wav) }
+
+            // Never publish the destination path merely because a file exists. A failed write can
+            // leave a plausible-looking partial WAV. Only a successfully wrapped file whose RIFF
+            // metadata and exact PCM data length agree becomes visible to final ASR.
+            val rawBytes = raw.length()
+            finalizedWav = runCatching {
+                wrapPcmAsWav(raw, wav)
+                check(WavFileIntegrity.isCompletePcm16Mono(wav, rawBytes, sampleRate)) {
+                    "WAV integrity check failed"
+                }
+                wav
+            }.getOrNull()
+            if (finalizedWav == null) runCatching { wav.delete() }
             raw.delete()
             finalized.countDown()
             failureMessage?.let(onCaptureFailure)
@@ -240,7 +253,6 @@ class AudioCaptureSession(
         .array()
 
     companion object {
-        private const val WAV_HEADER_BYTES = 44L
         private const val WAV_FINALIZE_TIMEOUT_MS = 3_000L
     }
 }

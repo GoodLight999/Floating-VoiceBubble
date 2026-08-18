@@ -11,6 +11,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.EditorInfo
 import com.goodlight.floatingvoicebubble.AppProfileStore
+import com.goodlight.floatingvoicebubble.AppSettings
 import com.goodlight.floatingvoicebubble.CorrectionMode
 import com.goodlight.floatingvoicebubble.FinalAsrMode
 import com.goodlight.floatingvoicebubble.RecognitionMode
@@ -31,6 +32,7 @@ import com.goodlight.floatingvoicebubble.speech.SpeechRecognitionSession
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import java.io.File
 import java.util.LinkedHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeoutException
 
@@ -44,7 +46,11 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private lateinit var finalizer: FinalizationEngine
     private lateinit var overlay: FloatingBubbleController
 
-    private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "VoiceBubble-Finalizer") }
+    // Network-backed finalization can run concurrently. Native/local model work stays serialized to
+    // avoid multiplying model memory and relying on undocumented concurrent native-runtime safety.
+    // OrderedResolutionQueue below guarantees that commits still happen in utterance order.
+    private val cloudFinalization = Executors.newFixedThreadPool(3) { r -> Thread(r, "VoiceBubble-CloudFinalizer") }
+    private val localFinalization = Executors.newSingleThreadExecutor { r -> Thread(r, "VoiceBubble-LocalFinalizer") }
     private val inference = Executors.newCachedThreadPool { r -> Thread(r, "VoiceBubble-Inference") }
     private val warmup = Executors.newSingleThreadExecutor { r -> Thread(r, "VoiceBubble-Warmup") }
     private var input: TrackingInputMethod? = null
@@ -59,6 +65,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private var nextJob = 0L
     private val pending = LinkedHashMap<Long, String>()
     private val targets = LinkedHashMap<Long, Target?>()
+    private val finalizationOrder = OrderedResolutionQueue<Long, FinalizationResolution>()
 
     /**
      * Recent VoiceBubble commits are kept only in this service process. They are not persisted and
@@ -111,10 +118,12 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         session?.close()
         pending.clear()
         targets.clear()
+        finalizationOrder.clear()
         recentVoiceContext.clear()
         if (::overlay.isInitialized) overlay.detach()
         if (::dictionary.isInitialized) dictionary.close()
-        worker.shutdownNow()
+        cloudFinalization.shutdownNow()
+        localFinalization.shutdownNow()
         inference.shutdownNow()
         warmup.shutdownNow()
         super.onDestroy()
@@ -170,7 +179,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             errorUi("文字入力欄へカーソルを置いてください。")
             return
         }
-        val pkg = editor.packageName?.toString().orEmpty()
+        val pkg = editor.packageName.orEmpty()
         profiles.recordInputApp(pkg)
         val effective = profiles.effectiveSettings(settings.load(), pkg)
         val model = asrModels.resolve(effective.streamingAsrModelId)
@@ -277,7 +286,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val effective = capturedTarget?.packageName?.let { profiles.effectiveSettings(base, it) } ?: base
         if (bypass) {
             put(capturedTarget, outcome.rawTranscript, "補正なしで入力しました")
-            worker.execute { runCatching { finalizer.finalize(outcome, "", effective, true) } }
+            cloudFinalization.execute { runCatching { finalizer.finalize(outcome, "", effective, true) } }
             return
         }
 
@@ -285,19 +294,52 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val id = ++nextJob
         pending[id] = outcome.rawTranscript
         targets[id] = capturedTarget
+        finalizationOrder.register(id)
         overlay.showFinalizingStack(pending.values.toList(), "LM補正しています")
-        h.postDelayed({
-            if (pending.containsKey(id)) {
-                recover(id, capturedTarget, outcome.rawTranscript, TimeoutException("確定処理が45秒を超えました"))
-            }
-        }, 45_000)
-        worker.execute {
+
+        // The watchdog starts when this job actually begins executing, not while it is waiting in
+        // the local-model queue. That prevents queue wait time from being misclassified as an LM
+        // timeout. Cloud jobs can run concurrently; local/native jobs remain serialized.
+        finalizationExecutor(effective).execute {
+            h.postDelayed(
+                {
+                    resolveFinalization(
+                        id,
+                        FinalizationResolution(
+                            target = capturedTarget,
+                            raw = outcome.rawTranscript,
+                            failure = TimeoutException("確定処理が45秒を超えました"),
+                        ),
+                    )
+                },
+                FINALIZATION_WATCHDOG_MS,
+            )
             try {
                 val result = finalizer.finalize(outcome, context, effective, false)
-                mainExecutor.execute { deliver(id, capturedTarget, result) }
+                mainExecutor.execute {
+                    resolveFinalization(
+                        id,
+                        FinalizationResolution(capturedTarget, outcome.rawTranscript, result = result),
+                    )
+                }
             } catch (failure: Throwable) {
-                mainExecutor.execute { recover(id, capturedTarget, outcome.rawTranscript, failure) }
+                mainExecutor.execute {
+                    resolveFinalization(
+                        id,
+                        FinalizationResolution(capturedTarget, outcome.rawTranscript, failure = failure),
+                    )
+                }
             }
+        }
+    }
+
+    private fun finalizationExecutor(effective: AppSettings): ExecutorService {
+        val gemmaAvailable = File(effective.gemmaModelPath).isFile
+        val backend = CorrectionBackendResolver.resolve(effective, gemmaAvailable)
+        return if (effective.finalAsrMode == FinalAsrMode.REAZON_SPEECH || backend == CorrectionBackend.GEMMA) {
+            localFinalization
+        } else {
+            cloudFinalization
         }
     }
 
@@ -311,13 +353,34 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val entry = pending.entries.firstOrNull() ?: return
         val capturedTarget = targets.remove(entry.key)
         if (pending.remove(entry.key) == null) return
+        val nowReady = finalizationOrder.discard(entry.key)
         put(capturedTarget, entry.value, "補正なしで入力しました")
+        deliverReady(nowReady)
         if (pending.isNotEmpty()) overlay.showFinalizingStack(pending.values.toList()) else idleAfter(650)
     }
 
-    private fun deliver(id: Long, capturedTarget: Target?, result: FinalizationResult) {
-        if (pending.remove(id) == null) return
-        targets.remove(id)
+    private fun resolveFinalization(id: Long, resolution: FinalizationResolution) {
+        deliverReady(finalizationOrder.resolve(id, resolution))
+    }
+
+    private fun deliverReady(ready: List<Pair<Long, FinalizationResolution>>) {
+        ready.forEach { (id, resolution) ->
+            if (pending.remove(id) == null) return@forEach
+            targets.remove(id)
+            val result = resolution.result
+            if (result != null) {
+                deliverResolved(resolution.target, result)
+            } else {
+                recoverResolved(
+                    resolution.target,
+                    resolution.raw,
+                    resolution.failure ?: IllegalStateException("Finalization failed without a cause"),
+                )
+            }
+        }
+    }
+
+    private fun deliverResolved(capturedTarget: Target?, result: FinalizationResult) {
         val commit = commit(capturedTarget, result.finalText)
         if (commit == CommitResult.FAILED) {
             clip(result.finalText)
@@ -373,9 +436,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun recover(id: Long, capturedTarget: Target?, text: String, failure: Throwable) {
-        if (pending.remove(id) == null) return
-        targets.remove(id)
+    private fun recoverResolved(capturedTarget: Target?, text: String, failure: Throwable) {
         val result = commit(capturedTarget, text)
         val detail = failure.message?.takeIf(String::isNotBlank)?.let(::short)
         if (result != CommitResult.FAILED) {
@@ -465,6 +526,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         }
         pending.clear()
         targets.clear()
+        finalizationOrder.clear()
         latest = ""
         if (::overlay.isInitialized) overlay.showIdle()
     }
@@ -478,6 +540,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         latest = ""
         pending.clear()
         targets.clear()
+        finalizationOrder.clear()
     }
 
     private fun clip(text: String) = getSystemService(ClipboardManager::class.java)
@@ -503,7 +566,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val method = input ?: return false
         if (!method.currentInputStarted || method.generation != capturedTarget.generation) return false
         val editor = method.currentInputEditorInfo ?: return false
-        return capturedTarget.packageName == editor.packageName?.toString().orEmpty() &&
+        return capturedTarget.packageName == editor.packageName.orEmpty() &&
             capturedTarget.fieldId == editor.fieldId &&
             capturedTarget.fieldName == editor.fieldName
     }
@@ -511,6 +574,13 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private fun short(value: String) = value.replace(Regex("\\s+"), " ").trim().take(92)
 
     private enum class CommitResult { VERIFIED, UNVERIFIED, FAILED }
+
+    private data class FinalizationResolution(
+        val target: Target?,
+        val raw: String,
+        val result: FinalizationResult? = null,
+        val failure: Throwable? = null,
+    )
 
     private data class Target(
         val generation: Long,
@@ -539,5 +609,9 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             super.onFinishInput()
             changed(false)
         }
+    }
+
+    companion object {
+        private const val FINALIZATION_WATCHDOG_MS = 45_000L
     }
 }
