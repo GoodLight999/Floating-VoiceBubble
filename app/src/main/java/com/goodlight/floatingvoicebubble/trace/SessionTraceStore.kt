@@ -19,6 +19,9 @@ data class FinalizationTrace(
     val correctionChanged: Boolean = finalText != correctionInputText,
     val correctionBypassed: Boolean = false,
     val correctionDecisionReason: String? = null,
+    val correctionModelResponded: Boolean = modelOutputText != null,
+    val correctionModelChanged: Boolean = false,
+    val deterministicFormattingChanged: Boolean = false,
     val finalAsrId: String = "live-result",
     val finalAsrLatencyMs: Long? = null,
     val finalAsrRtf: Double? = null,
@@ -39,7 +42,7 @@ class SessionTraceStore(context: Context) {
             return
         }
         val json = JSONObject()
-            .put("schema", 3)
+            .put("schema", 4)
             .put("sessionId", trace.outcome.sessionId)
             .put("liveRecognizer", trace.outcome.recognizerKind)
             .put("corrector", trace.correctorId)
@@ -60,6 +63,9 @@ class SessionTraceStore(context: Context) {
             .put("modelOutput", trace.modelOutputText ?: JSONObject.NULL)
             .put("finalText", trace.finalText)
             .put("correctionAttempted", trace.correctionAttempted)
+            .put("correctionModelResponded", trace.correctionModelResponded)
+            .put("correctionModelChanged", trace.correctionModelChanged)
+            .put("deterministicFormattingChanged", trace.deterministicFormattingChanged)
             .put("correctionChanged", trace.correctionChanged)
             .put("correctionBypassed", trace.correctionBypassed)
             .put("correctionAccepted", trace.correctionAccepted)
