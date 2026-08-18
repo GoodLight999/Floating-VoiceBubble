@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,43 +62,52 @@ internal fun HomeSettingsScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Floating VoiceBubble", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text(
-                "キーボードを開くとバブルが出ます。タップして話し、もう一度タップするか無音になると完成文を入力します。",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
-            )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("Floating VoiceBubble", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Row {
+                TextButton(onClick = { activity.startActivity(Intent(activity, DictionaryActivity::class.java)) }) {
+                    Text("辞書")
+                }
+                TextButton(onClick = onOpenDetailedSettings) { Text("詳細") }
+            }
         }
 
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("使う準備", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                StatusRow("マイク", microphoneGranted)
-                StatusRow("他のアプリへ入力する権限", accessibilityEnabled)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (!microphoneGranted) {
-                        Button(onClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }) { Text("マイクを許可") }
-                    }
-                    if (!accessibilityEnabled) {
-                        OutlinedButton(onClick = { activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
-                            Text("入力権限を設定")
+        if (microphoneGranted && accessibilityEnabled) {
+            Text(
+                "● 準備OK  キーボードを開けばバブルを使えます",
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+            )
+        } else {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("初回設定", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    if (!microphoneGranted) StatusRow("マイク", false)
+                    if (!accessibilityEnabled) StatusRow("他のアプリへ入力", false)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (!microphoneGranted) {
+                            Button(onClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }) { Text("マイクを許可") }
+                        }
+                        if (!accessibilityEnabled) {
+                            OutlinedButton(onClick = { activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
+                                Text("入力権限を設定")
+                            }
                         }
                     }
                 }
             }
         }
 
-        Text("音声認識", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-            "迷ったら「自動」のままで構いません。完全オフラインをONにした場合だけ、ダウンロード済みの端末内ASRを使います。",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("音声入力", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             RecognitionMode.entries.forEach { mode ->
                 FilterChip(
                     selected = settings.recognitionMode == mode,
@@ -106,27 +116,22 @@ internal fun HomeSettingsScreen(
                 )
             }
         }
-
-        SimpleSwitchRow(
+        CompactSwitchRow(
             title = "完全オフライン",
-            detail = "ONにすると音声も補正もクラウドへ送りません。端末内モデルが未導入なら開始前に止めて理由を表示します。",
+            detail = "音声認識も補正もクラウドへ送らない",
             checked = settings.offlineMode,
         ) { checked -> settings = store.update { it.copy(offlineMode = checked) } }
-        HorizontalDivider()
-        SimpleSwitchRow(
-            title = "話し終わったら自動で確定",
-            detail = "ONなら無音を検出して自動終了します。OFFでもバブルをもう一度タップすれば確定できます。",
+        CompactSwitchRow(
+            title = "無音で自動確定",
+            detail = "OFFでもバブルを再タップすれば確定",
             checked = settings.autoStop,
         ) { checked -> settings = store.update { it.copy(autoStop = checked) } }
 
         HorizontalDivider()
-        Text("困ったとき", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-            "全自動診断は、権限・音声認識・保存領域・補正設定・設定済みモデル・BYOK接続をまとめて確認します。APIキーや辞書本文は結果へ出しません。",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        QuickCorrectionControls(activity = activity, modifier = Modifier.fillMaxWidth())
+
+        Text("診断・管理", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Button(
                 onClick = {
                     diagnosticBusy = true
@@ -149,29 +154,23 @@ internal fun HomeSettingsScreen(
             diagnosticReport?.let { report ->
                 OutlinedButton(onClick = { copyDiagnostic(activity, report) }) { Text("結果をコピー") }
             }
+            OutlinedButton(onClick = { activity.startActivity(Intent(activity, AdvancedToolsActivity::class.java)) }) {
+                Text("管理・検証")
+            }
         }
         if (diagnosticMessage.isNotBlank()) {
             Text(
                 diagnosticMessage,
                 color = if (diagnosticMessage.contains("FAIL 0")) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
             )
         }
-
-        HorizontalDivider()
-        Text("詳しい設定", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
-            "モデル導入・最終ASR・辞書・ベンチマークなど、普段触らない設定はここにまとめています。",
+            "普段使う設定はこの画面で完結します。モデル導入・最終ASR・ベンチマーク等だけ「詳細」「管理・検証」に分離しています。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            OutlinedButton(onClick = { activity.startActivity(Intent(activity, AdvancedToolsActivity::class.java)) }) {
-                Text("管理・検証")
-            }
-            OutlinedButton(onClick = onOpenDetailedSettings) { Text("詳細設定") }
-        }
     }
 }
 
@@ -188,14 +187,14 @@ private fun StatusRow(label: String, ready: Boolean) {
 }
 
 @Composable
-private fun SimpleSwitchRow(title: String, detail: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+private fun CompactSwitchRow(title: String, detail: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(checked = checked, onCheckedChange = onChecked)
@@ -204,9 +203,9 @@ private fun SimpleSwitchRow(title: String, detail: String, checked: Boolean, onC
 
 private fun recognitionLabel(mode: RecognitionMode): String = when (mode) {
     RecognitionMode.AUTO -> "自動"
-    RecognitionMode.SYSTEM -> "Android音声認識"
+    RecognitionMode.SYSTEM -> "Android"
     RecognitionMode.ON_DEVICE -> "Android端末内"
-    RecognitionMode.SHERPA_STREAMING -> "ダウンロード済みASR"
+    RecognitionMode.SHERPA_STREAMING -> "ローカルASR"
 }
 
 private fun copyDiagnostic(activity: MainActivity, report: DiagnosticReport) {
