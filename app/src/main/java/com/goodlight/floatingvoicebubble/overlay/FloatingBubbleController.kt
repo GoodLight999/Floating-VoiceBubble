@@ -34,7 +34,14 @@ class FloatingBubbleController(
     private val cancel = action("破棄", ACCENT_SOFT, Color.TRANSPARENT) { onCancel() }
     private val transcript = TextView(service)
     private val scroll = ScrollView(service)
-    private val mic = TextView(service)
+    private val mic = object : TextView(service) {
+        override fun performClick(): Boolean {
+            super.performClick()
+            acknowledgeTap()
+            onToggle()
+            return true
+        }
+    }
     private val dismissRoot = FrameLayout(service)
     private val dismissTarget = TextView(service)
     private var params = params(BUBBLE_DP, BUBBLE_DP)
@@ -130,6 +137,7 @@ class FloatingBubbleController(
             background = bg(ACCENT, 28f)
             elevation = dp(14).toFloat()
             contentDescription = "音声入力を開始または確定"
+            isClickable = true
             setOnTouchListener(::onMicTouch)
         }
         root.addView(mic, FrameLayout.LayoutParams(dp(BUBBLE_DP), dp(BUBBLE_DP), Gravity.BOTTOM or Gravity.END))
@@ -398,8 +406,6 @@ class FloatingBubbleController(
                 if (dismiss) dismissForInput()
             } else {
                 view.performClick()
-                acknowledgeTap()
-                onToggle()
             }
             MotionEvent.ACTION_CANCEL -> hideDismiss()
             else -> return false
