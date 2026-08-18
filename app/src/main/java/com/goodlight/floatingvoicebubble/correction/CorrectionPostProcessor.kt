@@ -2,8 +2,6 @@ package com.goodlight.floatingvoicebubble.correction
 
 import com.goodlight.floatingvoicebubble.LineBreakMode
 import com.goodlight.floatingvoicebubble.RecognitionRepairMode
-import java.text.BreakIterator
-import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -45,6 +43,11 @@ object CorrectionPostProcessor {
         return false
     }
 
+    /**
+     * Evaluates a real model response against a deliberately unambiguous context-sensitive ASR
+     * repair vector. Merely returning non-empty text is not a correction test: an API can be alive
+     * while the selected model ignores N-best/context and echoes RAW forever.
+     */
     fun probeFailure(output: String): String? {
         val request = correctionProbeRequest()
         val processed = apply(request.rawTranscript, output, request.preferences)
@@ -53,18 +56,20 @@ object CorrectionPostProcessor {
         val text = decision.text
         if (text == request.rawTranscript) return "APIは応答しましたが、補正結果がRAWと完全に同一です。"
         if (LEADING_FILLER.containsMatchIn(text)) return "フィラー除去の契約を実行していません。"
-        if (!text.contains("ガンダム")) return "N-bestにある明白な聞き取り候補を反映していません。"
+        if (!text.contains("聞き取りAI") || text.contains("取り合い")) {
+            return "N-bestと周辺文脈にある明白な『聞き取りAI』への復元を実行していません。"
+        }
         if (!hasTerminalPunctuation(text)) return "句点追加の契約を実行していません。"
         return null
     }
 
     fun correctionProbeRequest(): CorrectionRequest = CorrectionRequest(
-        rawTranscript = "えー今日はがんだむを見に行く",
+        rawTranscript = "えー音声入力の取り合いがだいぶがっつり聞き取りミスをした",
         alternatives = listOf(
-            "えー今日はがんだむを見に行く",
-            "えー今日はガンダムを見に行く",
+            "えー音声入力の取り合いがだいぶがっつり聞き取りミスをした",
+            "えー音声入力の聞き取りAIがだいぶがっつり聞き取りミスをした",
         ),
-        surroundingContext = "アニメ作品のガンダムについて話している",
+        surroundingContext = "音声認識AIとLM補正について話している。直前から聞き取りAIの誤認識を検証している。",
         dictionaryTerms = emptyList(),
         preferences = CorrectionPreferences(
             addCommas = true,
@@ -92,16 +97,16 @@ object CorrectionPostProcessor {
     }
 
     /**
-     * "適宜改行" is an execution contract, not permission for the model to maybe add one newline.
+     * "適宜改行" is an execution contract, but deterministic code must not pretend that a Unicode
+     * line-wrap opportunity is a semantic paragraph boundary.
      *
-     * The model still gets first choice of semantic boundaries. We then paragraphize every long
-     * remaining line independently, so a single model newline cannot suppress formatting of the rest
-     * of a long dictation. Sentence ends are preferred, followed by discourse/topic transitions and
-     * Japanese comma/clause boundaries. Unicode line-break opportunities are the final fallback.
-     *
-     * This deliberately supports the common SpeechRecognizer shape where a long Japanese utterance
-     * contains only "、" and no internal "。". Only newline characters are inserted; transcript
-     * characters are otherwise preserved.
+     * The model gets first choice of semantic boundaries. We then paragraphize every long remaining
+     * line independently using only evidence that is meaningful for Japanese prose: sentence
+     * punctuation, commas/clause punctuation, discourse/topic markers, and a conservative set of
+     * clause endings. If none exists, the deterministic layer leaves the text intact instead of
+     * cutting near an arbitrary character count. This prevents the old failure mode where a provider
+     * error/no-op produced a context-blind split such as "そもそも\nまともに" merely because the
+     * location happened to be near the target width.
      */
     private fun ensureRequestedLineBreaks(value: String, mode: LineBreakMode): String {
         if (mode == LineBreakMode.NONE || value.isBlank()) return value
@@ -137,8 +142,8 @@ object CorrectionPostProcessor {
             start = boundary
         }
 
-        // A moderately long single paragraph should still visibly honor the selected option even if
-        // the greedy target did not fire. Use the best safe boundary near the midpoint exactly once.
+        // A moderately long paragraph can still honor the selected option, but only when we found
+        // an actual linguistic boundary. There is intentionally no arbitrary code-point fallback.
         if (breaks.isEmpty() && value.length >= FORCE_ONE_BREAK_CHARS) {
             val minBoundary = minChunk.coerceAtMost(value.length / 2)
             val maxBoundary = (value.length - minChunk).coerceAtLeast(value.length / 2)
@@ -179,18 +184,20 @@ object CorrectionPostProcessor {
             while (true) {
                 val index = value.indexOf(marker, from)
                 if (index < 0) break
+                // A discourse marker starts the next thought, so break BEFORE it. The previous
+                // implementation's arbitrary width fallback could split after the marker instead.
                 add(index, PRIORITY_TOPIC)
                 from = index + marker.length
             }
         }
-
-        // Punctuation-free Japanese has few lexical delimiters. BreakIterator applies Unicode line
-        // breaking rules and avoids illegal surrogate/grapheme boundaries better than code-unit cuts.
-        val iterator = BreakIterator.getLineInstance(Locale.JAPANESE).apply { setText(value) }
-        var index = iterator.first()
-        while (index != BreakIterator.DONE) {
-            add(index, PRIORITY_UNICODE)
-            index = iterator.next()
+        CLAUSE_ENDINGS.forEach { marker ->
+            var from = 0
+            while (true) {
+                val index = value.indexOf(marker, from)
+                if (index < 0) break
+                add(index + marker.length, PRIORITY_CLAUSE_ENDING)
+                from = index + marker.length
+            }
         }
         return priorities.map { (indexValue, priority) -> Boundary(indexValue, priority) }
     }
@@ -198,9 +205,10 @@ object CorrectionPostProcessor {
     private data class Boundary(val index: Int, val priority: Int) {
         fun score(ideal: Int): Int = abs(index - ideal) + when (priority) {
             PRIORITY_SENTENCE -> 0
-            PRIORITY_TOPIC -> 5
-            PRIORITY_CLAUSE -> 9
-            else -> 24
+            PRIORITY_TOPIC -> 4
+            PRIORITY_CLAUSE -> 8
+            PRIORITY_CLAUSE_ENDING -> 12
+            else -> 32
         }
     }
 
@@ -216,10 +224,14 @@ object CorrectionPostProcessor {
     private const val SENTENCE_BOUNDARIES = "。.!！?？"
     private const val CLAUSE_BOUNDARIES = "、,；;：:"
     private val TOPIC_BOUNDARIES = listOf(
-        "ちなみに", "それから", "そして", "ところで", "一方で", "ただ", "つまり", "なので", "だから", "あと",
-        "でも", "それで", "まず", "次に", "最後に", "要するに", "逆に",
+        "ちなみに", "それから", "そして", "ところで", "一方で", "一方", "ただし", "ただ", "つまり", "なので",
+        "だから", "あと", "でも", "それで", "まず", "次に", "最後に", "要するに", "逆に", "さらに", "また",
+        "しかし", "そのため", "その結果", "加えて", "とはいえ", "そもそも", "というか",
     )
-    private const val PRIORITY_UNICODE = 1
+    private val CLAUSE_ENDINGS = listOf(
+        "けれども", "けれど", "けど", "ものの", "にもかかわらず", "というので", "ので", "ために", "ため", "から",
+    )
+    private const val PRIORITY_CLAUSE_ENDING = 1
     private const val PRIORITY_CLAUSE = 2
     private const val PRIORITY_TOPIC = 3
     private const val PRIORITY_SENTENCE = 4
