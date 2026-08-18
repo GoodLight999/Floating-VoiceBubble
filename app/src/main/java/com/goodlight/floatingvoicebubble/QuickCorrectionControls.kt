@@ -7,13 +7,13 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,9 +25,17 @@ import androidx.compose.ui.unit.dp
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun QuickCorrectionControls(activity: MainActivity, modifier: Modifier = Modifier) {
+internal fun QuickCorrectionControls(
+    activity: MainActivity,
+    refreshRevision: Int,
+    modifier: Modifier = Modifier,
+) {
     val store = remember(activity) { SettingsStore(activity) }
     var settings by remember { mutableStateOf(store.load()) }
+
+    LaunchedEffect(refreshRevision) {
+        settings = store.load()
+    }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
@@ -79,7 +87,7 @@ internal fun QuickCorrectionControls(activity: MainActivity, modifier: Modifier 
             }
         }
         Text(
-            "クラウド補正で使用。対応APIでは推論量を直接指定します。Z.AIは既定/なし/最小=thinking OFF、低以上=ONです。",
+            "クラウド補正で使用。APIに合わせて推論量を指定します。Z.AIは既定/なし/最小=thinking OFF、低以上=ONです。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
