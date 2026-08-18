@@ -7,10 +7,13 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
@@ -33,38 +36,52 @@ class MainActivity : ComponentActivity() {
         setContent {
             VoiceBubbleTheme {
                 var showDetailed by remember { mutableStateOf(false) }
+                var showDictionary by remember { mutableStateOf(false) }
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                     contentColor = MaterialTheme.colorScheme.onBackground,
                 ) {
-                    Column(
-                        Modifier
-                            .fillMaxSize()
-                            .windowInsetsPadding(WindowInsets.safeDrawing),
-                    ) {
-                        QuickCorrectionControls(this@MainActivity)
-                        Box(Modifier.weight(1f)) {
-                            if (showDetailed) {
-                                Column(Modifier.fillMaxSize()) {
-                                    TextButton(onClick = { showDetailed = false }) { Text("← かんたん設定へ戻る") }
-                                    Box(Modifier.weight(1f)) {
-                                        VoiceBubbleSettingsScreen(
-                                            activity = this@MainActivity,
-                                            microphoneGranted = microphoneGranted,
-                                            accessibilityEnabled = accessibilityEnabled,
-                                            onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                                        )
+                    if (showDictionary) {
+                        DictionaryManagerScreen(
+                            activity = this@MainActivity,
+                            onBack = { showDictionary = false },
+                        )
+                    } else {
+                        Column(
+                            Modifier
+                                .fillMaxSize()
+                                .windowInsetsPadding(WindowInsets.safeDrawing),
+                        ) {
+                            QuickCorrectionControls(this@MainActivity)
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
+                            ) {
+                                TextButton(onClick = { showDictionary = true }) { Text("個人辞書") }
+                            }
+                            Box(Modifier.weight(1f)) {
+                                if (showDetailed) {
+                                    Column(Modifier.fillMaxSize()) {
+                                        TextButton(onClick = { showDetailed = false }) { Text("← かんたん設定へ戻る") }
+                                        Box(Modifier.weight(1f)) {
+                                            VoiceBubbleSettingsScreen(
+                                                activity = this@MainActivity,
+                                                microphoneGranted = microphoneGranted,
+                                                accessibilityEnabled = accessibilityEnabled,
+                                                onRuntimeStatusChanged = ::refreshRuntimeStatus,
+                                            )
+                                        }
                                     }
+                                } else {
+                                    HomeSettingsScreen(
+                                        activity = this@MainActivity,
+                                        microphoneGranted = microphoneGranted,
+                                        accessibilityEnabled = accessibilityEnabled,
+                                        onRuntimeStatusChanged = ::refreshRuntimeStatus,
+                                        onOpenDetailedSettings = { showDetailed = true },
+                                    )
                                 }
-                            } else {
-                                HomeSettingsScreen(
-                                    activity = this@MainActivity,
-                                    microphoneGranted = microphoneGranted,
-                                    accessibilityEnabled = accessibilityEnabled,
-                                    onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                                    onOpenDetailedSettings = { showDetailed = true },
-                                )
                             }
                         }
                     }
