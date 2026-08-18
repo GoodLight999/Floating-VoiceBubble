@@ -7,8 +7,8 @@ ACCESSIBILITY="$APP_ID/.accessibility.VoiceBubbleAccessibilityService"
 APK="app/build/outputs/apk/debug/app-debug.apk"
 GRADLE_CMD="${GRADLE_CMD:-gradle}"
 API_LEVEL="unknown"
-REPORT_ROOT="emulator-report"
-LOG_FILE="emulator-verification.log"
+REPORT_ROOT="app/build/reports/androidTests/emulator-diagnostics"
+LOG_FILE="$REPORT_ROOT/emulator-verification.log"
 
 mkdir -p "$REPORT_ROOT"
 : > "$LOG_FILE"
@@ -17,12 +17,9 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 preserve_reports() {
   set +e
   mkdir -p "$REPORT_ROOT"
-  cp -a app/build/reports/androidTests "$REPORT_ROOT/" 2>/dev/null || true
   cp -a app/build/outputs/androidTest-results "$REPORT_ROOT/" 2>/dev/null || true
-  cp -a app/build/reports/androidTests/ui-evidence "$REPORT_ROOT/ui-evidence" 2>/dev/null || true
   adb logcat -d > "$REPORT_ROOT/logcat-api${API_LEVEL}.txt" 2>/dev/null || true
   adb shell dumpsys accessibility > "$REPORT_ROOT/accessibility-api${API_LEVEL}.txt" 2>/dev/null || true
-  cp -f "$LOG_FILE" "$REPORT_ROOT/" 2>/dev/null || true
 }
 trap preserve_reports EXIT
 
