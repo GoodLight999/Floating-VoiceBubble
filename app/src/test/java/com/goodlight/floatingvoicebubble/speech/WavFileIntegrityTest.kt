@@ -4,6 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
@@ -23,7 +24,7 @@ class WavFileIntegrityTest {
     fun rejectsPartialFileEvenWhenItIsLargerThanHeader() {
         val file = tempWav(payloadBytes = 320)
         try {
-            file.setLength(file.length() - 9)
+            RandomAccessFile(file, "rw").use { it.setLength(file.length() - 9) }
             assertFalse(WavFileIntegrity.isCompletePcm16Mono(file, 320, 16_000))
         } finally {
             file.delete()

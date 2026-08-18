@@ -45,6 +45,7 @@ class SpeechRecognitionSession(
     private val startedAtMs = System.currentTimeMillis()
     private val delivered = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
+    private val completionPublished = AtomicBoolean(false)
     private val accumulator = TranscriptAccumulator()
     private val backend: RecognitionBackend
     private val recognizer: SpeechRecognizer?
@@ -93,9 +94,6 @@ class SpeechRecognitionSession(
                 if (finalCandidates.isNotEmpty()) deliver(finalCandidates)
                 else fail("音声を文字として認識できませんでした。")
             } else {
-                // EXTRA_SEGMENTED_SESSION is advisory for OEM recognizers. A provider that ends
-                // early despite an open caller-owned audio source gets the same lossless fallback
-                // as a non-segmented implementation: retain text, then reopen only recognition.
                 if (latestPartial.isNotBlank()) accumulator.commit(latestPartial)
                 latestPartial = ""
                 latestAlternatives = emptyList()
@@ -114,9 +112,6 @@ class SpeechRecognitionSession(
                 return
             }
 
-            // Some Android/OEM recognizers ignore segmented-session mode or impose their own
-            // speech window. Preserve the latest text and reopen only the recognizer turn; the
-            // caller-owned PCM capture remains continuous and is never discarded here.
             if (isRecoverableSegmentationError(error) && consecutiveRestartErrors < MAX_ANDROID_RESTART_ERRORS) {
                 if (latestPartial.isNotBlank()) accumulator.commit(latestPartial)
                 latestPartial = ""
@@ -148,8 +143,6 @@ class SpeechRecognitionSession(
                 return
             }
 
-            // Fallback for implementations that ignore EXTRA_SEGMENTED_SESSION and still return
-            // ordinary final results. Treat that final as one segment, never as VoiceBubble EOF.
             accumulator.commit(candidates.first())
             latestPartial = ""
             latestAlternatives = emptyList()
@@ -258,10 +251,6 @@ class SpeechRecognitionSession(
         if (backend == RecognitionBackend.SHERPA_STREAMING) {
             sherpaEngine?.finish()
         } else {
-            // In supported segmented mode, closing the caller-owned audio stream is the official
-            // end-of-session signal. Do not immediately stopListening(), which can cut buffered
-            // tail audio. If an OEM ignores segmented mode, request finalization after a grace
-            // period while retaining the accumulated transcript as the timeout fallback.
             mainHandler.postDelayed({
                 if (!delivered.get() && !closed.get() && inputClosed) {
                     runCatching { recognizer?.stopListening() }
@@ -290,6 +279,7 @@ class SpeechRecognitionSession(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         mainHandler.removeCallbacksAndMessages(null)
+        if (!completionPublished.get()) capture.discardAudio()
         capture.close()
         sherpaEngine?.close()
         androidSource?.let { source -> runCatching { source.close() } }
@@ -354,6 +344,7 @@ class SpeechRecognitionSession(
         capture.stop()
         val normalized = candidates.map(String::trim).filter(String::isNotEmpty).distinct()
         if (normalized.isEmpty()) {
+            capture.discardAudio()
             onFailure("音声を文字として認識できませんでした。")
             return
         }
@@ -361,7 +352,10 @@ class SpeechRecognitionSession(
         Thread(
             {
                 val finalizedWav = capture.awaitFinalizedWav()
-                if (closed.get()) return@Thread
+                if (closed.get()) {
+                    capture.discardAudio()
+                    return@Thread
+                }
                 val outcome = RecognitionOutcome(
                     sessionId = sessionId,
                     rawTranscript = normalized.first(),
@@ -372,7 +366,12 @@ class SpeechRecognitionSession(
                     recognizerKind = recognizerKind,
                 )
                 mainHandler.post {
-                    if (!closed.get()) onComplete(outcome)
+                    if (!closed.get()) {
+                        completionPublished.set(true)
+                        onComplete(outcome)
+                    } else {
+                        capture.discardAudio()
+                    }
                 }
             },
             "VoiceBubble-WavFinalize",
@@ -384,6 +383,7 @@ class SpeechRecognitionSession(
         mainHandler.removeCallbacksAndMessages(null)
         recognizerListening = false
         capture.stop()
+        capture.discardAudio()
         onFailure(message)
     }
 

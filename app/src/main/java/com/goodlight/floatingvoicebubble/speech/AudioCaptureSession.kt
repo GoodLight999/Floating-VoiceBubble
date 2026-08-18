@@ -32,6 +32,7 @@ class AudioCaptureSession(
     private val appContext = context.applicationContext
     private val running = AtomicBoolean(false)
     private val endpointSent = AtomicBoolean(false)
+    private val discardRequested = AtomicBoolean(false)
     private val finalized = CountDownLatch(1)
     private val pipe: Array<ParcelFileDescriptor>? = if (mirrorToRecognizerPipe) {
         ParcelFileDescriptor.createPipe()
@@ -56,6 +57,7 @@ class AudioCaptureSession(
         check(running.compareAndSet(false, true)) { "Audio capture already running" }
         endpointDetector.reset()
         endpointSent.set(false)
+        discardRequested.set(false)
         outputDir.mkdirs()
         val raw = File(outputDir, "$sessionId.pcm")
         val wav = File(outputDir, "$sessionId.wav")
@@ -121,6 +123,13 @@ class AudioCaptureSession(
         if (!running.getAndSet(false)) return
         runCatching { audioRecord?.stop() }
         runCatching { pipe?.get(1)?.close() }
+    }
+
+    /** Marks this recording as transient. If wrapping is still in flight, deletion happens after it. */
+    fun discardAudio() {
+        discardRequested.set(true)
+        finalizedWav?.let { runCatching { it.delete() } }
+        finalizedWav = null
     }
 
     fun expectedWavFile(): File? = expectedWav
@@ -199,6 +208,10 @@ class AudioCaptureSession(
                 }
                 wav
             }.getOrNull()
+            if (discardRequested.get()) {
+                finalizedWav?.let { runCatching { it.delete() } }
+                finalizedWav = null
+            }
             if (finalizedWav == null) runCatching { wav.delete() }
             raw.delete()
             finalized.countDown()

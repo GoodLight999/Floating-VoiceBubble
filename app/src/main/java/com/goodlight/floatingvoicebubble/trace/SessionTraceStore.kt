@@ -33,7 +33,10 @@ class SessionTraceStore(context: Context) {
     private val appContext = context.applicationContext
     val audioDir: File = File(appContext.noBackupFilesDir, "session-traces").apply { mkdirs() }
 
-    init { migrateLegacyDirectory() }
+    init {
+        migrateLegacyDirectory()
+        cleanupOrphans()
+    }
 
     fun save(trace: FinalizationTrace, enabled: Boolean) {
         trace.outcome.audioFile?.let(::awaitAudioFinalization)
@@ -86,6 +89,28 @@ class SessionTraceStore(context: Context) {
         ?.sortedByDescending(File::lastModified)
         ?.take(limit.coerceAtLeast(0))
         .orEmpty()
+
+    /**
+     * Removes crash/cancel leftovers that have no committed trace metadata. This directory lives
+     * under noBackupFilesDir, but raw microphone audio should not linger merely because a process
+     * died between capture and finalization.
+     */
+    internal fun cleanupOrphans() {
+        val files = audioDir.listFiles().orEmpty()
+        val committedIds = files.asSequence()
+            .filter { it.isFile && it.extension == "json" && !it.name.endsWith(".benchmark.json") }
+            .map(File::getNameWithoutExtension)
+            .toHashSet()
+        files.forEach { file ->
+            val delete = when {
+                file.extension == "pcm" -> true
+                file.name.endsWith(".part") -> true
+                file.extension == "wav" && file.nameWithoutExtension !in committedIds -> true
+                else -> false
+            }
+            if (delete) runCatching { file.delete() }
+        }
+    }
 
     private fun migrateLegacyDirectory() {
         val legacy = File(appContext.filesDir, "session-traces")
