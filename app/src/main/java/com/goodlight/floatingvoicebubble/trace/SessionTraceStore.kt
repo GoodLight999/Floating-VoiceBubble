@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.trace
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
 import org.json.JSONArray
@@ -35,7 +36,9 @@ class SessionTraceStore(context: Context) {
 
     init {
         migrateLegacyDirectory()
-        cleanupOrphans()
+        // Only AccessibilityService construction is guaranteed to happen before a new capture can
+        // begin. Diagnostics/management contexts must never delete a live recording as a side effect.
+        if (context is AccessibilityService) cleanupOrphans()
     }
 
     fun save(trace: FinalizationTrace, enabled: Boolean) {
@@ -91,9 +94,11 @@ class SessionTraceStore(context: Context) {
         .orEmpty()
 
     /**
-     * Removes crash/cancel leftovers that have no committed trace metadata. This directory lives
-     * under noBackupFilesDir, but raw microphone audio should not linger merely because a process
-     * died between capture and finalization.
+     * Removes crash/cancel leftovers that have no committed trace metadata.
+     *
+     * This is not a general constructor side effect. It runs automatically only when the store is
+     * created directly from AccessibilityService, before that service can start a new recording,
+     * and can be invoked explicitly by tests/recovery code.
      */
     internal fun cleanupOrphans() {
         val files = audioDir.listFiles().orEmpty()
