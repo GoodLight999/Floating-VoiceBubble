@@ -102,6 +102,15 @@ jobs:
           else
             echo "Stable signer absent; release signing identity check skipped." | tee apksigner-release.log
           fi
+      - name: Bundle official Android APK signing tool for reproducible verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-tools/lib
+          cp "$ANDROID_HOME/build-tools/36.0.0/apksigner" .ci-tools/apksigner
+          cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" .ci-tools/lib/apksigner.jar
+          chmod 755 .ci-tools/apksigner
+          sha256sum .ci-tools/apksigner .ci-tools/lib/apksigner.jar > .ci-tools/SHA256SUMS
       - name: Upload CI diagnostic reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -115,6 +124,7 @@ jobs:
             apksigner-release.log
             apk-signing-cert-sha256.txt
             apk-badging.txt
+            .ci-tools/**
             app/build/reports/**
             app/build/test-results/**
           if-no-files-found: warn
