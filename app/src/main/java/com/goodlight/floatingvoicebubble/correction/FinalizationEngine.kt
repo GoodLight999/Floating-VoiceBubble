@@ -27,6 +27,12 @@ data class FinalizationResult(
     val correctionChanged: Boolean,
     val correctionBypassed: Boolean,
     val modelOutput: String?,
+    /** The selected LM/Gemma actually returned a non-empty final text response. */
+    val correctionModelResponded: Boolean = false,
+    /** The model response itself differed from the transcript before deterministic formatting. */
+    val correctionModelChanged: Boolean = false,
+    /** App-side punctuation/filler/paragraph rules changed the model response or RAW fallback. */
+    val deterministicFormattingChanged: Boolean = false,
 )
 
 class FinalizationEngine(
@@ -36,6 +42,8 @@ class FinalizationEngine(
     private val traceStore: SessionTraceStore,
     private val finalAsrModelStore: FinalAsrModelStore,
     private val inferenceWorker: ExecutorService,
+    /** Test seam for exercising the real finalization pipeline without external credentials. */
+    private val correctorOverride: ((AppSettings) -> TextCorrector?)? = null,
 ) {
     fun finalize(
         outcome: RecognitionOutcome,
@@ -62,9 +70,22 @@ class FinalizationEngine(
                 attempted = false,
                 changed = false,
                 bypassed = true,
+                modelResponded = false,
+                modelChanged = false,
+                deterministicFormattingChanged = false,
                 settings = settings,
             )
-            return FinalizationResult(text, null, null, true, null, false, false, true, null)
+            return FinalizationResult(
+                finalText = text,
+                finalAsrError = null,
+                correctionError = null,
+                correctionAccepted = true,
+                correctionDecisionReason = null,
+                correctionAttempted = false,
+                correctionChanged = false,
+                correctionBypassed = true,
+                modelOutput = null,
+            )
         }
 
         var finalAsrError: String? = null
@@ -131,12 +152,16 @@ class FinalizationEngine(
         }
 
         val rawModelOutput = modelOutput
+        val modelResponded = rawModelOutput != null
+        val semanticCandidate = rawModelOutput?.let(CorrectionGuard::sanitize) ?: correctionInput
+        val modelChanged = modelResponded && semanticCandidate != correctionInput.trim()
         val allowDeterministicFormatting = settings.correctionMode != CorrectionMode.NONE
         val candidate = if (allowDeterministicFormatting) {
-            CorrectionPostProcessor.apply(correctionInput, modelOutput ?: correctionInput, preferences)
+            CorrectionPostProcessor.apply(correctionInput, semanticCandidate, preferences)
         } else {
             correctionInput
         }
+        val deterministicFormattingChanged = candidate != semanticCandidate
         val decision = CorrectionGuard.choose(correctionInput, candidate, preferences)
         val finalText = decision.text
         val changed = finalText != correctionInput
@@ -145,15 +170,27 @@ class FinalizationEngine(
         saveTrace(
             outcome, correctionInput, finalText, finalAsrId, finalAsrLatencyMs, finalAsrRtf, finalAsrError,
             corrector?.id ?: "none", rawModelOutput, decision.accepted, decision.normalizedDistance,
-            correctionError, decision.reason, attempted, changed, false, settings,
+            correctionError, decision.reason, attempted, changed, false,
+            modelResponded, modelChanged, deterministicFormattingChanged, settings,
         )
         return FinalizationResult(
-            finalText, finalAsrError, correctionError, decision.accepted, decision.reason,
-            attempted, changed, false, rawModelOutput,
+            finalText = finalText,
+            finalAsrError = finalAsrError,
+            correctionError = correctionError,
+            correctionAccepted = decision.accepted,
+            correctionDecisionReason = decision.reason,
+            correctionAttempted = attempted,
+            correctionChanged = changed,
+            correctionBypassed = false,
+            modelOutput = rawModelOutput,
+            correctionModelResponded = modelResponded,
+            correctionModelChanged = modelChanged,
+            deterministicFormattingChanged = deterministicFormattingChanged,
         )
     }
 
     private fun selectCorrector(settings: AppSettings): TextCorrector? {
+        correctorOverride?.let { return it(settings) }
         val gemmaAvailable = File(settings.gemmaModelPath).isFile
         return when (CorrectionBackendResolver.resolve(settings, gemmaAvailable)) {
             CorrectionBackend.NONE -> null
@@ -181,6 +218,9 @@ class FinalizationEngine(
         attempted: Boolean,
         changed: Boolean,
         bypassed: Boolean,
+        modelResponded: Boolean,
+        modelChanged: Boolean,
+        deterministicFormattingChanged: Boolean,
         settings: AppSettings,
     ) {
         traceStore.save(
@@ -197,6 +237,9 @@ class FinalizationEngine(
                 correctionChanged = changed,
                 correctionBypassed = bypassed,
                 correctionDecisionReason = decisionReason,
+                correctionModelResponded = modelResponded,
+                correctionModelChanged = modelChanged,
+                deterministicFormattingChanged = deterministicFormattingChanged,
                 finalAsrId = finalAsrId,
                 finalAsrLatencyMs = finalAsrLatencyMs,
                 finalAsrRtf = finalAsrRtf,
