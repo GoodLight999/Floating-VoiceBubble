@@ -2,19 +2,15 @@ package com.goodlight.floatingvoicebubble
 
 import android.Manifest
 import android.content.ComponentName
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
@@ -42,44 +38,31 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background,
                     contentColor = MaterialTheme.colorScheme.onBackground,
                 ) {
-                    Column(
+                    Box(
                         Modifier
                             .fillMaxSize()
                             .windowInsetsPadding(WindowInsets.safeDrawing),
                     ) {
-                        QuickCorrectionControls(this@MainActivity)
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                        ) {
-                            TextButton(
-                                onClick = {
-                                    startActivity(Intent(this@MainActivity, DictionaryActivity::class.java))
-                                },
-                            ) { Text("個人辞書") }
-                        }
-                        Box(Modifier.weight(1f)) {
-                            if (showDetailed) {
-                                Column(Modifier.fillMaxSize()) {
-                                    TextButton(onClick = { showDetailed = false }) { Text("← かんたん設定へ戻る") }
-                                    Box(Modifier.weight(1f)) {
-                                        VoiceBubbleSettingsScreen(
-                                            activity = this@MainActivity,
-                                            microphoneGranted = microphoneGranted,
-                                            accessibilityEnabled = accessibilityEnabled,
-                                            onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                                        )
-                                    }
+                        if (showDetailed) {
+                            Column(Modifier.fillMaxSize()) {
+                                TextButton(onClick = { showDetailed = false }) { Text("← かんたん設定") }
+                                Box(Modifier.weight(1f)) {
+                                    VoiceBubbleSettingsScreen(
+                                        activity = this@MainActivity,
+                                        microphoneGranted = microphoneGranted,
+                                        accessibilityEnabled = accessibilityEnabled,
+                                        onRuntimeStatusChanged = ::refreshRuntimeStatus,
+                                    )
                                 }
-                            } else {
-                                HomeSettingsScreen(
-                                    activity = this@MainActivity,
-                                    microphoneGranted = microphoneGranted,
-                                    accessibilityEnabled = accessibilityEnabled,
-                                    onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                                    onOpenDetailedSettings = { showDetailed = true },
-                                )
                             }
+                        } else {
+                            HomeSettingsScreen(
+                                activity = this@MainActivity,
+                                microphoneGranted = microphoneGranted,
+                                accessibilityEnabled = accessibilityEnabled,
+                                onRuntimeStatusChanged = ::refreshRuntimeStatus,
+                                onOpenDetailedSettings = { showDetailed = true },
+                            )
                         }
                     }
                 }
