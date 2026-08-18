@@ -18,13 +18,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.goodlight.floatingvoicebubble.diagnostics.DiagnosticReport
@@ -64,57 +62,78 @@ internal fun HomeSettingsScreen(
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         onRuntimeStatusChanged()
     }
+    val ready = microphoneGranted && accessibilityEnabled
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .testTag("home-settings-scroll")
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("compact-home-header"),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Floating VoiceBubble", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Row {
-                TextButton(onClick = { activity.startActivity(Intent(activity, DictionaryActivity::class.java)) }) {
-                    Text("辞書")
-                }
-                TextButton(onClick = onOpenDetailedSettings) { Text("詳細") }
-            }
+            Text(
+                "Floating VoiceBubble",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                if (ready) "● 準備OK" else "● 要設定",
+                color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            TextButton(onClick = onOpenDetailedSettings) { Text("詳細") }
         }
 
-        if (microphoneGranted && accessibilityEnabled) {
-            Text(
-                "● 準備OK  キーボードを開けばバブルを使えます",
-                color = MaterialTheme.colorScheme.primary,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-            )
-        } else {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("初回設定", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    if (!microphoneGranted) StatusRow("マイク", false)
-                    if (!accessibilityEnabled) StatusRow("他のアプリへ入力", false)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (!microphoneGranted) {
-                            Button(onClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }) { Text("マイクを許可") }
-                        }
-                        if (!accessibilityEnabled) {
-                            OutlinedButton(onClick = { activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
-                                Text("入力権限を設定")
-                            }
-                        }
+        if (!ready) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                if (!microphoneGranted) {
+                    OutlinedButton(onClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }) {
+                        Text("マイク許可")
+                    }
+                }
+                if (!accessibilityEnabled) {
+                    OutlinedButton(onClick = { activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
+                        Text("入力権限")
                     }
                 }
             }
         }
 
-        Text("音声入力", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        QuickCorrectionControls(
+            activity = activity,
+            refreshRevision = refreshRevision,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        HorizontalDivider()
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text("音声認識", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(
+                finalAsrLabel(settings.finalAsrMode),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             RecognitionMode.entries.forEach { mode ->
                 FilterChip(
                     selected = settings.recognitionMode == mode,
@@ -123,26 +142,35 @@ internal fun HomeSettingsScreen(
                 )
             }
         }
-        CompactSwitchRow(
-            title = "完全オフライン",
-            detail = "音声認識も補正もクラウドへ送らない",
-            checked = settings.offlineMode,
-        ) { checked -> settings = store.update { it.copy(offlineMode = checked) } }
-        CompactSwitchRow(
-            title = "無音で自動確定",
-            detail = "OFFでもバブルを再タップすれば確定",
-            checked = settings.autoStop,
-        ) { checked -> settings = store.update { it.copy(autoStop = checked) } }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            HomeToggleChip("完全オフライン", settings.offlineMode) { checked ->
+                settings = store.update { it.copy(offlineMode = checked) }
+            }
+            HomeToggleChip("無音で自動確定", settings.autoStop) { checked ->
+                settings = store.update { it.copy(autoStop = checked) }
+            }
+            FinalAsrMode.entries.forEach { mode ->
+                FilterChip(
+                    selected = settings.finalAsrMode == mode,
+                    onClick = { settings = store.update { it.copy(finalAsrMode = mode) } },
+                    label = { Text(finalAsrLabel(mode)) },
+                )
+            }
+        }
 
         HorizontalDivider()
-        QuickCorrectionControls(
-            activity = activity,
-            refreshRevision = refreshRevision,
-            modifier = Modifier.fillMaxWidth(),
-        )
 
-        Text("診断・管理", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            OutlinedButton(onClick = { activity.startActivity(Intent(activity, DictionaryActivity::class.java)) }) {
+                Text("個人辞書")
+            }
+            OutlinedButton(onClick = { activity.startActivity(Intent(activity, AppProfilesActivity::class.java)) }) {
+                Text("アプリ別")
+            }
             Button(
                 onClick = {
                     diagnosticBusy = true
@@ -167,54 +195,35 @@ internal fun HomeSettingsScreen(
                 },
                 enabled = !diagnosticBusy,
             ) { Text(if (diagnosticBusy) "診断中…" else "全自動診断") }
-            diagnosticReport?.let { report ->
-                OutlinedButton(onClick = { copyDiagnostic(activity, report) }) { Text("結果をコピー") }
-            }
             OutlinedButton(onClick = { activity.startActivity(Intent(activity, AdvancedToolsActivity::class.java)) }) {
                 Text("管理・検証")
             }
+            diagnosticReport?.let { report ->
+                TextButton(onClick = { copyDiagnostic(activity, report) }) { Text("診断結果をコピー") }
+            }
         }
+
         if (diagnosticMessage.isNotBlank()) {
             Text(
                 diagnosticMessage,
-                color = if (diagnosticMessage.contains("FAIL 0")) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (diagnosticMessage.contains("FAIL 0")) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Text(
-            "全自動診断は、選択中のLMがN-bestと文脈を使って実際に誤認識を直せるところまで検査します。普段使う設定はこの画面で完結します。",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
     }
 }
 
 @Composable
-private fun StatusRow(label: String, ready: Boolean) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(label)
-        Text(
-            if (ready) "OK" else "要設定",
-            color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
-private fun CompactSwitchRow(title: String, detail: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(checked = checked, onCheckedChange = onChecked)
-    }
+private fun HomeToggleChip(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    FilterChip(
+        selected = checked,
+        onClick = { onChecked(!checked) },
+        label = { Text(label) },
+    )
 }
 
 private fun recognitionLabel(mode: RecognitionMode): String = when (mode) {
@@ -222,6 +231,11 @@ private fun recognitionLabel(mode: RecognitionMode): String = when (mode) {
     RecognitionMode.SYSTEM -> "Android"
     RecognitionMode.ON_DEVICE -> "Android端末内"
     RecognitionMode.SHERPA_STREAMING -> "ローカルASR"
+}
+
+private fun finalAsrLabel(mode: FinalAsrMode): String = when (mode) {
+    FinalAsrMode.LIVE_RESULT -> "最終ASR: ライブ"
+    FinalAsrMode.REAZON_SPEECH -> "最終ASR: Reazon"
 }
 
 private fun copyDiagnostic(activity: MainActivity, report: DiagnosticReport) {

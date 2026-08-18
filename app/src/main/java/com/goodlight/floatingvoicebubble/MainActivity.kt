@@ -46,7 +46,7 @@ class MainActivity : ComponentActivity() {
                     ) {
                         if (showDetailed) {
                             Column(Modifier.fillMaxSize()) {
-                                TextButton(onClick = { showDetailed = false }) { Text("← かんたん設定") }
+                                TextButton(onClick = { showDetailed = false }) { Text("← 通常設定") }
                                 Box(Modifier.weight(1f)) {
                                     VoiceBubbleSettingsScreen(
                                         activity = this@MainActivity,
