@@ -18,6 +18,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -26,7 +27,7 @@ import androidx.compose.ui.Modifier
 class MainActivity : ComponentActivity() {
     private var accessibilityEnabled by mutableStateOf(false)
     private var microphoneGranted by mutableStateOf(false)
-    private var settingsRevision by mutableStateOf(0)
+    private var settingsRevision by mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

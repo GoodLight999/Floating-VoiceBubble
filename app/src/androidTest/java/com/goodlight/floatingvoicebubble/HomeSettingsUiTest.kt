@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -31,6 +32,13 @@ class HomeSettingsUiTest {
             composeRule.waitUntil(timeoutMillis = 5_000) {
                 SettingsStore(composeRule.activity).load().reasoningEffort == ReasoningEffort.HIGH
             }
+            assertEquals(ReasoningEffort.HIGH, SettingsStore(composeRule.activity).load().reasoningEffort)
+
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("reasoning-effort-control")
+                .assertIsDisplayed()
+                .assertTextContains("高")
             assertEquals(ReasoningEffort.HIGH, SettingsStore(composeRule.activity).load().reasoningEffort)
         } finally {
             store.update { previous }

@@ -33,7 +33,7 @@ class ModelArchiveExtractorTest {
             assertEquals("encoder", root.resolve("encoder.int8.onnx").readText())
             assertEquals("decoder", root.resolve("decoder.int8.onnx").readText())
             assertTrue(root.resolve("tokens.txt").isFile)
-            assertFalse(root.parentFile.resolve("should-not-exist.txt").exists())
+            assertFalse(requireNotNull(root.parentFile).resolve("should-not-exist.txt").exists())
         } finally {
             root.deleteRecursively()
         }
