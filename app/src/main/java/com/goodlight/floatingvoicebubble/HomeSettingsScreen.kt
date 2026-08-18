@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.goodlight.floatingvoicebubble.diagnostics.DiagnosticReport
+import com.goodlight.floatingvoicebubble.diagnostics.DiagnosticStatus
 import com.goodlight.floatingvoicebubble.diagnostics.SelfDiagnostics
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -151,7 +152,12 @@ internal fun HomeSettingsScreen(
                             .onSuccess { report -> activity.runOnUiThread {
                                 diagnosticReport = report
                                 diagnosticBusy = false
-                                diagnosticMessage = report.summary()
+                                val failure = report.items.firstOrNull { it.status == DiagnosticStatus.FAIL }
+                                diagnosticMessage = if (failure == null) {
+                                    report.summary()
+                                } else {
+                                    "${report.summary()}\n${failure.id}: ${failure.detail}"
+                                }
                             } }
                             .onFailure { failure -> activity.runOnUiThread {
                                 diagnosticBusy = false
@@ -177,7 +183,7 @@ internal fun HomeSettingsScreen(
             )
         }
         Text(
-            "普段使う設定はこの画面で完結します。モデル導入・最終ASR・ベンチマーク等だけ「詳細」「管理・検証」に分離しています。",
+            "全自動診断は、選択中のLMがN-bestと文脈を使って実際に誤認識を直せるところまで検査します。普段使う設定はこの画面で完結します。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
