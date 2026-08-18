@@ -264,7 +264,7 @@ internal fun DictionaryManagerScreen(
             }
 
             Text(
-                if (query.isBlank()) "$total件中 ${rows.size}件を表示"
+                if (query.isBlank()) "${total}件中 ${rows.size}件を表示"
                 else "「$query」の検索結果 ${rows.size}件${if (hasMore) "以上" else ""}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
