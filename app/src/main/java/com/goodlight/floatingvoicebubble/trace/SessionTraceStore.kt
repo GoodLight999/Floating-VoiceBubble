@@ -99,7 +99,7 @@ class SessionTraceStore(context: Context) {
         val files = audioDir.listFiles().orEmpty()
         val committedIds = files.asSequence()
             .filter { it.isFile && it.extension == "json" && !it.name.endsWith(".benchmark.json") }
-            .map(File::getNameWithoutExtension)
+            .map { it.nameWithoutExtension }
             .toHashSet()
         files.forEach { file ->
             val delete = when {

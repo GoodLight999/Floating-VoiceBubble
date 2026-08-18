@@ -1,6 +1,7 @@
 package com.goodlight.floatingvoicebubble.overlay
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -34,13 +35,9 @@ class FloatingBubbleController(
     private val cancel = action("破棄", ACCENT_SOFT, Color.TRANSPARENT) { onCancel() }
     private val transcript = TextView(service)
     private val scroll = ScrollView(service)
-    private val mic = object : TextView(service) {
-        override fun performClick(): Boolean {
-            super.performClick()
-            acknowledgeTap()
-            onToggle()
-            return true
-        }
+    private val mic = BubbleMicView(service) {
+        acknowledgeTap()
+        onToggle()
     }
     private val dismissRoot = FrameLayout(service)
     private val dismissTarget = TextView(service)
@@ -472,6 +469,14 @@ class FloatingBubbleController(
 
     private fun dp(value: Int) = (value * service.resources.displayMetrics.density).roundToInt()
     private fun dp(value: Float) = (value * service.resources.displayMetrics.density).roundToInt()
+
+    private class BubbleMicView(context: Context, private val onClickAction: () -> Unit) : TextView(context) {
+        override fun performClick(): Boolean {
+            super.performClick()
+            onClickAction()
+            return true
+        }
+    }
 
     companion object {
         private const val BUBBLE_DP = 56
