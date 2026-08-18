@@ -1,10 +1,12 @@
 package com.goodlight.floatingvoicebubble
 
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -49,7 +51,7 @@ import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun DictionaryManagerScreen(
-    activity: MainActivity,
+    activity: ComponentActivity,
     onBack: () -> Unit,
 ) {
     val dictionary = remember(activity) { PersonalDictionary(activity) }
@@ -320,7 +322,7 @@ internal fun DictionaryManagerScreen(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun DictionaryEditor(
+private fun ColumnScope.DictionaryEditor(
     originalTerm: String?,
     term: String,
     reading: String,
