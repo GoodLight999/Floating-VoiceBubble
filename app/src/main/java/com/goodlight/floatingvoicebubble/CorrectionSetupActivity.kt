@@ -42,8 +42,7 @@ import com.goodlight.floatingvoicebubble.correction.ByokEndpointResolver
 import com.goodlight.floatingvoicebubble.correction.ByokModelDiscovery
 import com.goodlight.floatingvoicebubble.correction.ByokModelInfo
 import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
-import com.goodlight.floatingvoicebubble.correction.CorrectionPreferences
-import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
+import com.goodlight.floatingvoicebubble.correction.CorrectionPostProcessor
 import com.goodlight.floatingvoicebubble.model.InstalledOfficialModel
 import com.goodlight.floatingvoicebubble.model.ModelInstallProgress
 import com.goodlight.floatingvoicebubble.model.OfficialModelCatalog
@@ -95,21 +94,6 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         settings = updated
         return updated
     }
-
-    fun connectionRequest(): CorrectionRequest = CorrectionRequest(
-        rawTranscript = "えー今日はがんだむを見に行く",
-        alternatives = listOf("えー今日はガンダムを見に行く"),
-        surroundingContext = "",
-        dictionaryTerms = emptyList(),
-        preferences = CorrectionPreferences(
-            addCommas = settings.correctionAddCommas,
-            addPeriods = settings.correctionAddPeriods,
-            removeFillers = settings.correctionRemoveFillers,
-            polite = settings.correctionPolite,
-            businessPolite = settings.correctionBusinessPolite,
-            lineBreakMode = settings.correctionLineBreakMode,
-        ),
-    )
 
     val resolvedPreview = runCatching { ByokEndpointResolver.resolve(endpoint) }.getOrNull()
     val selectedModelInfo = models.firstOrNull { it.id == model }
@@ -288,30 +272,37 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             }
         }
 
+        Text(
+            "実補正テストは単なるHTTP疎通ではありません。N-bestと周辺文脈を渡し、『取り合い』→『聞き取りAI』を実際に復元できることまで確認します。RAW丸写しは失敗扱いです。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
         FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
                 onClick = {
                     busyAction = "test"
-                    message = "選択したモデルへテスト送信しています…"
+                    message = "選択したモデルで文脈付き実補正を試しています…"
                     Thread({
                         runCatching {
-                            CloudCorrectorFactory.create(
+                            val output = CloudCorrectorFactory.create(
                                 endpoint.trim(),
                                 model.trim(),
                                 apiKey.trim(),
                                 reasoningEffort,
-                            ).correct(connectionRequest())
+                            ).correct(CorrectionPostProcessor.correctionProbeRequest())
+                            CorrectionPostProcessor.probeFailure(output)?.let { error(it) }
+                            output
                         }.onSuccess { output -> activity.runOnUiThread {
                             busyAction = null
-                            message = "接続成功: ${output.take(160)}"
+                            message = "実補正テスト成功: ${output.take(160)}"
                         } }.onFailure { failure -> activity.runOnUiThread {
                             busyAction = null
-                            message = "接続失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                            message = "実補正テスト失敗: ${failure.message ?: failure.javaClass.simpleName}"
                         } }
-                    }, "VoiceBubble-ByokTest").start()
+                    }, "VoiceBubble-ByokSemanticTest").start()
                 },
                 enabled = busyAction == null && endpoint.trim().startsWith("https://") && model.isNotBlank(),
-            ) { Text(if (busyAction == "test") "テスト中…" else "このモデルへ接続テスト") }
+            ) { Text(if (busyAction == "test") "実補正中…" else "このモデルで実補正テスト") }
             Button(
                 onClick = {
                     saveByok()
