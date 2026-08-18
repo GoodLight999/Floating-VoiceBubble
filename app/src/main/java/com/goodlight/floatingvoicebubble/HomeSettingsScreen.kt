@@ -28,6 +28,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +46,7 @@ internal fun HomeSettingsScreen(
     activity: MainActivity,
     microphoneGranted: Boolean,
     accessibilityEnabled: Boolean,
+    refreshRevision: Int,
     onRuntimeStatusChanged: () -> Unit,
     onOpenDetailedSettings: () -> Unit,
 ) {
@@ -53,6 +55,10 @@ internal fun HomeSettingsScreen(
     var diagnosticBusy by remember { mutableStateOf(false) }
     var diagnosticReport by remember { mutableStateOf<DiagnosticReport?>(null) }
     var diagnosticMessage by remember { mutableStateOf("") }
+
+    LaunchedEffect(refreshRevision) {
+        settings = store.load()
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         onRuntimeStatusChanged()
@@ -128,7 +134,11 @@ internal fun HomeSettingsScreen(
         ) { checked -> settings = store.update { it.copy(autoStop = checked) } }
 
         HorizontalDivider()
-        QuickCorrectionControls(activity = activity, modifier = Modifier.fillMaxWidth())
+        QuickCorrectionControls(
+            activity = activity,
+            refreshRevision = refreshRevision,
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         Text("診断・管理", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
