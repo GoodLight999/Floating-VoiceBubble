@@ -28,9 +28,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,9 +63,9 @@ private fun AppProfilesScreen(activity: AppProfilesActivity) {
     val store = remember(activity) { AppProfileStore(activity) }
     var profiles by remember { mutableStateOf(store.profiles().associateBy { it.packageName }) }
     var recents by remember { mutableStateOf(store.recentPackages()) }
-    var manualPackage by remember { mutableStateOf("") }
-    var editingPackage by remember { mutableStateOf<String?>(null) }
-    var message by remember { mutableStateOf("") }
+    var manualPackage by rememberSaveable { mutableStateOf("") }
+    var editingPackage by rememberSaveable { mutableStateOf<String?>(null) }
+    var message by rememberSaveable { mutableStateOf("") }
 
     fun refresh() {
         profiles = store.profiles().associateBy { it.packageName }
@@ -214,7 +217,15 @@ private fun AppProfileEditor(
     onSave: (AppCorrectionProfile) -> Unit,
     onDelete: () -> Unit,
 ) {
-    var draft by remember(profile) { mutableStateOf(profile) }
+    val draftSaver = remember(profile.packageName) {
+        Saver<MutableState<AppCorrectionProfile>, String>(
+            save = { AppCorrectionProfileCodec.encode(it.value) },
+            restore = { encoded ->
+                mutableStateOf(AppCorrectionProfileCodec.decode(profile.packageName, encoded) ?: profile)
+            },
+        )
+    }
+    var draft by rememberSaveable(profile.packageName, saver = draftSaver) { mutableStateOf(profile) }
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(start = 8.dp, bottom = 10.dp),

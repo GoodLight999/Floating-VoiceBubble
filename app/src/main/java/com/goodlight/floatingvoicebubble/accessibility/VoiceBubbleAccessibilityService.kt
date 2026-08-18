@@ -34,6 +34,7 @@ import java.io.File
 import java.util.LinkedHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeoutException
 
 class VoiceBubbleAccessibilityService : AccessibilityService() {
@@ -66,6 +67,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private val pending = LinkedHashMap<Long, String>()
     private val targets = LinkedHashMap<Long, Target?>()
     private val finalizationOrder = OrderedResolutionQueue<Long, FinalizationResolution>()
+    private val finalizationTasks = LinkedHashMap<Long, Future<*>>()
 
     /**
      * Recent VoiceBubble commits are kept only in this service process. They are not persisted and
@@ -109,6 +111,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_VIEW_FOCUSED,
             -> h.post { updateIme() }
+            else -> Unit
         }
     }
 
@@ -116,9 +119,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         session?.close()
-        pending.clear()
-        targets.clear()
-        finalizationOrder.clear()
+        cancelAllPendingFinalizations()
         recentVoiceContext.clear()
         if (::overlay.isInitialized) overlay.detach()
         if (::dictionary.isInitialized) dictionary.close()
@@ -300,7 +301,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         // The watchdog starts when this job actually begins executing, not while it is waiting in
         // the local-model queue. That prevents queue wait time from being misclassified as an LM
         // timeout. Cloud jobs can run concurrently; local/native jobs remain serialized.
-        finalizationExecutor(effective).execute {
+        val task = finalizationExecutor(effective).submit {
             h.postDelayed(
                 {
                     resolveFinalization(
@@ -310,6 +311,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                             raw = outcome.rawTranscript,
                             failure = TimeoutException("確定処理が45秒を超えました"),
                         ),
+                        cancelTask = true,
                     )
                 },
                 FINALIZATION_WATCHDOG_MS,
@@ -331,6 +333,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 }
             }
         }
+        finalizationTasks[id] = task
     }
 
     private fun finalizationExecutor(effective: AppSettings): ExecutorService {
@@ -353,13 +356,20 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val entry = pending.entries.firstOrNull() ?: return
         val capturedTarget = targets.remove(entry.key)
         if (pending.remove(entry.key) == null) return
+        finalizationTasks.remove(entry.key)?.cancel(true)
         val nowReady = finalizationOrder.discard(entry.key)
         put(capturedTarget, entry.value, "補正なしで入力しました")
         deliverReady(nowReady)
         if (pending.isNotEmpty()) overlay.showFinalizingStack(pending.values.toList()) else idleAfter(650)
     }
 
-    private fun resolveFinalization(id: Long, resolution: FinalizationResolution) {
+    private fun resolveFinalization(
+        id: Long,
+        resolution: FinalizationResolution,
+        cancelTask: Boolean = false,
+    ) {
+        val task = finalizationTasks.remove(id)
+        if (cancelTask) task?.cancel(true)
         deliverReady(finalizationOrder.resolve(id, resolution))
     }
 
@@ -524,9 +534,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             else overlay.showFinalizingStack(pending.values.toList(), "前の発話を処理しています")
             return
         }
-        pending.clear()
-        targets.clear()
-        finalizationOrder.clear()
+        cancelAllPendingFinalizations()
         latest = ""
         if (::overlay.isInitialized) overlay.showIdle()
     }
@@ -538,6 +546,12 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         session = null
         target = null
         latest = ""
+        cancelAllPendingFinalizations()
+    }
+
+    private fun cancelAllPendingFinalizations() {
+        finalizationTasks.values.forEach { it.cancel(true) }
+        finalizationTasks.clear()
         pending.clear()
         targets.clear()
         finalizationOrder.clear()

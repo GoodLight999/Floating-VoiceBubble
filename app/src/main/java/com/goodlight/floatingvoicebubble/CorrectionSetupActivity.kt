@@ -32,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,14 +73,16 @@ class CorrectionSetupActivity : ComponentActivity() {
 private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     val store = remember(activity) { SettingsStore(activity) }
     var settings by remember { mutableStateOf(store.load()) }
-    var endpoint by remember { mutableStateOf(settings.byokEndpoint) }
+    var endpoint by rememberSaveable { mutableStateOf(settings.byokEndpoint) }
+    // Do not copy an unsaved secret into SavedState/Bundle. Persisted keys are restored securely
+    // from SettingsStore/Android Keystore; an in-progress key is intentionally process-local.
     var apiKey by remember { mutableStateOf(store.apiKey()) }
-    var model by remember { mutableStateOf(settings.byokModel) }
-    var reasoningEffort by remember { mutableStateOf(settings.reasoningEffort) }
-    var modelFilter by remember { mutableStateOf("") }
+    var model by rememberSaveable { mutableStateOf(settings.byokModel) }
+    var reasoningEffort by rememberSaveable { mutableStateOf(settings.reasoningEffort) }
+    var modelFilter by rememberSaveable { mutableStateOf("") }
     var models by remember { mutableStateOf<List<ByokModelInfo>>(emptyList()) }
     var busyAction by remember { mutableStateOf<String?>(null) }
-    var message by remember { mutableStateOf("") }
+    var message by rememberSaveable { mutableStateOf("") }
     var progress by remember { mutableStateOf<ModelInstallProgress?>(null) }
 
     fun saveByok(): AppSettings {

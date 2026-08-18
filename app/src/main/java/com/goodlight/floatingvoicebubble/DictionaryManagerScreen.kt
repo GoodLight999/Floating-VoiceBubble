@@ -36,11 +36,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.goodlight.floatingvoicebubble.dictionary.DictionarySort
@@ -56,21 +60,21 @@ internal fun DictionaryManagerScreen(
     val dictionary = remember(activity) { PersonalDictionary(activity) }
     DisposableEffect(dictionary) { onDispose { dictionary.close() } }
 
-    var query by remember { mutableStateOf("") }
-    var sort by remember { mutableStateOf(DictionarySort.PRIORITY) }
-    var rows by remember { mutableStateOf(dictionary.search(limit = PAGE_SIZE, sort = sort)) }
-    var offset by remember { mutableStateOf(rows.size) }
-    var hasMore by remember { mutableStateOf(rows.size == PAGE_SIZE) }
-    var total by remember { mutableStateOf(dictionary.count()) }
-    var message by remember { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf("") }
+    var sort by rememberSaveable { mutableStateOf(DictionarySort.PRIORITY) }
+    var rows by remember(query, sort) { mutableStateOf(dictionary.search(query, limit = PAGE_SIZE, sort = sort)) }
+    var offset by remember(query, sort) { mutableIntStateOf(rows.size) }
+    var hasMore by remember(query, sort) { mutableStateOf(rows.size == PAGE_SIZE) }
+    var total by remember { mutableLongStateOf(dictionary.count()) }
+    var message by rememberSaveable { mutableStateOf("") }
 
-    var editing by remember { mutableStateOf(false) }
-    var originalTerm by remember { mutableStateOf<String?>(null) }
-    var editTerm by remember { mutableStateOf("") }
-    var editReading by remember { mutableStateOf("") }
-    var editAliases by remember { mutableStateOf("") }
-    var editWeight by remember { mutableStateOf("100") }
-    var confirmDelete by remember { mutableStateOf(false) }
+    var editing by rememberSaveable { mutableStateOf(false) }
+    var originalTerm by rememberSaveable { mutableStateOf<String?>(null) }
+    var editTerm by rememberSaveable { mutableStateOf("") }
+    var editReading by rememberSaveable { mutableStateOf("") }
+    var editAliases by rememberSaveable { mutableStateOf("") }
+    var editWeight by rememberSaveable { mutableStateOf("100") }
+    var confirmDelete by rememberSaveable { mutableStateOf(false) }
 
     fun reload(newQuery: String = query, newSort: DictionarySort = sort) {
         val first = dictionary.search(newQuery, limit = PAGE_SIZE, offset = 0, sort = newSort)
@@ -349,6 +353,7 @@ private fun ColumnScope.DictionaryEditor(
     ) {
         Text(
             if (originalTerm == null) "新しい単語を登録" else "辞書項目を編集",
+            modifier = Modifier.testTag("dictionary-editor-title"),
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
@@ -363,7 +368,7 @@ private fun ColumnScope.DictionaryEditor(
             label = { Text("見出し語 *") },
             placeholder = { Text("例: Floating VoiceBubble") },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().testTag("dictionary-term-field"),
         )
         OutlinedTextField(
             value = reading,
