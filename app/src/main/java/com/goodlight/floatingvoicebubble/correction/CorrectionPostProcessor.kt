@@ -92,128 +92,116 @@ object CorrectionPostProcessor {
     }
 
     /**
-     * The model gets first choice of semantic boundaries. If it returned no line break at all while
-     * the user explicitly requested them, add conservative paragraph breaks. Sentence boundaries are
-     * preferred; for punctuation-free long Japanese dictation, Unicode line-break opportunities are
-     * the final fallback. Only whitespace/newlines change — transcript characters are preserved.
+     * "適宜改行" is an execution contract, not permission for the model to maybe add one newline.
+     *
+     * The model still gets first choice of semantic boundaries. We then paragraphize every long
+     * remaining line independently, so a single model newline cannot suppress formatting of the rest
+     * of a long dictation. Sentence ends are preferred, followed by discourse/topic transitions and
+     * Japanese comma/clause boundaries. Unicode line-break opportunities are the final fallback.
+     *
+     * This deliberately supports the common SpeechRecognizer shape where a long Japanese utterance
+     * contains only "、" and no internal "。". Only newline characters are inserted; transcript
+     * characters are otherwise preserved.
      */
     private fun ensureRequestedLineBreaks(value: String, mode: LineBreakMode): String {
-        if (mode == LineBreakMode.NONE || value.contains('\n')) return value
+        if (mode == LineBreakMode.NONE || value.isBlank()) return value
         val separator = if (mode == LineBreakMode.SMART_SPACED) "\n\n" else "\n"
-        val sentences = splitSentences(value)
-        val totalLength = sentences.sumOf { it.length }
+        val normalized = value.replace("\r\n", "\n").replace('\r', '\n')
+        val paragraphs = normalized.split(Regex("\n+"))
+        return paragraphs.joinToString(separator) { paragraph -> paragraphize(paragraph, mode, separator) }
+    }
 
-        if (sentences.size < 2) {
-            if (value.length < FORCE_ONE_BREAK_CHARS) return value
-            val boundary = fallbackLineBoundary(value) ?: return value
-            return insertBreak(value, boundary, separator)
-        }
-        if (totalLength < MIN_LINE_BREAK_TEXT_CHARS) return value
+    private fun paragraphize(value: String, mode: LineBreakMode, separator: String): String {
+        if (value.length < FORCE_ONE_BREAK_CHARS) return value
 
         val target = if (mode == LineBreakMode.SMART_SPACED) SPACED_TARGET_CHARS else SMART_TARGET_CHARS
-        val builder = StringBuilder(value.length + sentences.size * separator.length)
-        var currentParagraphLength = 0
-        var breaks = 0
+        val minChunk = if (mode == LineBreakMode.SMART_SPACED) SPACED_MIN_CHUNK_CHARS else SMART_MIN_CHUNK_CHARS
+        val maxChunk = if (mode == LineBreakMode.SMART_SPACED) SPACED_MAX_CHUNK_CHARS else SMART_MAX_CHUNK_CHARS
+        val candidates = paragraphBoundaries(value)
+        if (candidates.isEmpty()) return value
 
-        sentences.forEachIndexed { index, sentence ->
-            builder.append(sentence)
-            currentParagraphLength += sentence.length
-            if (index == sentences.lastIndex) return@forEachIndexed
-            val nextLength = sentences[index + 1].length
-            if (currentParagraphLength >= target || currentParagraphLength + nextLength > MAX_PARAGRAPH_CHARS) {
-                builder.append(separator)
-                currentParagraphLength = 0
-                breaks += 1
-            }
+        val breaks = mutableListOf<Int>()
+        var start = 0
+        while (value.length - start >= target + minChunk) {
+            val minBoundary = start + minChunk
+            val maxBoundary = minOf(start + maxChunk, value.length - minChunk)
+            if (minBoundary > maxBoundary) break
+            val ideal = minOf(start + target, maxBoundary)
+            val boundary = candidates.asSequence()
+                .filter { it.index in minBoundary..maxBoundary }
+                .minByOrNull { it.score(ideal) }
+                ?.index
+                ?: break
+            if (boundary <= start || boundary >= value.length) break
+            breaks += boundary
+            start = boundary
         }
 
-        if (breaks > 0) return builder.toString()
-        if (totalLength < FORCE_ONE_BREAK_CHARS) return value
-
-        // Several short sentences can still form a long dictation. Insert exactly one break at the
-        // sentence boundary nearest the midpoint rather than leaving the option inert.
-        var cumulative = 0
-        var bestBoundary = 0
-        var bestDistance = Int.MAX_VALUE
-        val midpoint = totalLength / 2
-        for (index in 0 until sentences.lastIndex) {
-            cumulative += sentences[index].length
-            val distance = abs(cumulative - midpoint)
-            if (distance < bestDistance) {
-                bestDistance = distance
-                bestBoundary = index
-            }
+        // A moderately long single paragraph should still visibly honor the selected option even if
+        // the greedy target did not fire. Use the best safe boundary near the midpoint exactly once.
+        if (breaks.isEmpty() && value.length >= FORCE_ONE_BREAK_CHARS) {
+            val minBoundary = minChunk.coerceAtMost(value.length / 2)
+            val maxBoundary = (value.length - minChunk).coerceAtLeast(value.length / 2)
+            val midpoint = value.length / 2
+            candidates.asSequence()
+                .filter { it.index in minBoundary..maxBoundary }
+                .minByOrNull { it.score(midpoint) }
+                ?.index
+                ?.takeIf { it in 1 until value.length }
+                ?.let(breaks::add)
         }
-        return buildString(value.length + separator.length) {
-            sentences.forEachIndexed { index, sentence ->
-                append(sentence)
-                if (index == bestBoundary) append(separator)
+
+        if (breaks.isEmpty()) return value
+        val breakSet = breaks.toHashSet()
+        return buildString(value.length + breaks.size * separator.length) {
+            value.forEachIndexed { index, char ->
+                append(char)
+                if (index + 1 in breakSet) append(separator)
             }
         }
     }
 
-    private fun fallbackLineBoundary(value: String): Int? {
-        val midpoint = value.length / 2
-        val minBoundary = (value.length * 0.28).toInt().coerceAtLeast(MIN_SIDE_CHARS)
-        val maxBoundary = (value.length * 0.72).toInt().coerceAtMost(value.length - MIN_SIDE_CHARS)
-        if (minBoundary >= maxBoundary) return null
+    private fun paragraphBoundaries(value: String): List<Boundary> {
+        val priorities = linkedMapOf<Int, Int>()
+        fun add(index: Int, priority: Int) {
+            if (index !in 1 until value.length) return
+            priorities[index] = maxOf(priorities[index] ?: 0, priority)
+        }
 
-        // Prefer visible clause/topic separators if the provider supplied them.
-        val preferred = mutableListOf<Int>()
         value.forEachIndexed { index, char ->
-            if (char in CLAUSE_BOUNDARIES) preferred += index + 1
+            when {
+                char in SENTENCE_BOUNDARIES -> add(index + 1, PRIORITY_SENTENCE)
+                char in CLAUSE_BOUNDARIES -> add(index + 1, PRIORITY_CLAUSE)
+            }
         }
         TOPIC_BOUNDARIES.forEach { marker ->
             var from = 0
             while (true) {
                 val index = value.indexOf(marker, from)
                 if (index < 0) break
-                preferred += index
+                add(index, PRIORITY_TOPIC)
                 from = index + marker.length
             }
         }
-        preferred.filter { it in minBoundary..maxBoundary }
-            .minByOrNull { abs(it - midpoint) }
-            ?.let { return it }
 
         // Punctuation-free Japanese has few lexical delimiters. BreakIterator applies Unicode line
-        // breaking rules and avoids illegal boundaries better than cutting at an arbitrary code unit.
+        // breaking rules and avoids illegal surrogate/grapheme boundaries better than code-unit cuts.
         val iterator = BreakIterator.getLineInstance(Locale.JAPANESE).apply { setText(value) }
-        var boundary = iterator.first()
-        var best: Int? = null
-        var bestDistance = Int.MAX_VALUE
-        while (boundary != BreakIterator.DONE) {
-            if (boundary in minBoundary..maxBoundary) {
-                val distance = abs(boundary - midpoint)
-                if (distance < bestDistance) {
-                    best = boundary
-                    bestDistance = distance
-                }
-            }
-            boundary = iterator.next()
+        var index = iterator.first()
+        while (index != BreakIterator.DONE) {
+            add(index, PRIORITY_UNICODE)
+            index = iterator.next()
         }
-        return best
+        return priorities.map { (indexValue, priority) -> Boundary(indexValue, priority) }
     }
 
-    private fun insertBreak(value: String, boundary: Int, separator: String): String {
-        val left = value.substring(0, boundary).trimEnd()
-        val right = value.substring(boundary).trimStart()
-        if (left.isBlank() || right.isBlank()) return value
-        return left + separator + right
-    }
-
-    private fun splitSentences(value: String): List<String> {
-        val result = mutableListOf<String>()
-        val current = StringBuilder()
-        value.forEach { char ->
-            current.append(char)
-            if (char in SENTENCE_BOUNDARIES) {
-                current.toString().trim().takeIf(String::isNotEmpty)?.let(result::add)
-                current.setLength(0)
-            }
+    private data class Boundary(val index: Int, val priority: Int) {
+        fun score(ideal: Int): Int = abs(index - ideal) + when (priority) {
+            PRIORITY_SENTENCE -> 0
+            PRIORITY_TOPIC -> 5
+            PRIORITY_CLAUSE -> 9
+            else -> 24
         }
-        current.toString().trim().takeIf(String::isNotEmpty)?.let(result::add)
-        return result
     }
 
     private fun hasTerminalPunctuation(value: String): Boolean {
@@ -227,13 +215,21 @@ object CorrectionPostProcessor {
     private const val TERMINAL_PUNCTUATION = "。．.!！?？…」』）)]}"
     private const val SENTENCE_BOUNDARIES = "。.!！?？"
     private const val CLAUSE_BOUNDARIES = "、,；;：:"
-    private val TOPIC_BOUNDARIES = listOf("ちなみに", "それから", "そして", "ところで", "一方で", "ただ", "つまり", "なので", "だから", "あと")
+    private val TOPIC_BOUNDARIES = listOf(
+        "ちなみに", "それから", "そして", "ところで", "一方で", "ただ", "つまり", "なので", "だから", "あと",
+        "でも", "それで", "まず", "次に", "最後に", "要するに", "逆に",
+    )
+    private const val PRIORITY_UNICODE = 1
+    private const val PRIORITY_CLAUSE = 2
+    private const val PRIORITY_TOPIC = 3
+    private const val PRIORITY_SENTENCE = 4
     private const val COMMA_RETRY_MIN_CHARS = 24
     private const val LINE_BREAK_RETRY_MIN_CHARS = 32
-    private const val MIN_LINE_BREAK_TEXT_CHARS = 24
     private const val FORCE_ONE_BREAK_CHARS = 36
-    private const val MIN_SIDE_CHARS = 12
     private const val SMART_TARGET_CHARS = 42
     private const val SPACED_TARGET_CHARS = 52
-    private const val MAX_PARAGRAPH_CHARS = 84
+    private const val SMART_MIN_CHUNK_CHARS = 16
+    private const val SPACED_MIN_CHUNK_CHARS = 20
+    private const val SMART_MAX_CHUNK_CHARS = 68
+    private const val SPACED_MAX_CHUNK_CHARS = 82
 }
