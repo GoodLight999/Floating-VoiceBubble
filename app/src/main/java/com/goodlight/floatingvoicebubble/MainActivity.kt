@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 class MainActivity : ComponentActivity() {
     private var accessibilityEnabled by mutableStateOf(false)
     private var microphoneGranted by mutableStateOf(false)
+    private var settingsRevision by mutableStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +61,7 @@ class MainActivity : ComponentActivity() {
                                 activity = this@MainActivity,
                                 microphoneGranted = microphoneGranted,
                                 accessibilityEnabled = accessibilityEnabled,
+                                refreshRevision = settingsRevision,
                                 onRuntimeStatusChanged = ::refreshRuntimeStatus,
                                 onOpenDetailedSettings = { showDetailed = true },
                             )
@@ -73,6 +75,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshRuntimeStatus()
+        settingsRevision += 1
     }
 
     private fun refreshRuntimeStatus() {
