@@ -5,7 +5,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -23,7 +22,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -37,8 +35,6 @@ import com.goodlight.floatingvoicebubble.benchmark.AsrCandidateScore
 import com.goodlight.floatingvoicebubble.benchmark.AsrTournamentRunner
 import com.goodlight.floatingvoicebubble.benchmark.BenchmarkReferenceStore
 import com.goodlight.floatingvoicebubble.benchmark.ExternalAsrResultStore
-import com.goodlight.floatingvoicebubble.dictionary.DictionaryTerm
-import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.CatalogModelKind
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
@@ -63,7 +59,6 @@ class AdvancedToolsActivity : ComponentActivity() {
 @Composable
 private fun AdvancedToolsScreen(activity: AdvancedToolsActivity) {
     val settingsStore = remember { SettingsStore(activity) }
-    val dictionary = remember { PersonalDictionary(activity) }
     val referenceStore = remember { BenchmarkReferenceStore(activity) }
     val externalStore = remember { ExternalAsrResultStore(activity) }
     val streamingStore = remember { AsrModelStore(activity) }
@@ -75,44 +70,9 @@ private fun AdvancedToolsScreen(activity: AdvancedToolsActivity) {
     var installedStreaming by remember { mutableStateOf(streamingStore.listInstalled().map { it.id }.toSet()) }
     var finalInstalled by remember { mutableStateOf(finalStore.resolve(FinalAsrModelStore.MODEL_ID) != null) }
 
-    var dictionaryQuery by remember { mutableStateOf("") }
-    var dictionaryRows by remember { mutableStateOf(dictionary.search(limit = 30)) }
-    var editTerm by remember { mutableStateOf("") }
-    var editReading by remember { mutableStateOf("") }
-    var editAliases by remember { mutableStateOf("") }
-    var editWeight by remember { mutableStateOf("100") }
-    var dictionaryCount by remember { mutableStateOf(dictionary.count()) }
-
     var tournamentRows by remember { mutableStateOf<List<AsrCandidateScore>>(emptyList()) }
     var tournamentSummary by remember { mutableStateOf("") }
 
-    fun refreshDictionary() {
-        dictionaryRows = dictionary.search(dictionaryQuery, limit = 30)
-        dictionaryCount = dictionary.count()
-    }
-
-    val dictionaryImport = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        runCatching {
-            activity.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                ?: error("辞書ファイルを開けませんでした。")
-        }.onSuccess { text ->
-            val result = dictionary.importText(text)
-            refreshDictionary()
-            message = "辞書: ${result.imported}件取込 / ${result.skipped}件スキップ"
-        }.onFailure { message = "辞書取込失敗: ${it.message}" }
-    }
-    val dictionaryExport = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("text/tab-separated-values"),
-    ) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        runCatching {
-            activity.contentResolver.openOutputStream(uri, "w")?.bufferedWriter(Charsets.UTF_8)?.use {
-                it.write(dictionary.exportTsv())
-            } ?: error("辞書エクスポート先を開けませんでした。")
-        }.onSuccess { message = "個人辞書をTSVへ出力しました。" }
-            .onFailure { message = "辞書出力失敗: ${it.message}" }
-    }
     val referenceImport = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         runCatching {
@@ -163,7 +123,7 @@ private fun AdvancedToolsScreen(activity: AdvancedToolsActivity) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Column {
                 Text("高度設定・検証", style = MaterialTheme.typography.headlineSmall)
-                Text("通常入力を汚さず、モデル・辞書・ベンチをここへ集約します。", style = MaterialTheme.typography.bodySmall)
+                Text("通常入力を汚さず、モデル・ベンチなどの検証機能をここへ集約します。", style = MaterialTheme.typography.bodySmall)
             }
             TextButton(onClick = { activity.finish() }) { Text("戻る") }
         }
@@ -243,61 +203,13 @@ private fun AdvancedToolsScreen(activity: AdvancedToolsActivity) {
             }
         }
 
-        SectionCard("個人辞書管理 — $dictionaryCount 件") {
-            OutlinedTextField(
-                value = dictionaryQuery,
-                onValueChange = { dictionaryQuery = it },
-                label = { Text("検索: 単語 / 読み / 別名") },
-                modifier = Modifier.fillMaxWidth(),
+        SectionCard("個人辞書") {
+            Text("旧インライン編集フォームは廃止しました。検索・登録・名前変更・別名編集・並び替え・大量辞書のページングは、メイン画面上部の「個人辞書」で行います。")
+            Text(
+                "高度設定の途中で編集状態を見失ったり、見出し語変更が別項目として残る経路はもう使用しません。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = ::refreshDictionary) { Text("検索") }
-                OutlinedButton(onClick = { dictionaryImport.launch("text/*") }) { Text("取込") }
-                OutlinedButton(onClick = { dictionaryExport.launch("voicebubble-dictionary.tsv") }) { Text("TSV出力") }
-            }
-            OutlinedTextField(editTerm, { editTerm = it }, label = { Text("単語") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(editReading, { editReading = it }, label = { Text("読み") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(editAliases, { editAliases = it }, label = { Text("別名 | 区切り") }, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(editWeight, { editWeight = it }, label = { Text("重み 1–10000") }, modifier = Modifier.fillMaxWidth())
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    runCatching {
-                        dictionary.upsert(
-                            DictionaryTerm(
-                                term = editTerm,
-                                reading = editReading,
-                                aliases = editAliases.split('|').map(String::trim).filter(String::isNotBlank),
-                                weight = editWeight.toIntOrNull() ?: 100,
-                            )
-                        )
-                    }.onSuccess {
-                        refreshDictionary(); message = "辞書を保存しました: $editTerm"
-                    }.onFailure { message = "辞書保存失敗: ${it.message}" }
-                }) { Text("追加 / 更新") }
-                OutlinedButton(onClick = {
-                    if (dictionary.delete(editTerm)) {
-                        message = "辞書から削除しました: $editTerm"
-                        editTerm = ""; editReading = ""; editAliases = ""; editWeight = "100"
-                        refreshDictionary()
-                    }
-                }) { Text("削除") }
-            }
-            dictionaryRows.forEach { row ->
-                Column(
-                    Modifier.fillMaxWidth().clickable {
-                        editTerm = row.term
-                        editReading = row.reading
-                        editAliases = row.aliases.joinToString("|")
-                        editWeight = row.weight.toString()
-                    }.padding(vertical = 6.dp)
-                ) {
-                    Text(row.term, style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "読み=${row.reading.ifBlank { "—" }} / 別名=${row.aliases.joinToString().ifBlank { "—" }} / weight=${row.weight} / use=${row.useCount}",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
         }
 
         SectionCard("同一WAV ASRトーナメント") {
