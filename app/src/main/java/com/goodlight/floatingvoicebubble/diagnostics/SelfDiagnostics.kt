@@ -23,7 +23,7 @@ import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
 import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
-import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
+import com.goodlight.floatingvoicebubble.correction.CorrectionPostProcessor
 import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
@@ -61,7 +61,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 6)
+        .put("schema", 7)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -301,46 +301,49 @@ class SelfDiagnostics(
             }
 
             if (gemmaAvailable) {
-                results += probe("gemma-inference") {
-                    val raw = "今日はがんだむ見に行く"
+                results += probe("gemma-semantic-correction") {
+                    val request = CorrectionPostProcessor.correctionProbeRequest()
                     val output = GemmaCorrector(appContext, requireNotNull(modelFile).absolutePath, settings.gemmaBackend)
-                        .correct(fixedCorrectionRequest(raw))
+                        .correct(request)
                     check(output.isNotBlank()) { "Gemma returned empty output" }
-                    val decision = CorrectionGuard.choose(raw, output)
-                    "response received; guard=${if (decision.accepted) "accepted" else "rejected"}"
+                    CorrectionPostProcessor.probeFailure(output)?.let { error(it) }
+                    "real inference passed N-best/context ASR-repair contract"
                 }
             } else {
-                results += skip("gemma-inference", "model not configured or invalid")
+                results += skip("gemma-semantic-correction", "model not configured or invalid")
             }
 
+            val selectedBackend = CorrectionBackendResolver.resolve(settings, gemmaAvailable)
             val shouldProbeCloud = !settings.offlineMode &&
-                settings.correctionMode != CorrectionMode.NONE &&
+                selectedBackend == CorrectionBackend.BYOK &&
                 settings.byokModel.isNotBlank()
             if (shouldProbeCloud) {
-                results += probe("byok-live-request") {
-                    val raw = "今日はがんだむ見に行く"
+                results += probe("byok-semantic-correction") {
+                    val request = CorrectionPostProcessor.correctionProbeRequest()
                     val output = CloudCorrectorFactory.create(
                         settings.byokEndpoint,
                         settings.byokModel,
                         settingsStore.apiKey(),
-                    ).correct(fixedCorrectionRequest(raw))
+                        settings.reasoningEffort,
+                    ).correct(request)
                     check(output.isNotBlank()) { "BYOK returned empty output" }
-                    val decision = CorrectionGuard.choose(raw, output)
-                    "provider=${CloudCorrectorFactory.protocolFor(settings.byokEndpoint)}; guard=${if (decision.accepted) "accepted" else "rejected"}"
+                    CorrectionPostProcessor.probeFailure(output)?.let { error(it) }
+                    "provider=${CloudCorrectorFactory.protocolFor(settings.byokEndpoint)}; real N-best/context repair passed"
                 }
             } else {
                 val reason = when {
                     settings.offlineMode -> "offline mode"
                     settings.correctionMode == CorrectionMode.NONE -> "correction disabled"
+                    selectedBackend != CorrectionBackend.BYOK -> "cloud backend not selected"
                     else -> "BYOK model not configured"
                 }
-                results += skip("byok-live-request", reason)
+                results += skip("byok-semantic-correction", reason)
             }
         } else {
             results += skip("streaming-asr-model-load", "external probes disabled")
             results += skip("final-asr-model-load", "external probes disabled")
-            results += skip("gemma-inference", "external probes disabled")
-            results += skip("byok-live-request", "external probes disabled")
+            results += skip("gemma-semantic-correction", "external probes disabled")
+            results += skip("byok-semantic-correction", "external probes disabled")
         }
 
         val finished = System.currentTimeMillis()
@@ -397,13 +400,6 @@ class SelfDiagnostics(
         check(!rejected.accepted && rejected.text == raw) { "register-changing rewrite was not blocked" }
         "minimal-edit accept/rewrite reject vectors passed"
     }
-
-    private fun fixedCorrectionRequest(raw: String): CorrectionRequest = CorrectionRequest(
-        rawTranscript = raw,
-        alternatives = listOf(raw, "今日はガンダム見に行く"),
-        surroundingContext = "",
-        dictionaryTerms = emptyList(),
-    )
 
     private fun persistLatest(report: DiagnosticReport) {
         runCatching {
