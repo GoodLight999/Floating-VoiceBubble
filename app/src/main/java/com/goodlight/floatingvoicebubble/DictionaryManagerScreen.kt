@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -91,7 +90,7 @@ internal fun DictionaryManagerScreen(
 
     fun openNew() {
         originalTerm = null
-        editTerm = query.takeIf { it.isNotBlank() }.orEmpty()
+        editTerm = query.takeIf(String::isNotBlank).orEmpty()
         editReading = ""
         editAliases = ""
         editWeight = "100"
@@ -164,7 +163,7 @@ internal fun DictionaryManagerScreen(
         if (message.isNotBlank()) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -187,24 +186,24 @@ internal fun DictionaryManagerScreen(
                 onWeightChange = { editWeight = it.filter(Char::isDigit).take(5) },
                 onWeightPreset = { editWeight = it.toString() },
                 onSave = {
-                    val aliases = parseAliases(editAliases)
                     runCatching {
                         dictionary.save(
                             originalTerm = originalTerm,
                             term = DictionaryTerm(
                                 term = editTerm,
                                 reading = editReading,
-                                aliases = aliases,
+                                aliases = parseAliases(editAliases),
                                 weight = editWeight.toIntOrNull() ?: 100,
                             ),
                         )
                     }.onSuccess {
                         val saved = editTerm.trim()
+                        val old = originalTerm
                         editing = false
                         query = ""
                         reload(newQuery = "")
-                        message = if (originalTerm != null && originalTerm != saved) {
-                            "「${originalTerm}」を「$saved」へ変更しました。"
+                        message = if (old != null && old != saved) {
+                            "「$old」を「$saved」へ変更しました。"
                         } else {
                             "「$saved」を保存しました。"
                         }
@@ -239,7 +238,10 @@ internal fun DictionaryManagerScreen(
                 },
             )
 
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 DictionarySort.entries.forEach { candidate ->
                     FilterChip(
                         selected = sort == candidate,
@@ -252,14 +254,18 @@ internal fun DictionaryManagerScreen(
                 }
             }
 
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 Button(onClick = ::openNew) { Text("＋ 新規登録") }
                 OutlinedButton(onClick = { dictionaryImport.launch("text/*") }) { Text("取込") }
                 OutlinedButton(onClick = { dictionaryExport.launch("voicebubble-dictionary.tsv") }) { Text("TSV出力") }
             }
 
             Text(
-                if (query.isBlank()) "${rows.size}件を表示" else "「$query」の検索結果 ${rows.size}件${if (hasMore) "以上" else ""}",
+                if (query.isBlank()) "$total件中 ${rows.size}件を表示"
+                else "「$query」の検索結果 ${rows.size}件${if (hasMore) "以上" else ""}",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -282,7 +288,7 @@ internal fun DictionaryManagerScreen(
                 if (rows.isEmpty()) {
                     item {
                         Column(
-                            Modifier.fillMaxWidth().padding(vertical = 40.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
@@ -303,10 +309,10 @@ internal fun DictionaryManagerScreen(
             text = { Text("「$target」を削除します。元には戻せません。") },
             confirmButton = {
                 Button(onClick = {
-                    if (dictionary.delete(target)) {
-                        message = "「$target」を削除しました。"
+                    message = if (dictionary.delete(target)) {
+                        "「$target」を削除しました。"
                     } else {
-                        message = "削除対象が見つかりませんでした。"
+                        "削除対象が見つかりませんでした。"
                     }
                     confirmDelete = false
                     editing = false
@@ -378,7 +384,10 @@ private fun ColumnScope.DictionaryEditor(
         )
 
         Text("優先度", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             listOf(100 to "標準", 500 to "強め", 1000 to "最優先").forEach { (value, label) ->
                 FilterChip(
                     selected = weight.toIntOrNull() == value,
@@ -397,12 +406,13 @@ private fun ColumnScope.DictionaryEditor(
         )
 
         Spacer(Modifier.height(4.dp))
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             Button(onClick = onSave, enabled = term.isNotBlank()) { Text("保存") }
             OutlinedButton(onClick = onCancel) { Text("キャンセル") }
-            if (originalTerm != null) {
-                TextButton(onClick = onDelete) { Text("削除") }
-            }
+            if (originalTerm != null) TextButton(onClick = onDelete) { Text("削除") }
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -416,22 +426,14 @@ private fun DictionaryRow(row: DictionaryTerm, onClick: () -> Unit) {
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(row.term, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            Text(
-                priorityLabel(row.weight),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            Text(priorityLabel(row.weight), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
         }
         if (row.reading.isNotBlank()) {
             Text(row.reading, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (row.aliases.isNotEmpty()) {
             val preview = row.aliases.take(4).joinToString(" · ") + if (row.aliases.size > 4) " · …" else ""
-            Text(
-                "別名: $preview",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Text("別名: $preview", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text(
             "weight ${row.weight} · 使用 ${row.useCount}回",
@@ -443,7 +445,7 @@ private fun DictionaryRow(row: DictionaryTerm, onClick: () -> Unit) {
 
 private fun parseAliases(text: String): List<String> = text
     .lineSequence()
-    .flatMap { line -> line.split('|', '／', ',', '、').asSequence() }
+    .flatMap { it.split('|', '／', ',', '、').asSequence() }
     .map(String::trim)
     .filter(String::isNotBlank)
     .distinctBy { it.lowercase() }
