@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.LineBreakMode
 import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -35,5 +36,21 @@ class CorrectionPromptRepairTest {
         val prompt = CorrectionPrompt.system(request(RecognitionRepairMode.OFF))
         assertTrue(prompt.contains("語句そのものの音声認識誤りは直さない"))
         assertFalse(prompt.contains("強めに復元する"))
+    }
+
+    @Test
+    fun smartLineBreakPromptDoesNotStopAfterOneBreakAndHandlesCommaOnlyAsr() {
+        val prompt = CorrectionPrompt.system(
+            request(RecognitionRepairMode.NORMAL).copy(
+                rawTranscript = "長い発話で、内部句点がなく、読点だけが続く場合も、複数段落へ分けたい",
+                preferences = CorrectionPreferences(
+                    lineBreakMode = LineBreakMode.SMART,
+                    recognitionRepairMode = RecognitionRepairMode.NORMAL,
+                ),
+            ),
+        )
+        assertTrue(prompt.contains("回数を1回に固定しない"))
+        assertTrue(prompt.contains("読点「、」だけでも"))
+        assertTrue(prompt.contains("必要に応じて複数回改行する"))
     }
 }
