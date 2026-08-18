@@ -66,7 +66,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
      * useful conversational context after the editor is cleared without turning the service into a
      * screen scraper. Password fields are excluded entirely.
      */
-    private val recentVoiceContext = LinkedHashMap<ContextKey, MutableList<RecentVoice>>()
+    private val recentVoiceContext = RecentVoiceContextBuffer()
     private val h by lazy { android.os.Handler(mainLooper) }
 
     override fun onCreateInputMethod(): InputMethod =
@@ -411,7 +411,6 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
     private fun correctionContext(capturedTarget: Target?): String {
         if (capturedTarget == null || isSensitive(capturedTarget)) return ""
-        pruneRecentContext()
         val currentEditor = if (same(capturedTarget)) {
             runCatching {
                 input?.currentInputConnection?.getSurroundingText(700, 300, 0)?.text?.toString().orEmpty()
@@ -419,40 +418,12 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         } else {
             ""
         }
-        val recent = recentVoiceContext[ContextKey.from(capturedTarget)].orEmpty()
-            .filterNot { item -> currentEditor.isNotBlank() && currentEditor.contains(item.text) }
-            .takeLast(MAX_RECENT_UTTERANCES)
-            .joinToString("\n") { it.text }
-        return buildString {
-            if (recent.isNotBlank()) {
-                appendLine("[RECENT_VOICE_INPUT]")
-                appendLine(recent)
-            }
-            if (currentEditor.isNotBlank()) {
-                if (isNotEmpty()) appendLine()
-                appendLine("[CURRENT_EDITOR]")
-                append(currentEditor)
-            }
-        }.takeLast(MAX_CONTEXT_CHARS)
+        return recentVoiceContext.build(capturedTarget.contextKey(), currentEditor)
     }
 
     private fun rememberCommitted(capturedTarget: Target?, text: String, result: CommitResult) {
         if (capturedTarget == null || result == CommitResult.FAILED || text.isBlank() || isSensitive(capturedTarget)) return
-        pruneRecentContext()
-        val key = ContextKey.from(capturedTarget)
-        val entries = recentVoiceContext.getOrPut(key) { mutableListOf() }
-        val normalized = text.trim().takeLast(MAX_SINGLE_CONTEXT_CHARS)
-        if (entries.lastOrNull()?.text != normalized) entries += RecentVoice(normalized, System.currentTimeMillis())
-        while (entries.size > MAX_RECENT_UTTERANCES) entries.removeAt(0)
-    }
-
-    private fun pruneRecentContext(now: Long = System.currentTimeMillis()) {
-        val iterator = recentVoiceContext.entries.iterator()
-        while (iterator.hasNext()) {
-            val entry = iterator.next()
-            entry.value.removeAll { now - it.atMs > RECENT_CONTEXT_TTL_MS }
-            if (entry.value.isEmpty()) iterator.remove()
-        }
+        recentVoiceContext.add(capturedTarget.contextKey(), text)
     }
 
     private fun isSensitive(capturedTarget: Target): Boolean {
@@ -547,15 +518,9 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val fieldId: Int,
         val fieldName: String?,
         val inputType: Int,
-    )
-
-    private data class ContextKey(val packageName: String, val fieldId: Int, val fieldName: String?) {
-        companion object {
-            fun from(target: Target) = ContextKey(target.packageName, target.fieldId, target.fieldName)
-        }
+    ) {
+        fun contextKey() = VoiceContextKey(packageName, fieldId, fieldName)
     }
-
-    private data class RecentVoice(val text: String, val atMs: Long)
 
     private class TrackingInputMethod(
         service: AccessibilityService,
@@ -574,12 +539,5 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             super.onFinishInput()
             changed(false)
         }
-    }
-
-    companion object {
-        private const val RECENT_CONTEXT_TTL_MS = 10 * 60 * 1000L
-        private const val MAX_RECENT_UTTERANCES = 3
-        private const val MAX_SINGLE_CONTEXT_CHARS = 700
-        private const val MAX_CONTEXT_CHARS = 2_000
     }
 }
