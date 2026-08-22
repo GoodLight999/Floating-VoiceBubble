@@ -110,11 +110,11 @@ class ByokEndpointResolverTest {
     }
 
     @Test
-    fun zaiDefaultExplicitlyDisablesThinkingForLowLatencyCorrection() {
+    fun zaiDefaultOmitsThinkingOverrideAndUsesProviderDefault() {
         val options = OpenAiProviderCompatibility.resolve(
             "https://api.z.ai/api/coding/paas/v4/chat/completions", "GLM-4.7", ReasoningEffort.DEFAULT,
         )
-        assertEquals(false, options.zaiThinkingEnabled)
+        assertNull(options.zaiThinkingEnabled)
         assertTrue(options.disableSampling)
         assertTrue(options.zaiCodingPlanEndpoint)
     }
@@ -142,7 +142,7 @@ class ByokEndpointResolverTest {
     }
 
     @Test
-    fun strongRepairRetriesRawEchoEvenWithoutNBestDisagreement() {
+    fun strongRepairDoesNotTriggerHiddenSecondModelCall() {
         val request = CorrectionRequest(
             rawTranscript = "取り合いが聞き取りミスをした",
             alternatives = listOf("取り合いが聞き取りミスをした"),
@@ -150,7 +150,7 @@ class ByokEndpointResolverTest {
             dictionaryTerms = emptyList(),
             preferences = CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.STRONG),
         )
-        assertTrue(CorrectionPostProcessor.shouldRetryNoOp(request, request.rawTranscript))
+        assertFalse(CorrectionPostProcessor.shouldRetryNoOp(request, request.rawTranscript))
     }
 
     @Test
