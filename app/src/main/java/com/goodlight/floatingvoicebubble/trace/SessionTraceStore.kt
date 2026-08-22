@@ -28,6 +28,12 @@ data class FinalizationTrace(
     val correctionReasoning: String? = null,
     val correctionLatencyMs: Long? = null,
     val correctionAttempts: Int = if (correctionAttempted) 1 else 0,
+    val correctionHttpStatus: Int? = null,
+    val correctionFailureStage: String? = null,
+    val correctionErrorClass: String? = null,
+    val correctionResponsePresent: Boolean = correctionModelResponded,
+    val correctionEndpoint: String? = null,
+    val correctionIntegrityResult: String? = null,
     val fallbackSource: String? = null,
     val finalAsrId: String = "live-result",
     val finalAsrLatencyMs: Long? = null,
@@ -52,7 +58,7 @@ class SessionTraceStore(context: Context) {
             return
         }
         val json = JSONObject()
-            .put("schema", 5)
+            .put("schema", 6)
             .put("sessionId", trace.outcome.sessionId)
             .put("liveRecognizer", trace.outcome.recognizerKind)
             .put("corrector", trace.correctorId)
@@ -78,6 +84,12 @@ class SessionTraceStore(context: Context) {
             .put("correctionModel", trace.correctionModel ?: JSONObject.NULL)
             .put("correctionReasoning", trace.correctionReasoning ?: JSONObject.NULL)
             .put("correctionLatencyMs", trace.correctionLatencyMs ?: JSONObject.NULL)
+            .put("correctionHttpStatus", trace.correctionHttpStatus ?: JSONObject.NULL)
+            .put("correctionFailureStage", trace.correctionFailureStage ?: JSONObject.NULL)
+            .put("correctionErrorClass", trace.correctionErrorClass ?: JSONObject.NULL)
+            .put("correctionResponsePresent", trace.correctionResponsePresent)
+            .put("correctionEndpoint", trace.correctionEndpoint ?: JSONObject.NULL)
+            .put("correctionIntegrityResult", trace.correctionIntegrityResult ?: JSONObject.NULL)
             .put("fallbackSource", trace.fallbackSource ?: JSONObject.NULL)
             .put("correctionModelResponded", trace.correctionModelResponded)
             .put("correctionModelChanged", trace.correctionModelChanged)
