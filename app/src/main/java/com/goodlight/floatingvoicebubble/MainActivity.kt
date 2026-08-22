@@ -8,20 +8,14 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 
 class MainActivity : ComponentActivity() {
@@ -34,7 +28,6 @@ class MainActivity : ComponentActivity() {
         refreshRuntimeStatus()
         setContent {
             VoiceBubbleTheme {
-                var showDetailed by remember { mutableStateOf(false) }
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
@@ -45,28 +38,13 @@ class MainActivity : ComponentActivity() {
                             .fillMaxSize()
                             .windowInsetsPadding(WindowInsets.safeDrawing),
                     ) {
-                        if (showDetailed) {
-                            Column(Modifier.fillMaxSize()) {
-                                TextButton(onClick = { showDetailed = false }) { Text("← 通常設定") }
-                                Box(Modifier.weight(1f)) {
-                                    VoiceBubbleSettingsScreen(
-                                        activity = this@MainActivity,
-                                        microphoneGranted = microphoneGranted,
-                                        accessibilityEnabled = accessibilityEnabled,
-                                        onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                                    )
-                                }
-                            }
-                        } else {
-                            HomeSettingsScreen(
-                                activity = this@MainActivity,
-                                microphoneGranted = microphoneGranted,
-                                accessibilityEnabled = accessibilityEnabled,
-                                refreshRevision = settingsRevision,
-                                onRuntimeStatusChanged = ::refreshRuntimeStatus,
-                                onOpenDetailedSettings = { showDetailed = true },
-                            )
-                        }
+                        HomeSettingsScreen(
+                            activity = this@MainActivity,
+                            microphoneGranted = microphoneGranted,
+                            accessibilityEnabled = accessibilityEnabled,
+                            refreshRevision = settingsRevision,
+                            onRuntimeStatusChanged = ::refreshRuntimeStatus,
+                        )
                     }
                 }
             }
@@ -81,8 +59,10 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshRuntimeStatus() {
         microphoneGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        val expected = ComponentName(this, com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService::class.java)
-            .flattenToString()
+        val expected = ComponentName(
+            this,
+            com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService::class.java,
+        ).flattenToString()
         accessibilityEnabled = Settings.Secure.getString(
             contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
