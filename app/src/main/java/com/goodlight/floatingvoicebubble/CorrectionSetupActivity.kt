@@ -42,14 +42,20 @@ import androidx.compose.ui.unit.dp
 import com.goodlight.floatingvoicebubble.correction.ByokEndpointResolver
 import com.goodlight.floatingvoicebubble.correction.ByokModelDiscovery
 import com.goodlight.floatingvoicebubble.correction.ByokModelInfo
-import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
 import com.goodlight.floatingvoicebubble.correction.CorrectionPostProcessor
+import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
+import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
+import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
+import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.model.InstalledOfficialModel
 import com.goodlight.floatingvoicebubble.model.ModelInstallProgress
 import com.goodlight.floatingvoicebubble.model.OfficialModelCatalog
 import com.goodlight.floatingvoicebubble.model.OfficialModelEntry
 import com.goodlight.floatingvoicebubble.model.OfficialModelInstaller
+import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
+import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import java.util.Locale
+import java.util.concurrent.Executors
 
 class CorrectionSetupActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -74,8 +80,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     val store = remember(activity) { SettingsStore(activity) }
     var settings by remember { mutableStateOf(store.load()) }
     var endpoint by rememberSaveable { mutableStateOf(settings.byokEndpoint) }
-    // Do not copy an unsaved secret into SavedState/Bundle. Persisted keys are restored securely
-    // from SettingsStore/Android Keystore; an in-progress key is intentionally process-local.
+    // Unsaved secrets intentionally stay process-local; persisted keys are Android-Keystore protected.
     var apiKey by remember { mutableStateOf(store.apiKey()) }
     var model by rememberSaveable { mutableStateOf(settings.byokModel) }
     var reasoningEffort by rememberSaveable { mutableStateOf(settings.reasoningEffort) }
@@ -85,12 +90,15 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     var message by rememberSaveable { mutableStateOf("") }
     var progress by remember { mutableStateOf<ModelInstallProgress?>(null) }
 
-    fun saveByok(): AppSettings {
+    fun saveByok(
+        modelValue: String = model,
+        reasoningValue: ReasoningEffort = reasoningEffort,
+    ): AppSettings {
         val updated = store.update {
             it.copy(
                 byokEndpoint = endpoint.trim(),
-                byokModel = model.trim(),
-                reasoningEffort = reasoningEffort,
+                byokModel = modelValue.trim(),
+                reasoningEffort = reasoningValue,
             )
         }
         store.setApiKey(apiKey.trim())
@@ -98,8 +106,18 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         return updated
     }
 
-    val resolvedPreview = runCatching { ByokEndpointResolver.resolve(endpoint) }.getOrNull()
     val selectedModelInfo = models.firstOrNull { it.id == model }
+    val baseCapability = ReasoningCapabilities.capability(endpoint, model)
+    val openRouterMetadataSaysNoReasoning = ByokEndpointResolver.isOpenRouter(endpoint) &&
+        selectedModelInfo?.supportedParameters?.isNotEmpty() == true &&
+        selectedModelInfo.supportsReasoning.not()
+    val reasoningChoices = if (openRouterMetadataSaysNoReasoning) {
+        listOf(ReasoningEffort.DEFAULT)
+    } else {
+        baseCapability.choices
+    }
+    val normalizedReasoning = ReasoningCapabilities.normalize(endpoint, model, reasoningEffort)
+
     val filteredModels = models.asSequence()
         .filter { item ->
             val query = modelFilter.trim()
@@ -115,27 +133,20 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text("補正モデル", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Text(
-                    "APIを登録し、使えるモデルを一覧から選びます。モデルIDの手入力は通常不要です。",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+            Text("モデル・API", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             TextButton(onClick = activity::finish) { Text("戻る") }
         }
 
-        Text("使用する補正", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("補正に使うもの", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             CorrectionMode.entries.forEach { mode ->
                 FilterChip(
                     selected = settings.correctionMode == mode,
@@ -143,10 +154,10 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                     label = {
                         Text(
                             when (mode) {
-                                CorrectionMode.AUTO -> "自動"
+                                CorrectionMode.AUTO -> "自動選択"
                                 CorrectionMode.BYOK -> "クラウドAPI"
                                 CorrectionMode.GEMMA -> "端末内Gemma"
-                                CorrectionMode.NONE -> "補正なし"
+                                CorrectionMode.NONE -> "補正しない"
                             },
                         )
                     },
@@ -156,16 +167,10 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
 
         HorizontalDivider()
         Text("クラウドAPI", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-            "OpenAI / OpenRouter / OpenAI互換 / Anthropic / Geminiに対応します。URLとAPIキーを入れたら、次の「モデルを取得」を押してください。",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
         OutlinedTextField(
             value = endpoint,
             onValueChange = { endpoint = it; models = emptyList(); message = "" },
             label = { Text("API URL") },
-            supportingText = { Text("例: https://openrouter.ai  または providerのAPI URL") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -173,21 +178,11 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             value = apiKey,
             onValueChange = { apiKey = it; models = emptyList(); message = "" },
             label = { Text("APIキー") },
-            supportingText = { Text("端末のAndroid Keystoreで暗号化して保存します") },
+            supportingText = { Text("保存時にAndroid Keystoreで暗号化します") },
             visualTransformation = PasswordVisualTransformation(),
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-
-        resolvedPreview?.let { resolved ->
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("接続先の確認", style = MaterialTheme.typography.labelLarge)
-                    Text("生成: ${resolved.generationUrl}", style = MaterialTheme.typography.bodySmall)
-                    Text("モデル取得: ${resolved.modelsUrl}", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
 
         OutlinedButton(
             onClick = {
@@ -199,9 +194,9 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                             models = fetched
                             busyAction = null
                             message = if (fetched.isEmpty()) {
-                                "接続はできましたが、選択可能なテキスト生成モデルが0件でした。"
+                                "接続できましたが、選べるモデルが見つかりませんでした。"
                             } else {
-                                "${fetched.size}件取得しました。下の検索欄から選んでください。"
+                                "${fetched.size}件のモデルを取得しました。"
                             }
                         } }
                         .onFailure { failure -> activity.runOnUiThread {
@@ -211,121 +206,109 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                 }, "VoiceBubble-ModelDiscovery").start()
             },
             enabled = busyAction == null && endpoint.trim().startsWith("https://"),
-        ) { Text(if (busyAction == "models") "取得中…" else "APIからモデルを取得") }
+        ) { Text(if (busyAction == "models") "取得中…" else "モデル一覧を取得") }
 
         if (models.isNotEmpty()) {
-            Text("モデルを選ぶ", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             OutlinedTextField(
                 value = modelFilter,
                 onValueChange = { modelFilter = it },
                 label = { Text("モデルを検索") },
-                supportingText = { Text("名前・ID・説明文から絞り込みます") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                "${models.size}件中 ${filteredModels.size}件を表示" +
-                    if (models.size > MAX_VISIBLE_MODELS && modelFilter.isBlank()) "（検索すると絞れます）" else "",
+                "${models.size}件中 ${filteredModels.size}件を表示",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 filteredModels.forEach { item ->
-                    ModelRow(item = item, selected = model == item.id) { model = item.id }
+                    ModelRow(item = item, selected = model == item.id) {
+                        model = item.id
+                        val normalized = ReasoningCapabilities.normalize(endpoint, item.id, reasoningEffort)
+                        reasoningEffort = normalized
+                        saveByok(modelValue = item.id, reasoningValue = normalized)
+                        message = "${item.displayName} を使用するモデルとして保存しました。"
+                    }
                 }
             }
-        }
-
-        if (models.isEmpty()) {
+        } else {
             OutlinedTextField(
                 value = model,
                 onValueChange = { model = it },
-                label = { Text("モデルID（一覧取得できないAPIだけ）") },
-                supportingText = { Text("通常は上のモデル一覧から選択してください") },
+                label = { Text("モデルID") },
+                supportingText = { Text("一覧を取得できないAPIの場合だけ手入力します") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-        } else if (model.isNotBlank()) {
-            Text("選択中: $model", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
         }
 
-        Text("推論の深さ", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-        Text(
-            "音声の整形は通常それほど深い推論を必要としません。遅い場合は「低」、難しい固有名詞や文脈判定を重視するなら上げます。「モデル既定」は余計なパラメータを送りません。",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            ReasoningEffort.entries.forEach { effort ->
-                FilterChip(
-                    selected = reasoningEffort == effort,
-                    onClick = { reasoningEffort = effort },
-                    label = { Text(reasoningLabel(effort)) },
-                )
+        if (model.isNotBlank()) {
+            Text("推論の深さ", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                reasoningChoices.forEach { effort ->
+                    FilterChip(
+                        selected = normalizedReasoning == effort,
+                        onClick = {
+                            reasoningEffort = effort
+                            saveByok(reasoningValue = effort)
+                            message = "推論の深さを「${ReasoningCapabilities.label(endpoint, model, effort)}」に保存しました。"
+                        },
+                        label = { Text(ReasoningCapabilities.label(endpoint, model, effort)) },
+                    )
+                }
             }
-        }
-        selectedModelInfo?.let { info ->
-            if (ByokEndpointResolver.isOpenRouter(endpoint) && info.supportedParameters.isNotEmpty()) {
-                Text(
-                    if (info.supportsReasoning) "このモデルはOpenRouter上でreasoning対応です。"
-                    else "このモデルのOpenRouter metadataにはreasoning対応がありません。推論深度は「モデル既定」を推奨します。",
-                    color = if (info.supportsReasoning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+            Text(
+                if (openRouterMetadataSaysNoReasoning) {
+                    "このモデルはOpenRouterのモデル情報上、推論深度の指定に対応していません。"
+                } else {
+                    baseCapability.note
+                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
 
-        Text(
-            "実補正テストは単なるHTTP疎通ではありません。N-bestと周辺文脈を渡し、『取り合い』→『聞き取りAI』を実際に復元できることまで確認します。RAW丸写しは失敗扱いです。",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             OutlinedButton(
                 onClick = {
                     busyAction = "test"
-                    message = "選択したモデルで文脈付き実補正を試しています…"
+                    val persisted = saveByok()
+                    message = "本番と同じ補正経路で確認しています…"
                     Thread({
-                        runCatching {
-                            val output = CloudCorrectorFactory.create(
-                                endpoint.trim(),
-                                model.trim(),
-                                apiKey.trim(),
-                                reasoningEffort,
-                            ).correct(CorrectionPostProcessor.correctionProbeRequest())
-                            CorrectionPostProcessor.probeFailure(output)?.let { error(it) }
-                            output
-                        }.onSuccess { output -> activity.runOnUiThread {
-                            busyAction = null
-                            message = "実補正テスト成功: ${output.take(160)}"
-                        } }.onFailure { failure -> activity.runOnUiThread {
-                            busyAction = null
-                            message = "実補正テスト失敗: ${failure.message ?: failure.javaClass.simpleName}"
-                        } }
-                    }, "VoiceBubble-ByokSemanticTest").start()
+                        runCatching { runProductionCorrectionProbe(activity, store, persisted) }
+                            .onSuccess { report -> activity.runOnUiThread {
+                                busyAction = null
+                                message = report
+                            } }
+                            .onFailure { failure -> activity.runOnUiThread {
+                                busyAction = null
+                                message = "実補正テスト失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                            } }
+                    }, "VoiceBubble-ProductionCorrectionTest").start()
                 },
                 enabled = busyAction == null && endpoint.trim().startsWith("https://") && model.isNotBlank(),
-            ) { Text(if (busyAction == "test") "実補正中…" else "このモデルで実補正テスト") }
+            ) { Text(if (busyAction == "test") "実補正中…" else "本番と同じ経路で実補正テスト") }
             Button(
                 onClick = {
                     saveByok()
-                    message = "API・モデル・推論深度を保存しました。"
+                    message = "API設定を保存しました。"
                 },
                 enabled = busyAction == null && endpoint.trim().startsWith("https://") && model.isNotBlank(),
-            ) { Text("設定を保存") }
+            ) { Text("API設定を保存") }
         }
 
         if (message.isNotBlank()) {
             Card(
                 colors = CardDefaults.cardColors(
-                    containerColor = if ("失敗" in message || "0件" in message) MaterialTheme.colorScheme.errorContainer
+                    containerColor = if ("失敗" in message || "見つかりません" in message) MaterialTheme.colorScheme.errorContainer
                     else MaterialTheme.colorScheme.surfaceVariant,
                 ),
             ) {
                 Text(
                     message,
                     modifier = Modifier.padding(12.dp),
-                    color = if ("失敗" in message || "0件" in message) MaterialTheme.colorScheme.onErrorContainer
+                    color = if ("失敗" in message || "見つかりません" in message) MaterialTheme.colorScheme.onErrorContainer
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -333,19 +316,15 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         }
 
         HorizontalDivider()
-        Text("端末内Gemma 4", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text("端末内Gemma", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
-            if (settings.gemmaModelPath.isBlank()) "まだモデルを入れていません。" else "導入済み: ${settings.gemmaVariant.name}",
+            if (settings.gemmaModelPath.isBlank()) "未導入" else "導入済み: ${settings.gemmaVariant.name}",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(
-            "ネットを使わず補正したい場合のモデルです。E2Bは軽量、E4Bは精度寄りです。ダウンロード後にサイズとSHA-256を検証してから使います。",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("E2Bは軽量、E4Bは精度寄りです。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             GemmaInstallButton(
-                title = "E2Bを自動導入",
+                title = "E2Bを導入",
                 entry = OfficialModelCatalog.gemmaE2B,
                 enabled = busyAction == null,
                 onStart = { busyAction = it.id; progress = null; message = "${it.title} を取得しています…" },
@@ -361,7 +340,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                 activity = activity,
             )
             GemmaInstallButton(
-                title = "E4Bを自動導入",
+                title = "E4Bを導入",
                 entry = OfficialModelCatalog.gemmaE4B,
                 enabled = busyAction == null,
                 onStart = { busyAction = it.id; progress = null; message = "${it.title} を取得しています…" },
@@ -380,6 +359,60 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         progress?.let { p ->
             Text(formatProgress(p), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
+    }
+}
+
+private fun runProductionCorrectionProbe(
+    activity: CorrectionSetupActivity,
+    store: SettingsStore,
+    persisted: AppSettings,
+): String {
+    val probe = CorrectionPostProcessor.correctionProbeRequest()
+    val now = System.currentTimeMillis()
+    val outcome = RecognitionOutcome(
+        sessionId = "settings-production-probe-$now",
+        rawTranscript = probe.rawTranscript,
+        alternatives = probe.alternatives,
+        audioFile = null,
+        startedAtMs = now,
+        recognitionFinishedAtMs = now,
+        recognizerKind = "settings-production-probe",
+    )
+    val worker = Executors.newCachedThreadPool()
+    return try {
+        PersonalDictionary(activity).use { dictionary ->
+            val engine = FinalizationEngine(
+                context = activity,
+                settingsStore = store,
+                dictionary = dictionary,
+                traceStore = SessionTraceStore(activity),
+                finalAsrModelStore = FinalAsrModelStore(activity),
+                inferenceWorker = worker,
+            )
+            val testSettings = persisted.copy(
+                correctionMode = CorrectionMode.BYOK,
+                finalAsrMode = FinalAsrMode.LIVE_RESULT,
+                recognitionRepairMode = RecognitionRepairMode.STRONG,
+                correctionAddCommas = true,
+                correctionAddPeriods = true,
+                correctionRemoveFillers = true,
+                correctionLineBreakMode = LineBreakMode.NONE,
+                keepSessionTraces = false,
+            )
+            val result = engine.finalize(
+                outcome = outcome,
+                surrounding = probe.surroundingContext,
+                settings = testSettings,
+                bypassCorrection = false,
+            )
+            result.correctionError?.let { error(it) }
+            check(result.correctionModelResponded) { "補正モデルから本文が返りませんでした。" }
+            CorrectionPostProcessor.probeFailure(result.finalText)?.let { error(it) }
+            val latency = result.correctionLatencyMs?.let { "${it}ms" } ?: "計測不能"
+            "実補正テスト成功（$latency）: ${result.finalText.take(160)}"
+        }
+    } finally {
+        worker.shutdownNow()
     }
 }
 
@@ -403,7 +436,7 @@ private fun ModelRow(item: ByokModelInfo, selected: Boolean, onSelect: () -> Uni
         }
         val metadata = buildList {
             item.contextLength?.let { add("context ${formatTokenCount(it)}") }
-            if (item.supportsReasoning) add("reasoning")
+            if (item.supportsReasoning) add("推論設定対応")
             if (item.promptPricePerMillion != null || item.completionPricePerMillion != null) {
                 val input = item.promptPricePerMillion?.let(::formatPrice) ?: "?"
                 val output = item.completionPricePerMillion?.let(::formatPrice) ?: "?"
@@ -444,17 +477,6 @@ private fun GemmaInstallButton(
         },
         enabled = enabled,
     ) { Text(title) }
-}
-
-private fun reasoningLabel(value: ReasoningEffort): String = when (value) {
-    ReasoningEffort.DEFAULT -> "モデル既定"
-    ReasoningEffort.NONE -> "なし"
-    ReasoningEffort.MINIMAL -> "最小"
-    ReasoningEffort.LOW -> "低"
-    ReasoningEffort.MEDIUM -> "中"
-    ReasoningEffort.HIGH -> "高"
-    ReasoningEffort.XHIGH -> "xhigh"
-    ReasoningEffort.MAX -> "max"
 }
 
 private fun formatTokenCount(value: Long): String = when {
