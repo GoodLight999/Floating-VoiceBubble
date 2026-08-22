@@ -1,43 +1,35 @@
 package com.goodlight.floatingvoicebubble.correction
 
-import com.goodlight.floatingvoicebubble.LineBreakMode
 import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import kotlin.math.max
 
+/**
+ * Output-integrity check, not content moderation.
+ *
+ * It catches only structurally broken model output and the explicit "do not repair words" contract.
+ * Punctuation, filler handling, paragraphing and normal ASR repair are not grounds for rejecting the
+ * whole model response. The historical class name is retained temporarily to avoid a risky mass
+ * rename during stabilization; user-facing UI must never call this a "safety guard".
+ */
 object CorrectionGuard {
     data class Decision(val text: String, val accepted: Boolean, val normalizedDistance: Double, val reason: String? = null)
 
     fun choose(raw: String, modelOutput: String, preferences: CorrectionPreferences): Decision {
         val decision = choose(
-            raw,
-            modelOutput,
+            raw = raw,
+            modelOutput = modelOutput,
             allowRegisterRewrite = preferences.registerRewriteRequested,
             ignoreLineBreaksForDistance = preferences.lineBreakRewriteRequested,
             recognitionRepairMode = preferences.recognitionRepairMode,
         )
         if (!decision.accepted) return decision
-        val cleaned = decision.text
-        if (!preferences.addCommas && cleaned.count { it == '、' } > raw.count { it == '、' }) {
-            return decision.copy(text = raw, accepted = false, reason = "comma-not-allowed")
-        }
-        if (!preferences.addPeriods && cleaned.count { it == '。' } > raw.count { it == '。' }) {
-            return decision.copy(text = raw, accepted = false, reason = "period-not-allowed")
-        }
-        if (!preferences.removeFillers && FILLERS.any { filler ->
-                occurrences(cleaned, filler) < occurrences(raw, filler)
-            }
-        ) {
-            return decision.copy(text = raw, accepted = false, reason = "filler-removal-not-allowed")
-        }
-        if (preferences.lineBreakMode == LineBreakMode.NONE && newlineCount(cleaned) > newlineCount(raw)) {
-            return decision.copy(text = raw, accepted = false, reason = "linebreak-not-allowed")
-        }
+
         if (
             preferences.recognitionRepairMode == RecognitionRepairMode.OFF &&
             !preferences.registerRewriteRequested &&
-            lexicalSkeleton(cleaned, preferences.removeFillers) != lexicalSkeleton(raw, preferences.removeFillers)
+            lexicalSkeleton(decision.text, preferences.removeFillers) != lexicalSkeleton(raw, preferences.removeFillers)
         ) {
-            return decision.copy(text = raw, accepted = false, reason = "recognition-repair-off")
+            return decision.copy(text = raw, accepted = false, reason = "word-changes-disabled")
         }
         return decision
     }
@@ -61,32 +53,29 @@ object CorrectionGuard {
         val distance = levenshtein(rawPoints, newPoints)
         val normalized = distance.toDouble() / max(rawPoints.size, newPoints.size).coerceAtLeast(1)
 
-        // Character edit distance is intentionally diagnostic only. Japanese ASR can corrupt an
-        // entire phrase while preserving the intended meaning and approximate length, so rejecting
-        // a correction merely because many code points changed systematically defeats ASR repair.
-        // Safety is enforced by explicit user-option invariants above and coarse runaway bounds here.
+        // Edit distance is diagnostic only. Japanese ASR repair can legitimately replace an entire
+        // multi-character phrase. Reject only output that is structurally implausible for a post-edit.
         val rawLength = rawPoints.size.coerceAtLeast(1)
         val newLength = newPoints.size
-        val maxLength = when {
-            allowRegisterRewrite -> max(rawLength * 4, rawLength + 48)
-            recognitionRepairMode == RecognitionRepairMode.STRONG -> max(rawLength * 3, rawLength + 40)
-            else -> max(rawLength * 2, rawLength + 16)
+        val expansionLimit = when {
+            allowRegisterRewrite -> max(rawLength * 6, rawLength + 96)
+            recognitionRepairMode == RecognitionRepairMode.STRONG -> max(rawLength * 5, rawLength + 80)
+            else -> max(rawLength * 4, rawLength + 64)
         }
-        if (newLength > maxLength) {
-            return Decision(raw, false, normalized, "runaway-expansion")
+        if (newLength > expansionLimit) {
+            return Decision(raw, false, normalized, "output-expanded-too-much")
         }
 
-        // A large contraction is much more characteristic of summarization/content loss than ASR
-        // repair. Do not apply this to short utterances where removing fillers can be proportionally
-        // large, and keep the threshold deliberately coarse rather than lexical-distance based.
-        if (rawLength >= 32) {
-            val minLength = when {
-                allowRegisterRewrite -> (rawLength * 0.35).toInt()
-                recognitionRepairMode == RecognitionRepairMode.STRONG -> (rawLength * 0.42).toInt()
-                else -> (rawLength * 0.50).toInt()
+        // Only very large, long-utterance content loss is rejected. Normal filler removal, concise
+        // punctuation repair and sentence restructuring must never trigger this check.
+        if (rawLength >= 80) {
+            val minimum = when {
+                allowRegisterRewrite -> (rawLength * 0.18).toInt()
+                recognitionRepairMode == RecognitionRepairMode.STRONG -> (rawLength * 0.22).toInt()
+                else -> (rawLength * 0.25).toInt()
             }.coerceAtLeast(1)
-            if (newLength < minLength) {
-                return Decision(raw, false, normalized, "runaway-contraction")
+            if (newLength < minimum) {
+                return Decision(raw, false, normalized, "output-lost-too-much")
             }
         }
 
@@ -114,20 +103,6 @@ object CorrectionGuard {
     }
 
     private fun stripLineBreaks(value: String): String = value.replace("\r", "").replace("\n", "")
-
-    private fun newlineCount(value: String): Int = value.count { it == '\n' }
-
-    private fun occurrences(text: String, needle: String): Int {
-        if (needle.isEmpty()) return 0
-        var count = 0
-        var index = 0
-        while (true) {
-            index = text.indexOf(needle, index)
-            if (index < 0) return count
-            count += 1
-            index += needle.length
-        }
-    }
 
     private fun levenshtein(a: IntArray, b: IntArray): Int {
         if (a.isEmpty()) return b.size
