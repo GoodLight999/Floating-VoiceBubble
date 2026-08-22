@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble
 
+import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -18,10 +19,21 @@ class HomeSettingsUiTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun reasoningControlIsVisibleOnFirstPaintAndActuallyPersistsSelection() {
+    fun selectedCloudModelShowsRealReasoningChoicesAndPersistsSelection() {
         val store = SettingsStore(composeRule.activity)
         val previous = store.load()
         try {
+            store.update {
+                it.copy(
+                    correctionMode = CorrectionMode.BYOK,
+                    byokEndpoint = "https://openrouter.ai/api/v1/chat/completions",
+                    byokModel = "provider/reasoning-model",
+                    reasoningEffort = ReasoningEffort.DEFAULT,
+                )
+            }
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+
             composeRule.onNodeWithTag("compact-home-header").assertIsDisplayed()
             composeRule.onNodeWithTag("primary-correction-card").assertIsDisplayed()
             composeRule.onNodeWithTag("reasoning-effort-control").assertIsDisplayed()
@@ -39,9 +51,19 @@ class HomeSettingsUiTest {
             composeRule.onNodeWithTag("reasoning-effort-control")
                 .assertIsDisplayed()
                 .assertTextContains("高")
-            assertEquals(ReasoningEffort.HIGH, SettingsStore(composeRule.activity).load().reasoningEffort)
         } finally {
             store.update { previous }
         }
+    }
+
+    @Test
+    fun mainSettingsDoNotExposeLegacyOrAmbiguousDeveloperLanguage() {
+        composeRule.onNodeWithText("詳細", substring = false).assertDoesNotExist()
+        composeRule.onNodeWithText("フィラー", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithText("安全ガード", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithText("ASR", substring = true).assertDoesNotExist()
+        composeRule.onNodeWithText("読点「、」を追加", substring = false).assertIsDisplayed()
+        composeRule.onNodeWithText("句点「。」を追加", substring = false).assertIsDisplayed()
+        composeRule.onNodeWithText("「えー」「あのー」等を削除", substring = false).assertIsDisplayed()
     }
 }
