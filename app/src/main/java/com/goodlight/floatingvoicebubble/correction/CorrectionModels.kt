@@ -28,9 +28,49 @@ data class CorrectionRequest(
     val forceCorrection: Boolean = false,
 )
 
+/** Redacted transport metadata returned with a successful model call. */
+data class CorrectionCallMetadata(
+    val attempts: Int = 1,
+    val httpStatus: Int? = null,
+    val responsePresent: Boolean = true,
+)
+
+data class CorrectionCallResult(
+    val text: String,
+    val metadata: CorrectionCallMetadata = CorrectionCallMetadata(),
+)
+
+/**
+ * Structured model-call failure. It deliberately carries no transcript, surrounding context,
+ * dictionary value or credential, so it is safe to persist in redacted operational diagnostics.
+ */
+class CorrectionCallException(
+    message: String,
+    val stage: String,
+    val attempts: Int = 1,
+    val httpStatus: Int? = null,
+    val responsePresent: Boolean = false,
+    val errorClass: String = "CorrectionCallException",
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)
+
 interface TextCorrector {
     val id: String
     fun correct(request: CorrectionRequest): String
+
+    fun correctDetailed(request: CorrectionRequest): CorrectionCallResult = try {
+        CorrectionCallResult(correct(request))
+    } catch (failure: Throwable) {
+        if (failure is CorrectionCallException) throw failure
+        throw CorrectionCallException(
+            message = failure.message ?: failure.javaClass.simpleName,
+            stage = "model-call",
+            attempts = 1,
+            responsePresent = false,
+            errorClass = failure.javaClass.simpleName,
+            cause = failure,
+        )
+    }
 }
 
 /**
