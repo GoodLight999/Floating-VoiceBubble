@@ -137,6 +137,9 @@ internal fun HomeSettingsScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(failure.reason, style = MaterialTheme.typography.bodySmall)
+                    failureSummary(failure).takeIf(String::isNotBlank)?.let { summary ->
+                        Text("状況: $summary", style = MaterialTheme.typography.bodySmall)
+                    }
                     if (failure.fallback.isNotBlank()) {
                         Text("結果: ${failure.fallback}", style = MaterialTheme.typography.bodySmall)
                     }
@@ -309,6 +312,31 @@ private fun recognitionLabel(mode: RecognitionMode): String = when (mode) {
 private fun finalRecognitionLabel(mode: FinalAsrMode): String = when (mode) {
     FinalAsrMode.LIVE_RESULT -> "そのまま"
     FinalAsrMode.REAZON_SPEECH -> "ReazonSpeechで再認識"
+}
+
+private fun failureSummary(failure: LastCorrectionFailure): String = buildList {
+    failureStageLabel(failure.failureStage).takeIf(String::isNotBlank)?.let(::add)
+    if (failure.attempts > 0) add("${failure.attempts}回試行")
+    failure.httpStatus?.let { add("HTTP $it") }
+    if (failure.attempts > 0 || failure.failureStage.isNotBlank()) {
+        add(if (failure.responsePresent) "API応答あり" else "API応答なし")
+    }
+}.joinToString(" / ")
+
+private fun failureStageLabel(stage: String): String = when (stage) {
+    "dns" -> "接続先を名前解決できませんでした"
+    "connect" -> "接続できませんでした"
+    "network-timeout", "model-timeout" -> "応答待ちで時間切れ"
+    "network" -> "通信中に失敗"
+    "http" -> "APIがエラーを返しました"
+    "http-unsupported-reasoning" -> "選択した推論設定がAPIで拒否されました"
+    "empty-response" -> "APIの応答本文が空でした"
+    "parse-response" -> "API応答を読み取れませんでした"
+    "select-backend" -> "補正方法を開始できませんでした"
+    "integrity-check" -> "補正結果を採用できませんでした"
+    "finalization-watchdog" -> "確定処理全体が時間切れ"
+    "finalization" -> "確定処理中に失敗"
+    else -> ""
 }
 
 private fun formatLatency(ms: Long): String = if (ms < 1_000L) "${ms}ms" else "%.1f秒".format(ms / 1_000.0)
