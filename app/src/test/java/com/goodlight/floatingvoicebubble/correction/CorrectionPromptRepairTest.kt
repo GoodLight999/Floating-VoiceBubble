@@ -16,41 +16,71 @@ class CorrectionPromptRepairTest {
     )
 
     @Test
-    fun normalPromptExplicitlyAllowsContextBackedMisrecognitionRepair() {
+    fun normalPromptDefinesAsrPostEditingNotGenericWriting() {
         val prompt = CorrectionPrompt.system(request(RecognitionRepairMode.NORMAL))
-        assertTrue(prompt.contains("聞き取りAI"))
-        assertTrue(prompt.contains("文脈上かなり確度"))
+        assertTrue(prompt.contains("音声認識のポストエディタ"))
+        assertTrue(prompt.contains("作文・要約・文章改善はしません"))
         assertTrue(prompt.contains("N-best"))
-        assertTrue(prompt.contains("新しい事実・主張・理由を足してはいけない"))
+        assertTrue(prompt.contains("文脈にだけ存在する事実・主張を出力へ追加してはいけない"))
+        assertTrue(prompt.contains("根拠が弱ければRAWを残す"))
     }
 
     @Test
-    fun strongPromptAllowsMultiWordRepairWithoutAuthorizingWriting() {
+    fun strongPromptAllowsEvidenceBackedMultiWordRepairWithoutFreeRewriting() {
         val prompt = CorrectionPrompt.system(request(RecognitionRepairMode.STRONG))
-        assertTrue(prompt.contains("複数語が連続して壊れていても"))
-        assertTrue(prompt.contains("話者の意図・事実・論旨を新しく作ってはいけない"))
+        assertTrue(prompt.contains("複数文字・複数語"))
+        assertTrue(prompt.contains("根拠のない推測はしない"))
+        assertTrue(prompt.contains("口調・敬語レベルは変えない"))
     }
 
     @Test
     fun offPromptForbidsLexicalRepair() {
         val prompt = CorrectionPrompt.system(request(RecognitionRepairMode.OFF))
-        assertTrue(prompt.contains("語句そのものの音声認識誤りは直さない"))
-        assertFalse(prompt.contains("強めに復元する"))
+        assertTrue(prompt.contains("語句そのものは変更しない"))
+        assertFalse(prompt.contains("積極"))
     }
 
     @Test
-    fun smartLineBreakPromptDoesNotStopAfterOneBreakAndHandlesCommaOnlyAsr() {
+    fun smartLineBreakPromptRequestsSemanticBreaksWithoutArbitraryWidthRules() {
         val prompt = CorrectionPrompt.system(
             request(RecognitionRepairMode.NORMAL).copy(
-                rawTranscript = "長い発話で、内部句点がなく、読点だけが続く場合も、複数段落へ分けたい",
                 preferences = CorrectionPreferences(
                     lineBreakMode = LineBreakMode.SMART,
                     recognitionRepairMode = RecognitionRepairMode.NORMAL,
                 ),
             ),
         )
-        assertTrue(prompt.contains("回数を1回に固定しない"))
-        assertTrue(prompt.contains("読点「、」だけでも"))
-        assertTrue(prompt.contains("必要に応じて複数回改行する"))
+        assertTrue(prompt.contains("複数文・話題・列挙の明確な境界"))
+        assertTrue(prompt.contains("短い単一文は分割しない"))
+        assertFalse(prompt.contains("40文字"))
+        assertFalse(prompt.contains("80文字"))
+    }
+
+    @Test
+    fun userPromptSendsOnlyThreeMateriallyDifferentAlternatives() {
+        val raw = "元の認識"
+        val prompt = CorrectionPrompt.user(
+            request(RecognitionRepairMode.NORMAL).copy(
+                rawTranscript = raw,
+                alternatives = listOf(raw, "候補A", "候補A", "候補B", "候補C", "候補D", "候補E"),
+            ),
+        )
+        assertTrue(prompt.contains("1: 候補A"))
+        assertTrue(prompt.contains("2: 候補B"))
+        assertTrue(prompt.contains("3: 候補C"))
+        assertFalse(prompt.contains("候補D"))
+        assertFalse(prompt.contains("候補E"))
+    }
+
+    @Test
+    fun userPromptBoundsContextToTrailingSixHundredCharacters() {
+        val prefix = "捨てる文脈".repeat(120)
+        val tail = "残す文脈".repeat(60)
+        val context = prefix + tail
+        val prompt = CorrectionPrompt.user(
+            request(RecognitionRepairMode.NORMAL).copy(surroundingContext = context),
+        )
+        assertFalse(prompt.contains(prefix.take(80)))
+        assertTrue(prompt.contains(context.takeLast(600).takeLast(80)))
     }
 }
