@@ -2,6 +2,7 @@ package com.goodlight.floatingvoicebubble
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.goodlight.floatingvoicebubble.correction.CorrectionCallException
 import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
 import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
 import com.goodlight.floatingvoicebubble.correction.TextCorrector
@@ -57,6 +58,9 @@ class FinalizationEngineCorrectionContractTest {
         assertTrue(result.correctionModelChanged)
         assertFalse(result.deterministicFormattingChanged)
         assertTrue(result.finalText.contains("聞き取りAI"))
+        assertEquals(1, result.correctionAttempts)
+        assertTrue(result.correctionResponsePresent)
+        assertEquals("accepted", result.correctionIntegrityResult)
     }
 
     @Test
@@ -77,6 +81,7 @@ class FinalizationEngineCorrectionContractTest {
         assertTrue(result.deterministicFormattingChanged)
         assertTrue(result.correctionChanged)
         assertEquals("$raw。", result.finalText)
+        assertEquals("accepted", result.correctionIntegrityResult)
     }
 
     @Test
@@ -98,6 +103,59 @@ class FinalizationEngineCorrectionContractTest {
         assertFalse(result.deterministicFormattingChanged)
         assertNotNull(result.correctionError)
         assertEquals(raw, result.finalText)
+        assertEquals(1, result.correctionAttempts)
+        assertEquals("model-call", result.correctionFailureStage)
+        assertEquals("IllegalStateException", result.correctionErrorClass)
+        assertFalse(result.correctionResponsePresent)
+    }
+
+    @Test
+    fun structuredProviderFailureMetadataReachesFinalResult() {
+        val failure = CorrectionCallException(
+            message = "upstream unavailable",
+            stage = "http",
+            attempts = 2,
+            httpStatus = 503,
+            responsePresent = true,
+            errorClass = "HttpResponseError",
+        )
+        val engine = engine(ScriptedCorrector(listOf(failure)))
+        val raw = "今日は音声入力を試している"
+
+        val result = engine.finalize(
+            outcome = outcome(raw),
+            surrounding = "",
+            settings = baseSettings(RecognitionRepairMode.NORMAL),
+            bypassCorrection = false,
+        )
+
+        assertEquals(raw, result.finalText)
+        assertEquals(2, result.correctionAttempts)
+        assertEquals(503, result.correctionHttpStatus)
+        assertEquals("http", result.correctionFailureStage)
+        assertEquals("HttpResponseError", result.correctionErrorClass)
+        assertTrue(result.correctionResponsePresent)
+        assertEquals("音声認識結果", result.fallbackSource)
+    }
+
+    @Test
+    fun integrityRejectionIsClassifiedSeparatelyFromTransportFailure() {
+        val raw = "確認して"
+        val runaway = "確認して。そのあと関係者全員へ連絡し、予算と担当者と来月以降の予定をすべて決定し、説明資料を作って会議も設定し、さらに部署全体の計画まで変更してください。これらを今日中に全部完了してください。"
+        val engine = engine(ScriptedCorrector(listOf(runaway)))
+
+        val result = engine.finalize(
+            outcome = outcome(raw),
+            surrounding = "",
+            settings = baseSettings(RecognitionRepairMode.NORMAL),
+            bypassCorrection = false,
+        )
+
+        assertFalse(result.correctionAccepted)
+        assertEquals(raw, result.finalText)
+        assertEquals("integrity-check", result.correctionFailureStage)
+        assertEquals("OutputIntegrityRejected", result.correctionErrorClass)
+        assertTrue(result.correctionIntegrityResult.orEmpty().startsWith("rejected:"))
     }
 
     @Test
