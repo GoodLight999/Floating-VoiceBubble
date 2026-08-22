@@ -115,7 +115,8 @@ object ReasoningCapabilities {
     fun anthropicEffort(endpoint: String, model: String, requested: ReasoningEffort): String? {
         val host = host(endpoint)
         if (host != "api.anthropic.com" && !host.endsWith(".anthropic.com")) return null
-        if (!supportsAnthropicAdaptive(model.lowercase(Locale.ROOT))) return null
+        val normalizedModel = model.lowercase(Locale.ROOT)
+        if (!supportsAnthropicAdaptive(normalizedModel)) return null
         return when (normalize(endpoint, model, requested)) {
             ReasoningEffort.DEFAULT, ReasoningEffort.NONE -> null
             ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> "low"
@@ -130,10 +131,11 @@ object ReasoningCapabilities {
     fun anthropicThinkingType(endpoint: String, model: String, requested: ReasoningEffort): String? {
         val host = host(endpoint)
         if (host != "api.anthropic.com" && !host.endsWith(".anthropic.com")) return null
+        val normalizedModel = model.lowercase(Locale.ROOT)
         return when (normalize(endpoint, model, requested)) {
             ReasoningEffort.DEFAULT -> null
-            ReasoningEffort.NONE -> "disabled"
-            else -> if (supportsAnthropicAdaptive(model.lowercase(Locale.ROOT))) "adaptive" else null
+            ReasoningEffort.NONE -> if (supportsAnthropicThinkingDisabled(normalizedModel)) "disabled" else null
+            else -> if (supportsAnthropicAdaptive(normalizedModel)) "adaptive" else null
         }
     }
 
@@ -196,22 +198,23 @@ object ReasoningCapabilities {
 
     private fun anthropicCapability(model: String): ReasoningCapability = when {
         supportsAnthropicAdaptive(model) -> {
-            val efforts = mutableListOf(
-                ReasoningEffort.NONE,
-                ReasoningEffort.LOW,
-                ReasoningEffort.MEDIUM,
-                ReasoningEffort.HIGH,
-            )
+            val efforts = mutableListOf<ReasoningEffort>()
+            if (supportsAnthropicThinkingDisabled(model)) efforts += ReasoningEffort.NONE
+            efforts += listOf(ReasoningEffort.LOW, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH)
             if (supportsAnthropicXHigh(model)) efforts += ReasoningEffort.XHIGH
             if (supportsAnthropicMax(model)) efforts += ReasoningEffort.MAX
             ReasoningCapability(
                 choices = listOf(ReasoningEffort.DEFAULT) + efforts,
-                note = "Claudeのadaptive thinkingとoutput_config.effortへ送信します。",
+                note = if (supportsAnthropicThinkingDisabled(model)) {
+                    "Claudeのadaptive thinkingとoutput_config.effortへ送信します。"
+                } else {
+                    "このClaudeモデルは思考をOFFにできません。adaptive thinkingとoutput_config.effortを使います。"
+                },
             )
         }
         model.contains("-4-5") -> ReasoningCapability(
-            choices = listOf(ReasoningEffort.DEFAULT, ReasoningEffort.NONE),
-            note = "この世代は固定thinking budget方式です。根拠のない段階マッピングは行わずON/OFFだけに制限します。",
+            choices = listOf(ReasoningEffort.DEFAULT),
+            note = "この世代は固定thinking budget方式です。現在の音声補正UIではモデル既定だけを使います。",
         )
         else -> ReasoningCapability(
             listOf(ReasoningEffort.DEFAULT),
@@ -252,16 +255,20 @@ object ReasoningCapabilities {
     }
 
     private fun supportsAnthropicAdaptive(model: String): Boolean =
-        model.contains("sonnet-4-6") || model.contains("opus-4-6") || model.contains("-4-7") ||
-            model.contains("-4-8") || model.contains("sonnet-5") || model.contains("opus-5") ||
+        model.contains("sonnet-4-6") || model.contains("opus-4-6") || model.contains("opus-4-7") ||
+            model.contains("opus-4-8") || model.contains("sonnet-5") || model.contains("opus-5") ||
             model.contains("fable-5") || model.contains("mythos")
 
+    private fun supportsAnthropicThinkingDisabled(model: String): Boolean =
+        supportsAnthropicAdaptive(model) && !model.contains("fable-5") && !model.contains("mythos")
+
     private fun supportsAnthropicXHigh(model: String): Boolean =
-        model.contains("-4-7") || model.contains("-4-8") || model.contains("sonnet-5") ||
-            model.contains("opus-5") || model.contains("fable-5") || model.contains("mythos")
+        model.contains("opus-4-7") || model.contains("opus-4-8") || model.contains("sonnet-5") ||
+            model.contains("opus-5") || model.contains("fable-5") || model.contains("mythos-5")
 
     private fun supportsAnthropicMax(model: String): Boolean =
-        model.contains("sonnet-4-6") || model.contains("opus-4-6") || supportsAnthropicXHigh(model)
+        supportsAnthropicXHigh(model) || model.contains("sonnet-4-6") || model.contains("opus-4-6") ||
+            model.contains("mythos-preview")
 
     private fun effortCapability(
         vararg efforts: ReasoningEffort,
