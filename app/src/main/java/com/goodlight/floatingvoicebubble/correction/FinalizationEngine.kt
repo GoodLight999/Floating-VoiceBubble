@@ -33,6 +33,8 @@ data class FinalizationResult(
     val correctionModelChanged: Boolean = false,
     /** App-side punctuation/filler/paragraph rules changed the model response or RAW fallback. */
     val deterministicFormattingChanged: Boolean = false,
+    /** Wall-clock time spent in the single correction-model attempt. */
+    val correctionLatencyMs: Long? = null,
 )
 
 class FinalizationEngine(
@@ -101,7 +103,7 @@ class FinalizationEngine(
                     finalAsrError = if (model == null) "ReazonSpeech model is missing" else "recorded WAV is missing"
                     outcome.rawTranscript
                 } else {
-                    runCatching { bounded(FINAL_ASR_TIMEOUT_MS, "最終ASR") { SherpaFinalAsrEngine.decode(model, audio) } }
+                    runCatching { bounded(FINAL_ASR_TIMEOUT_MS, "最終音声認識") { SherpaFinalAsrEngine.decode(model, audio) } }
                         .onSuccess { decoded ->
                             finalAsrId = decoded.engineId
                             finalAsrLatencyMs = decoded.elapsedMs
@@ -133,20 +135,16 @@ class FinalizationEngine(
             .getOrNull()
         val attempted = corrector != null
         var modelOutput: String? = null
+        var correctionLatencyMs: Long? = null
         if (corrector != null) {
+            val started = System.nanoTime()
             modelOutput = runCatching {
-                bounded(CORRECTION_FIRST_ATTEMPT_TIMEOUT_MS, "補正モデル") { corrector.correct(request) }
+                bounded(
+                    CorrectionTimeoutPolicy.correctionTimeoutMs(settings.reasoningEffort),
+                    "補正モデル",
+                ) { corrector.correct(request) }
             }.onFailure { correctionError = it.message ?: it.javaClass.simpleName }.getOrNull()
-
-            val firstOutput = modelOutput
-            if (firstOutput != null && CorrectionPostProcessor.shouldRetryNoOp(request, firstOutput)) {
-                modelOutput = runCatching {
-                    bounded(CORRECTION_RETRY_TIMEOUT_MS, "補正モデル再試行") {
-                        corrector.correct(request.copy(forceCorrection = true))
-                    }
-                }.onFailure { correctionError = it.message ?: it.javaClass.simpleName }
-                    .getOrNull() ?: firstOutput
-            }
+            correctionLatencyMs = (System.nanoTime() - started) / 1_000_000L
         } else if (settings.correctionMode != CorrectionMode.NONE && correctionError == null) {
             correctionError = "補正バックエンドが利用できません"
         }
@@ -186,6 +184,7 @@ class FinalizationEngine(
             correctionModelResponded = modelResponded,
             correctionModelChanged = modelChanged,
             deterministicFormattingChanged = deterministicFormattingChanged,
+            correctionLatencyMs = correctionLatencyMs,
         )
     }
 
@@ -266,10 +265,6 @@ class FinalizationEngine(
     }
 
     companion object {
-        // The accessibility-service watchdog is 45 seconds. Keep the entire possible two-attempt
-        // correction window below it so a useful retry cannot be discarded by the outer watchdog.
-        private const val CORRECTION_FIRST_ATTEMPT_TIMEOUT_MS = 30_000L
-        private const val CORRECTION_RETRY_TIMEOUT_MS = 10_000L
         private const val FINAL_ASR_TIMEOUT_MS = 30_000L
     }
 }
