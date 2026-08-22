@@ -78,16 +78,19 @@ path = sys.argv[1]
 root = ET.parse(path).getroot()
 
 required = {
-    "AI補正": False,
-    "シンキング": False,
-    "聞き取りミス修復": False,
+    "文章補正": False,
+    "推論の深さ": False,
+    "聞き取り間違いを直す強さ": False,
     "音声認識": False,
 }
+forbidden = ["安全ガード", "フィラー", "簡単設定"]
 
 reasoning_bounds = []
 all_bounds = []
+all_text = []
 for node in root.iter():
     text = (node.attrib.get("text") or "") + " " + (node.attrib.get("content-desc") or "")
+    all_text.append(text)
     for label in required:
         if label in text:
             required[label] = True
@@ -96,12 +99,16 @@ for node in root.iter():
     if m:
         parsed = tuple(map(int, m.groups()))
         all_bounds.append(parsed)
-        if "シンキング" in text:
+        if "推論の深さ" in text:
             reasoning_bounds.append(parsed)
 
 missing = [label for label, found in required.items() if not found]
 if missing:
     raise SystemExit(f"launcher UI missing required visible controls: {missing}")
+joined = "\n".join(all_text)
+seen_forbidden = [label for label in forbidden if label in joined]
+if seen_forbidden:
+    raise SystemExit(f"launcher UI contains removed/ambiguous language: {seen_forbidden}")
 if not reasoning_bounds:
     raise SystemExit("reasoning control has no visible bounds in launcher UI")
 if not all_bounds:
