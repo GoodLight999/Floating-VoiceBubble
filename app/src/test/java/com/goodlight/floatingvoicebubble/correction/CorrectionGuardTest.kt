@@ -20,13 +20,13 @@ class CorrectionGuardTest {
         assertTrue(decision.normalizedDistance > 0.0)
     }
 
-    @Test fun rejectsRunawayHelpfulRewriteByStructureRatherThanCharacterDistance() {
+    @Test fun rejectsCatastrophicHelpfulRewriteByStructureRatherThanCharacterDistance() {
         val raw = "これマジでやばい、あとで見る"
-        val runaway = "これは非常に興味深い内容です。背景を整理し、関係者全員へ共有し、今後の計画と予算と担当者を決定し、明日の会議資料まで作成してから詳細を確認いたします。"
+        val runaway = "これは非常に興味深い内容です。背景を整理し、関係者全員へ共有し、今後の計画と予算と担当者を決定し、明日の会議資料まで作成してから詳細を確認いたします。さらに来月の計画も再設計して関係者全員へ説明します。"
         val decision = CorrectionGuard.choose(raw, runaway)
         assertFalse(decision.accepted)
         assertEquals(raw, decision.text)
-        assertEquals("runaway-expansion", decision.reason)
+        assertEquals("output-expanded-too-much", decision.reason)
     }
 
     @Test fun stripsWrapperWithoutTouchingJapaneseQuotesInsideSentence() {
