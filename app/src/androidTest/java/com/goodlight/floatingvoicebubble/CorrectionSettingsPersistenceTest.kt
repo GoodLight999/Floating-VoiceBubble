@@ -11,21 +11,27 @@ class CorrectionSettingsPersistenceTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
     @Test
-    fun reasoningLineBreakAndRecognitionRepairRoundTrip() {
+    fun correctionProviderModelReasoningAndFormattingRoundTrip() {
         val store = SettingsStore(context)
         val previous = store.load()
         try {
             store.update {
                 it.copy(
+                    correctionMode = CorrectionMode.BYOK,
+                    byokEndpoint = "https://api.z.ai/api/coding/paas/v4/chat/completions",
+                    byokModel = "glm-4.7",
                     reasoningEffort = ReasoningEffort.HIGH,
                     correctionLineBreakMode = LineBreakMode.SMART_SPACED,
                     recognitionRepairMode = RecognitionRepairMode.STRONG,
                 )
             }
-            val reloaded = SettingsStore(context).load()
-            assertEquals(ReasoningEffort.HIGH, reloaded.reasoningEffort)
-            assertEquals(LineBreakMode.SMART_SPACED, reloaded.correctionLineBreakMode)
-            assertEquals(RecognitionRepairMode.STRONG, reloaded.recognitionRepairMode)
+            val runtimeReload = SettingsStore(context).load()
+            assertEquals(CorrectionMode.BYOK, runtimeReload.correctionMode)
+            assertEquals("https://api.z.ai/api/coding/paas/v4/chat/completions", runtimeReload.byokEndpoint)
+            assertEquals("glm-4.7", runtimeReload.byokModel)
+            assertEquals(ReasoningEffort.HIGH, runtimeReload.reasoningEffort)
+            assertEquals(LineBreakMode.SMART_SPACED, runtimeReload.correctionLineBreakMode)
+            assertEquals(RecognitionRepairMode.STRONG, runtimeReload.recognitionRepairMode)
         } finally {
             store.update { previous }
         }
