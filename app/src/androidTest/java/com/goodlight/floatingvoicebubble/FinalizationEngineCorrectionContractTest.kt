@@ -101,7 +101,7 @@ class FinalizationEngineCorrectionContractTest {
     }
 
     @Test
-    fun strongModeRetriesRawEchoAndCanApplySecondSemanticRepair() {
+    fun strongModeDoesNotLaunchHiddenSecondModelCallWhenModelReturnsRaw() {
         val raw = "音声入力の取り合いがだいぶ聞き取りミスをした"
         val corrected = "音声入力の聞き取りAIがだいぶ聞き取りミスをした"
         val corrector = ScriptedCorrector(listOf(raw, corrected))
@@ -114,12 +114,11 @@ class FinalizationEngineCorrectionContractTest {
             bypassCorrection = false,
         )
 
-        assertEquals(2, corrector.requests.size)
-        assertFalse(corrector.requests.first().forceCorrection)
-        assertTrue(corrector.requests.last().forceCorrection)
+        assertEquals(1, corrector.requests.size)
+        assertFalse(corrector.requests.single().forceCorrection)
         assertTrue(result.correctionModelResponded)
-        assertTrue(result.correctionModelChanged)
-        assertTrue(result.finalText.contains("聞き取りAI"))
+        assertFalse(result.correctionModelChanged)
+        assertEquals(raw, result.finalText)
     }
 
     private fun engine(corrector: TextCorrector) = FinalizationEngine(
