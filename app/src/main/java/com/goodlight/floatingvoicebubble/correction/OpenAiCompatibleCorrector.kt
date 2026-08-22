@@ -29,21 +29,18 @@ class OpenAiCompatibleCorrector(
                     .put(JSONObject().put("role", "user").put("content", CorrectionPrompt.user(request))),
             )
         applyProviderOptions(body, options)
-        if (options.zaiThinkingEnabled != null) {
-            // Correction output should stay close to the transcript. A bounded output budget prevents
-            // a provider's very large generation default from turning a tiny edit into a long-running
-            // request while remaining generous for long Japanese dictation.
-            val transcriptPoints = request.rawTranscript.codePointCount(0, request.rawTranscript.length)
-            body.put("max_tokens", (transcriptPoints * 6 + 512).coerceIn(1024, 8192))
-        }
 
         var result = execute(body, options)
         if (result.status in listOf(400, 422) && optionalParameterRejected(result.text)) {
-            // Optional provider controls are never allowed to make the core correction request unusable.
-            // Retry once with the portable Chat Completions subset only.
-            body.remove("reasoning_effort")
-            body.remove("reasoning")
-            body.remove("thinking")
+            val explicitReasoning = reasoningEffort != ReasoningEffort.DEFAULT &&
+                (body.has("reasoning_effort") || body.has("reasoning") || body.has("thinking"))
+            if (explicitReasoning) {
+                error(
+                    "選択した推論設定はこのモデル/APIで受け付けられません: HTTP ${result.status} ${compact(result.text)}",
+                )
+            }
+
+            // Provider-specific non-reasoning conveniences must not break the portable request.
             body.remove("do_sample")
             result = execute(body, options.copy(sendEnglishAcceptLanguage = false))
         }
@@ -87,7 +84,7 @@ class OpenAiCompatibleCorrector(
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
+            readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
@@ -117,6 +114,5 @@ class OpenAiCompatibleCorrector(
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 8_000
-        private const val READ_TIMEOUT_MS = 30_000
     }
 }
