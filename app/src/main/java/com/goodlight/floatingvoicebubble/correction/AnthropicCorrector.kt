@@ -3,8 +3,11 @@ package com.goodlight.floatingvoicebubble.correction
 import com.goodlight.floatingvoicebubble.ReasoningEffort
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.UnknownHostException
 
 class AnthropicCorrector(
     private val endpoint: String,
@@ -14,7 +17,9 @@ class AnthropicCorrector(
 ) : TextCorrector {
     override val id: String = "byok:anthropic:$model"
 
-    override fun correct(request: CorrectionRequest): String {
+    override fun correct(request: CorrectionRequest): String = correctDetailed(request).text
+
+    override fun correctDetailed(request: CorrectionRequest): CorrectionCallResult {
         require(endpoint.startsWith("https://")) { "BYOK endpoint must use HTTPS" }
         require(model.isNotBlank()) { "BYOK model is not configured" }
         require(apiKey.isNotBlank()) { "Anthropic API key is not configured" }
@@ -39,40 +44,110 @@ class AnthropicCorrector(
             body.put("output_config", JSONObject().put("effort", effort))
         }
 
-        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("x-api-key", apiKey)
-            setRequestProperty("anthropic-version", "2023-06-01")
+        val response = executeAttempt(body)
+        if (response.status !in 200..299) {
+            val detail = compact(response.text)
+            throw CorrectionCallException(
+                message = if (reasoningEffort != ReasoningEffort.DEFAULT && response.status in listOf(400, 422)) {
+                    "選択したClaude推論設定を適用できません: HTTP ${response.status} $detail"
+                } else {
+                    "Anthropic request failed: HTTP ${response.status} $detail"
+                },
+                stage = if (reasoningEffort != ReasoningEffort.DEFAULT && response.status in listOf(400, 422)) {
+                    "http-unsupported-reasoning"
+                } else {
+                    "http"
+                },
+                attempts = 1,
+                httpStatus = response.status,
+                responsePresent = response.text.isNotBlank(),
+                errorClass = "HttpResponseError",
+            )
         }
-        try {
-            connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
-            val status = connection.responseCode
-            val responseText = (if (status in 200..299) connection.inputStream else connection.errorStream)
-                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            if (status !in 200..299) {
-                val detail = responseText.take(500).replace(Regex("\\s+"), " ")
-                if (reasoningEffort != ReasoningEffort.DEFAULT && status in listOf(400, 422)) {
-                    error("選択したClaude推論設定を適用できません: HTTP $status $detail")
-                }
-                error("Anthropic request failed: HTTP $status $detail")
-            }
+        if (response.text.isBlank()) {
+            throw CorrectionCallException(
+                message = "Anthropic response body is empty",
+                stage = "empty-response",
+                attempts = 1,
+                httpStatus = response.status,
+                responsePresent = false,
+                errorClass = "EmptyResponse",
+            )
+        }
 
-            val content = JSONObject(responseText).optJSONArray("content")
-                ?: error("Anthropic response has no content")
-            return buildString {
+        val text = try {
+            val content = JSONObject(response.text).optJSONArray("content")
+                ?: throw IllegalStateException("Anthropic response has no content")
+            buildString {
                 for (i in 0 until content.length()) {
                     val part = content.optJSONObject(i) ?: continue
                     if (part.optString("type") == "text") append(part.optString("text"))
                 }
-            }.trim().ifBlank { error("Anthropic response has no text") }
+            }.trim().ifBlank { throw IllegalStateException("Anthropic response has no text") }
+        } catch (failure: Throwable) {
+            if (failure is CorrectionCallException) throw failure
+            throw CorrectionCallException(
+                message = failure.message ?: "Anthropic response parse failed",
+                stage = "parse-response",
+                attempts = 1,
+                httpStatus = response.status,
+                responsePresent = true,
+                errorClass = failure.javaClass.simpleName,
+                cause = failure,
+            )
+        }
+
+        return CorrectionCallResult(
+            text = text,
+            metadata = CorrectionCallMetadata(attempts = 1, httpStatus = response.status, responsePresent = true),
+        )
+    }
+
+    private fun executeAttempt(body: JSONObject): HttpResult {
+        val connection = try {
+            (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("x-api-key", apiKey)
+                setRequestProperty("anthropic-version", "2023-06-01")
+            }
+        } catch (failure: Throwable) {
+            throw transportFailure(failure)
+        }
+        return try {
+            try {
+                connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
+                val status = connection.responseCode
+                val text = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                HttpResult(status, text)
+            } catch (failure: Throwable) {
+                throw transportFailure(failure)
+            }
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun transportFailure(failure: Throwable): CorrectionCallException {
+        val stage = when (failure) {
+            is UnknownHostException -> "dns"
+            is ConnectException -> "connect"
+            is SocketTimeoutException -> "network-timeout"
+            else -> "network"
+        }
+        return CorrectionCallException(
+            message = failure.message ?: failure.javaClass.simpleName,
+            stage = stage,
+            attempts = 1,
+            responsePresent = false,
+            errorClass = failure.javaClass.simpleName,
+            cause = failure,
+        )
     }
 
     private fun outputTokenBudget(): Int = when (ReasoningCapabilities.normalize(endpoint, model, reasoningEffort)) {
@@ -81,6 +156,10 @@ class AnthropicCorrector(
         ReasoningEffort.MEDIUM -> 4_096
         else -> 2_048
     }
+
+    private fun compact(value: String): String = value.take(500).replace(Regex("\\s+"), " ").trim()
+
+    private data class HttpResult(val status: Int, val text: String)
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 8_000
