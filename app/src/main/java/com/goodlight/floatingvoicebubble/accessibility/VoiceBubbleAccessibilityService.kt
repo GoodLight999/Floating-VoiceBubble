@@ -13,14 +13,19 @@ import android.view.inputmethod.EditorInfo
 import com.goodlight.floatingvoicebubble.AppProfileStore
 import com.goodlight.floatingvoicebubble.AppSettings
 import com.goodlight.floatingvoicebubble.CorrectionMode
+import com.goodlight.floatingvoicebubble.CorrectionStatusStore
 import com.goodlight.floatingvoicebubble.FinalAsrMode
+import com.goodlight.floatingvoicebubble.LastCorrectionFailure
 import com.goodlight.floatingvoicebubble.RecognitionMode
 import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.correction.ByokEndpointResolver
+import com.goodlight.floatingvoicebubble.correction.CloudCorrectorFactory
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
+import com.goodlight.floatingvoicebubble.correction.CorrectionTimeoutPolicy
 import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
 import com.goodlight.floatingvoicebubble.correction.FinalizationResult
+import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
@@ -42,14 +47,12 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private lateinit var profiles: AppProfileStore
     private lateinit var dictionary: PersonalDictionary
     private lateinit var traces: SessionTraceStore
+    private lateinit var correctionStatus: CorrectionStatusStore
     private lateinit var asrModels: AsrModelStore
     private lateinit var finalModels: FinalAsrModelStore
     private lateinit var finalizer: FinalizationEngine
     private lateinit var overlay: FloatingBubbleController
 
-    // Network-backed finalization can run concurrently. Native/local model work stays serialized to
-    // avoid multiplying model memory and relying on undocumented concurrent native-runtime safety.
-    // OrderedResolutionQueue below guarantees that commits still happen in utterance order.
     private val cloudFinalization = Executors.newFixedThreadPool(3) { r -> Thread(r, "VoiceBubble-CloudFinalizer") }
     private val localFinalization = Executors.newSingleThreadExecutor { r -> Thread(r, "VoiceBubble-LocalFinalizer") }
     private val inference = Executors.newCachedThreadPool { r -> Thread(r, "VoiceBubble-Inference") }
@@ -68,13 +71,6 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     private val targets = LinkedHashMap<Long, Target?>()
     private val finalizationOrder = OrderedResolutionQueue<Long, FinalizationResolution>()
     private val finalizationTasks = LinkedHashMap<Long, Future<*>>()
-
-    /**
-     * Recent VoiceBubble commits are kept only in this service process. They are not persisted and
-     * are never populated from arbitrary Accessibility window text. This gives chat-style inputs
-     * useful conversational context after the editor is cleared without turning the service into a
-     * screen scraper. Password fields are excluded entirely.
-     */
     private val recentVoiceContext = RecentVoiceContextBuffer()
     private val h by lazy { android.os.Handler(mainLooper) }
 
@@ -87,6 +83,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         profiles = AppProfileStore(this)
         dictionary = PersonalDictionary(this)
         traces = SessionTraceStore(this)
+        correctionStatus = CorrectionStatusStore(this)
         asrModels = AsrModelStore(this)
         finalModels = FinalAsrModelStore(this)
         finalizer = FinalizationEngine(this, settings, dictionary, traces, finalModels, inference)
@@ -185,21 +182,21 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val effective = profiles.effectiveSettings(settings.load(), pkg)
         val model = asrModels.resolve(effective.streamingAsrModelId)
         if (effective.offlineMode && model == null) {
-            errorUi("完全オフラインにはストリーミングASRモデルが必要です。")
+            errorUi("通信しない設定には端末内音声認識モデルが必要です。")
             return
         }
         if (effective.recognitionMode == RecognitionMode.SHERPA_STREAMING && model == null) {
-            errorUi("Nemotronモデルを導入してください。")
+            errorUi("端末内ストリーミング音声認識モデルを導入してください。")
             return
         }
         val gemma = File(effective.gemmaModelPath).isFile
         if (effective.correctionMode == CorrectionMode.GEMMA && !gemma) {
-            errorUi("Gemma補正モデルを導入してください。")
+            errorUi("端末内Gemma補正モデルを導入してください。")
             return
         }
         if (CorrectionBackendResolver.resolve(effective, gemma) == CorrectionBackend.BYOK) {
             if (effective.byokModel.isBlank()) {
-                errorUi("補正モデルを選択してください。")
+                errorUi("文章補正に使うモデルを選択してください。")
                 return
             }
             runCatching { ByokEndpointResolver.resolve(effective.byokEndpoint) }
@@ -296,12 +293,10 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         pending[id] = outcome.rawTranscript
         targets[id] = capturedTarget
         finalizationOrder.register(id)
-        overlay.showFinalizingStack(pending.values.toList(), "LM補正しています")
+        overlay.showFinalizingStack(pending.values.toList(), correctionProgressLabel(effective))
 
-        // The watchdog starts when this job actually begins executing, not while it is waiting in
-        // the local-model queue. That prevents queue wait time from being misclassified as an LM
-        // timeout. Cloud jobs can run concurrently; local/native jobs remain serialized.
         val task = finalizationExecutor(effective).submit {
+            val watchdogMs = finalizationWatchdogMs(effective)
             h.postDelayed(
                 {
                     resolveFinalization(
@@ -309,26 +304,37 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                         FinalizationResolution(
                             target = capturedTarget,
                             raw = outcome.rawTranscript,
-                            failure = TimeoutException("確定処理が45秒を超えました"),
+                            failure = TimeoutException("確定処理全体が${watchdogMs / 1000}秒を超えました"),
+                            settings = effective,
                         ),
                         cancelTask = true,
                     )
                 },
-                FINALIZATION_WATCHDOG_MS,
+                watchdogMs,
             )
             try {
                 val result = finalizer.finalize(outcome, context, effective, false)
                 mainExecutor.execute {
                     resolveFinalization(
                         id,
-                        FinalizationResolution(capturedTarget, outcome.rawTranscript, result = result),
+                        FinalizationResolution(
+                            capturedTarget,
+                            outcome.rawTranscript,
+                            result = result,
+                            settings = effective,
+                        ),
                     )
                 }
             } catch (failure: Throwable) {
                 mainExecutor.execute {
                     resolveFinalization(
                         id,
-                        FinalizationResolution(capturedTarget, outcome.rawTranscript, failure = failure),
+                        FinalizationResolution(
+                            capturedTarget,
+                            outcome.rawTranscript,
+                            failure = failure,
+                            settings = effective,
+                        ),
                     )
                 }
             }
@@ -385,46 +391,62 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     resolution.target,
                     resolution.raw,
                     resolution.failure ?: IllegalStateException("Finalization failed without a cause"),
+                    resolution.settings,
                 )
             }
         }
     }
 
     private fun deliverResolved(capturedTarget: Target?, result: FinalizationResult) {
+        val correctionFailed = result.correctionError != null || !result.correctionAccepted
+        if (correctionFailed) {
+            correctionStatus.saveFailure(
+                LastCorrectionFailure(
+                    occurredAtMs = System.currentTimeMillis(),
+                    provider = result.correctionProvider.orEmpty(),
+                    model = result.correctionModel.orEmpty(),
+                    reasoning = result.correctionReasoning.orEmpty(),
+                    latencyMs = result.correctionLatencyMs,
+                    reason = result.correctionError ?: integrityReason(result.correctionDecisionReason),
+                    fallback = result.fallbackSource ?: "音声認識結果",
+                ),
+            )
+        } else if (result.correctionModelResponded) {
+            correctionStatus.clearFailure()
+        }
+
         val commit = commit(capturedTarget, result.finalText)
         if (commit == CommitResult.FAILED) {
             clip(result.finalText)
-            notice(result.finalText, "直接入力できずクリップボードへ保存しました", 3_500)
+            notice(result.finalText, "直接入力できずクリップボードへ保存しました", 4_000)
             return
         }
         rememberCommitted(capturedTarget, result.finalText, commit)
 
+        val latency = result.correctionLatencyMs?.let { "（${formatLatency(it)}）" }.orEmpty()
         val state = when {
             result.correctionBypassed -> "補正なしで入力しました"
-            result.correctionError != null && !result.correctionModelChanged && result.deterministicFormattingChanged ->
-                "LM補正失敗・アプリ整形のみ: ${short(result.correctionError)}"
+            result.correctionError != null && result.deterministicFormattingChanged ->
+                "文章補正に失敗$latency: ${short(result.correctionError)} — 音声認識結果に指定整形だけ適用"
             result.correctionError != null ->
-                "LM補正失敗: ${short(result.correctionError)} — 認識結果を使用"
-            !result.correctionAccepted && result.correctionModelResponded ->
-                "LM出力を安全ガードが拒否: ${result.correctionDecisionReason ?: "unknown"}"
+                "文章補正に失敗$latency: ${short(result.correctionError)} — 音声認識結果を入力"
             !result.correctionAccepted ->
-                "補正結果を安全ガードが拒否: ${result.correctionDecisionReason ?: "unknown"}"
-            result.correctionModelChanged -> "LM補正して入力しました"
+                "補正結果を採用できませんでした$latency: ${integrityReason(result.correctionDecisionReason)} — 音声認識結果を入力"
+            result.correctionModelChanged -> "文章を補正して入力しました$latency"
             result.correctionModelResponded && result.deterministicFormattingChanged ->
-                "LMは語句変更なし・アプリ整形のみ"
-            result.correctionModelResponded -> "LM補正は変更なしでした"
-            result.deterministicFormattingChanged -> "補正モデルなし・アプリ整形のみ"
-            result.finalAsrError != null -> "最終認識を使えずリアルタイム認識で入力しました"
+                "語句はそのまま、指定した整形を適用しました$latency"
+            result.correctionModelResponded -> "補正モデルは変更不要と判断しました$latency"
+            result.deterministicFormattingChanged -> "指定した整形を適用しました"
+            result.finalAsrError != null -> "確定時の再認識を使えず、リアルタイム認識結果を入力しました"
             else -> "入力しました"
         }
-        val suffix = if (commit == CommitResult.UNVERIFIED) "（反映確認不可）" else ""
+        val suffix = if (commit == CommitResult.UNVERIFIED) "（入力欄での反映確認不可）" else ""
         val delay = when {
-            result.correctionError != null -> 4_800L
-            !result.correctionAccepted -> 4_000L
-            result.correctionModelResponded && !result.correctionModelChanged -> 2_800L
-            commit == CommitResult.UNVERIFIED -> 2_800L
-            result.correctionModelChanged -> 1_600L
-            else -> 900L
+            correctionFailed -> 7_500L
+            result.correctionModelResponded && !result.correctionModelChanged -> 3_200L
+            commit == CommitResult.UNVERIFIED -> 3_200L
+            result.correctionModelChanged -> 2_000L
+            else -> 1_200L
         }
         notice(result.finalText, state + suffix, delay)
     }
@@ -437,7 +459,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             }
             CommitResult.UNVERIFIED -> {
                 rememberCommitted(capturedTarget, text, result)
-                notice(text, "$state（反映確認不可）", 2_800)
+                notice(text, "$state（入力欄での反映確認不可）", 2_800)
             }
             CommitResult.VERIFIED -> {
                 rememberCommitted(capturedTarget, text, result)
@@ -446,25 +468,39 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun recoverResolved(capturedTarget: Target?, text: String, failure: Throwable) {
-        val result = commit(capturedTarget, text)
+    private fun recoverResolved(
+        capturedTarget: Target?,
+        text: String,
+        failure: Throwable,
+        effective: AppSettings?,
+    ) {
         val detail = failure.message?.takeIf(String::isNotBlank)?.let(::short)
+            ?: "確定処理を完了できませんでした"
+        effective?.let { current ->
+            correctionStatus.saveFailure(
+                LastCorrectionFailure(
+                    occurredAtMs = System.currentTimeMillis(),
+                    provider = providerLabel(current),
+                    model = current.byokModel,
+                    reasoning = if (current.byokModel.isBlank()) "" else ReasoningCapabilities.label(
+                        current.byokEndpoint,
+                        current.byokModel,
+                        current.reasoningEffort,
+                    ),
+                    latencyMs = null,
+                    reason = detail,
+                    fallback = "音声認識結果",
+                ),
+            )
+        }
+        val result = commit(capturedTarget, text)
         if (result != CommitResult.FAILED) {
             rememberCommitted(capturedTarget, text, result)
-            val suffix = if (result == CommitResult.UNVERIFIED) "（反映確認不可）" else ""
-            notice(
-                text,
-                (detail?.let { "LM補正処理エラー: $it — RAWを入力" } ?: "LM補正処理を完了できずRAWを入力") + suffix,
-                4_800,
-            )
+            val suffix = if (result == CommitResult.UNVERIFIED) "（入力欄での反映確認不可）" else ""
+            notice(text, "文章補正を完了できませんでした: $detail — 音声認識結果を入力$suffix", 7_500)
         } else {
             clip(text)
-            notice(
-                text,
-                detail?.let { "確定処理エラー: $it — クリップボードへ保存" }
-                    ?: "確定処理エラーのためクリップボードへ保存",
-                4_800,
-            )
+            notice(text, "確定処理エラー: $detail — クリップボードへ保存", 7_500)
         }
     }
 
@@ -509,6 +545,51 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             else -> false
         }
     }
+
+    private fun correctionProgressLabel(effective: AppSettings): String {
+        val backend = CorrectionBackendResolver.resolve(effective, File(effective.gemmaModelPath).isFile)
+        return when (backend) {
+            CorrectionBackend.NONE -> "文章を確定しています"
+            CorrectionBackend.GEMMA -> "端末内Gemmaで文章を補正しています"
+            CorrectionBackend.BYOK -> {
+                val reasoning = ReasoningCapabilities.label(
+                    effective.byokEndpoint,
+                    effective.byokModel,
+                    effective.reasoningEffort,
+                )
+                "${effective.byokModel} で文章を補正しています（$reasoning）"
+            }
+        }
+    }
+
+    private fun finalizationWatchdogMs(effective: AppSettings): Long {
+        val finalRecognitionBudget = if (effective.finalAsrMode == FinalAsrMode.REAZON_SPEECH) 32_000L else 2_000L
+        val backend = CorrectionBackendResolver.resolve(effective, File(effective.gemmaModelPath).isFile)
+        val correctionBudget = if (backend == CorrectionBackend.NONE) 2_000L else {
+            CorrectionTimeoutPolicy.correctionTimeoutMs(effective.reasoningEffort) + 3_000L
+        }
+        return finalRecognitionBudget + correctionBudget + 4_000L
+    }
+
+    private fun providerLabel(effective: AppSettings): String {
+        val backend = CorrectionBackendResolver.resolve(effective, File(effective.gemmaModelPath).isFile)
+        return when (backend) {
+            CorrectionBackend.NONE -> "none"
+            CorrectionBackend.GEMMA -> "on-device"
+            CorrectionBackend.BYOK -> CloudCorrectorFactory.protocolFor(effective.byokEndpoint).name.lowercase()
+        }
+    }
+
+    private fun integrityReason(reason: String?): String = when (reason) {
+        "empty-output" -> "補正モデルが空の文章を返しました"
+        "output-expanded-too-much" -> "補正結果が元の発言より異常に長くなりました"
+        "output-lost-too-much" -> "補正結果から元の発言が大量に欠落しました"
+        "word-changes-disabled" -> "『語句は直さない』設定なのに語句が変更されました"
+        null -> "補正結果の形式が不正でした"
+        else -> "補正結果の形式を確認できませんでした ($reason)"
+    }
+
+    private fun formatLatency(ms: Long): String = if (ms < 1_000L) "${ms}ms" else "%.1f秒".format(ms / 1_000.0)
 
     private fun notice(text: String, state: String, delay: Long) {
         if (!bubbleVisible) return
@@ -585,7 +666,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             capturedTarget.fieldName == editor.fieldName
     }
 
-    private fun short(value: String) = value.replace(Regex("\\s+"), " ").trim().take(92)
+    private fun short(value: String) = value.replace(Regex("\\s+"), " ").trim().take(120)
 
     private enum class CommitResult { VERIFIED, UNVERIFIED, FAILED }
 
@@ -594,6 +675,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val raw: String,
         val result: FinalizationResult? = null,
         val failure: Throwable? = null,
+        val settings: AppSettings? = null,
     )
 
     private data class Target(
@@ -623,9 +705,5 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             super.onFinishInput()
             changed(false)
         }
-    }
-
-    companion object {
-        private const val FINALIZATION_WATCHDOG_MS = 45_000L
     }
 }
