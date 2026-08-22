@@ -74,13 +74,14 @@ class CorrectionPromptRepairTest {
 
     @Test
     fun userPromptBoundsContextToTrailingSixHundredCharacters() {
-        val prefix = "捨てる文脈".repeat(120)
-        val tail = "残す文脈".repeat(60)
-        val context = prefix + tail
+        val droppedSentinel = "DROP_CONTEXT_SENTINEL"
+        val keptSentinel = "KEEP_CONTEXT_SENTINEL"
+        val context = droppedSentinel + "前".repeat(700) + keptSentinel + "後".repeat(120)
         val prompt = CorrectionPrompt.user(
             request(RecognitionRepairMode.NORMAL).copy(surroundingContext = context),
         )
-        assertFalse(prompt.contains(prefix.take(80)))
-        assertTrue(prompt.contains(context.takeLast(600).takeLast(80)))
+        assertFalse(prompt.contains(droppedSentinel))
+        assertTrue(prompt.contains(keptSentinel))
+        assertTrue(prompt.contains(context.takeLast(80)))
     }
 }
