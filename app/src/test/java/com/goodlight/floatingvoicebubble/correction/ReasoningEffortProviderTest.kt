@@ -3,11 +3,13 @@ package com.goodlight.floatingvoicebubble.correction
 import com.goodlight.floatingvoicebubble.ReasoningEffort
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ReasoningEffortProviderTest {
     private val openAiEndpoint = "https://api.openai.com/v1/chat/completions"
+    private val anthropicEndpoint = "https://api.anthropic.com/v1/messages"
 
     @Test
     fun legacyGpt5UsesOnlyMinimalLowMediumHigh() {
@@ -99,6 +101,31 @@ class ReasoningEffortProviderTest {
 
         val choices = ReasoningCapabilities.capability(endpoint, "GLM-4.7").choices
         assertEquals(listOf(ReasoningEffort.DEFAULT, ReasoningEffort.NONE, ReasoningEffort.HIGH), choices)
+    }
+
+    @Test
+    fun fableAndMythosDoNotOfferUnsupportedThinkingOff() {
+        val fable = ReasoningCapabilities.capability(anthropicEndpoint, "claude-fable-5")
+        assertFalse(ReasoningEffort.NONE in fable.choices)
+        assertTrue(ReasoningEffort.XHIGH in fable.choices)
+        assertTrue(ReasoningEffort.MAX in fable.choices)
+        assertNull(ReasoningCapabilities.anthropicThinkingType(anthropicEndpoint, "claude-fable-5", ReasoningEffort.NONE))
+
+        val mythosPreview = ReasoningCapabilities.capability(anthropicEndpoint, "claude-mythos-preview")
+        assertFalse(ReasoningEffort.NONE in mythosPreview.choices)
+        assertFalse(ReasoningEffort.XHIGH in mythosPreview.choices)
+        assertTrue(ReasoningEffort.MAX in mythosPreview.choices)
+    }
+
+    @Test
+    fun opus5AllowsThinkingOffAndFullEffortLadder() {
+        val choices = ReasoningCapabilities.capability(anthropicEndpoint, "claude-opus-5").choices
+        assertTrue(ReasoningEffort.NONE in choices)
+        assertTrue(ReasoningEffort.XHIGH in choices)
+        assertTrue(ReasoningEffort.MAX in choices)
+        assertEquals("disabled", ReasoningCapabilities.anthropicThinkingType(anthropicEndpoint, "claude-opus-5", ReasoningEffort.NONE))
+        assertEquals("adaptive", ReasoningCapabilities.anthropicThinkingType(anthropicEndpoint, "claude-opus-5", ReasoningEffort.MAX))
+        assertEquals("max", ReasoningCapabilities.anthropicEffort(anthropicEndpoint, "claude-opus-5", ReasoningEffort.MAX))
     }
 
     @Test
