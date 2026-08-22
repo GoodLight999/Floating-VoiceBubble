@@ -409,6 +409,14 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     latencyMs = result.correctionLatencyMs,
                     reason = result.correctionError ?: integrityReason(result.correctionDecisionReason),
                     fallback = result.fallbackSource ?: "音声認識結果",
+                    attempts = result.correctionAttempts,
+                    httpStatus = result.correctionHttpStatus,
+                    failureStage = result.correctionFailureStage.orEmpty(),
+                    errorClass = result.correctionErrorClass.orEmpty(),
+                    responsePresent = result.correctionResponsePresent,
+                    modelChanged = result.correctionModelChanged,
+                    integrityResult = result.correctionIntegrityResult.orEmpty(),
+                    endpoint = result.correctionEndpoint.orEmpty(),
                 ),
             )
         } else if (result.correctionModelResponded) {
@@ -477,6 +485,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val detail = failure.message?.takeIf(String::isNotBlank)?.let(::short)
             ?: "確定処理を完了できませんでした"
         effective?.let { current ->
+            val backend = CorrectionBackendResolver.resolve(current, File(current.gemmaModelPath).isFile)
             correctionStatus.saveFailure(
                 LastCorrectionFailure(
                     occurredAtMs = System.currentTimeMillis(),
@@ -490,6 +499,13 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     latencyMs = null,
                     reason = detail,
                     fallback = "音声認識結果",
+                    attempts = if (backend == CorrectionBackend.NONE) 0 else 1,
+                    failureStage = if (failure is TimeoutException) "finalization-watchdog" else "finalization",
+                    errorClass = failure.javaClass.simpleName,
+                    responsePresent = false,
+                    modelChanged = false,
+                    integrityResult = "not-run",
+                    endpoint = failureEndpoint(current, backend),
                 ),
             )
         }
@@ -578,6 +594,14 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             CorrectionBackend.GEMMA -> "on-device"
             CorrectionBackend.BYOK -> CloudCorrectorFactory.protocolFor(effective.byokEndpoint).name.lowercase()
         }
+    }
+
+    private fun failureEndpoint(effective: AppSettings, backend: CorrectionBackend): String = when (backend) {
+        CorrectionBackend.NONE -> ""
+        CorrectionBackend.GEMMA -> "on-device"
+        CorrectionBackend.BYOK -> runCatching {
+            ByokEndpointResolver.resolve(effective.byokEndpoint).generationUrl.substringBefore('?').substringBefore('#')
+        }.getOrElse { effective.byokEndpoint.substringBefore('?').substringBefore('#').take(220) }
     }
 
     private fun integrityReason(reason: String?): String = when (reason) {
