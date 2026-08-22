@@ -2,18 +2,21 @@
 
 > **Authority rule:** Product requirements live in the project Notion page. This file describes implementation state and operating procedure; it must not silently redefine requirements.
 
+> **ACTIVE STABILIZATION — READ FIRST:** the previous “software-side work is exhausted” conclusion is revoked. Before doing anything else, read `docs/CURRENT_ISSUES.md`. That file is the durable OPEN → FIXED → VERIFIED ledger for the 2026-08-22 stabilization pass and overrides the stale “remaining work boundary” language later in this historical handoff until the ledger is fully verified.
+
 ## Resume point
 
 - Repository: `GoodLight999/Floating-VoiceBubble`
 - Working branch: `agent/initial-production-foundation`
 - Draft PR: `#1 Build production-quality Android voice input foundation`
+- **Current execution ledger:** `docs/CURRENT_ISSUES.md`
 - Platform: Android 13+ (`minSdk 33`, `targetSdk 36`)
 - Full runtime ABIs: `arm64-v8a`, `x86_64`
 - Build: Gradle 9.5.0 / Java 17
 - ASR runtime: sherpa-onnx v1.13.5
 - Local correction runtime: LiteRT-LM 0.14.0
 
-**Before changing code:** read the Notion specification, this file, `docs/REQUIREMENTS_MATRIX.md`, and the latest PR body/CI result.
+**Before changing code:** read the Notion specification, `docs/CURRENT_ISSUES.md`, this file, `docs/REQUIREMENTS_MATRIX.md`, and the latest PR body/CI result.
 
 ## Architecture
 
@@ -29,7 +32,7 @@
 8. Recognition completion and LLM correction are separate lifecycle stages. The previous utterance may correct in a keyed finalization job while a new microphone session begins; an old finalization notice cannot overwrite a newer partial transcript.
 9. Optional final-ASR re-decodes the exact finalized WAV. A latch prevents final-ASR from racing an unfinished PCM→WAV wrap.
 10. Personal dictionary terms + N-best/context enter correction.
-11. BYOK or Gemma performs correction according to the explicit punctuation/filler/register controls. `CorrectionGuard` enforces disabled transforms after the model and preserves strict minimum-edit behavior unless polite/business register rewrite was explicitly requested.
+11. BYOK or Gemma performs correction according to the explicit punctuation/filler/register controls. `CorrectionGuard` currently enforces output/preference invariants; **its current behavior and user-facing naming are under active P0 review in `docs/CURRENT_ISSUES.md`.**
 12. Final text is committed once only if the original editor generation is still valid.
 13. If the target moved/disappeared or commit fails, final text is copied to clipboard.
 
@@ -52,26 +55,9 @@
 - Gemini `generateContent`
 - Gemma 4 E2B/E4B via LiteRT-LM
 
-`CorrectionSetupActivity` provides:
-
-- API URL/key/model configuration
-- normalized OpenAI-compatible / Anthropic / Gemini endpoint handling
-- model-list discovery from API URL + key, including Anthropic/Gemini pagination
-- filter/select model UI
-- an actual BYOK correction request as the connection test
-- one-tap reviewed Gemma E2B/E4B acquisition
+`CorrectionSetupActivity` currently provides API/model configuration and testing, but **its draft-vs-persisted settings behavior, reasoning capability model, and test-vs-runtime equivalence are active P0 defects**. Do not assume its “real correction test” represents production behavior until those ledger items are VERIFIED.
 
 API secrets are Android-Keystore protected. Offline correction can never resolve to BYOK.
-
-Normal UI exposes independent controls for:
-
-- add `、`
-- add `。`
-- remove filler words
-- polite language
-- business-level polite language
-
-Polite and business-polite are mutually exclusive. Explicit register conversion receives a larger guard edit budget; unrequested register changes remain tightly constrained.
 
 ### Model storage and recovery
 
@@ -94,30 +80,11 @@ URLs/fingerprints are source-controlled, not remotely configured. ASR `.tar.bz2`
 
 ### Dictionary
 
-`PersonalDictionary` is SQLite-backed and intentionally unbounded at the product layer. It supports:
-
-- upsert/delete/get
-- literal substring search over term/reading/alias
-- CSV/TSV import
-- TSV export
-- ranked ASR bias terms
-- relevant correction context
-- use-count ranking
-
-Advanced UI provides search/edit/delete/import/export without loading the whole dictionary at once.
+`PersonalDictionary` is SQLite-backed and intentionally unbounded at the product layer. It supports upsert/delete/get, search over term/reading/alias, import/export, ranked ASR bias terms, correction context, and use-count ranking.
 
 ### Benchmarking
 
-Human references are authoritative. Recognizer disagreement is never called accuracy.
-
-`AsrTournamentRunner` compares, on the same saved utterances:
-
-- current live transcript
-- every installed Nemotron chunk model, replayed through its actual online recognizer
-- ReazonSpeech final ASR
-- imported external results (Gboard / Wispr Flow / Aqua Voice)
-
-Metrics: strict code-point CER, punctuation/symbol-stripped content CER, WER only when tokenization is meaningful, and RTF where locally measurable.
+Human references are authoritative. Recognizer disagreement is never called accuracy. Benchmarking/development rationale belongs in engineering/docs, **not ordinary user-facing settings UI**.
 
 ## App identity and signing
 
@@ -127,52 +94,21 @@ Metrics: strict code-point CER, punctuation/symbol-stripped content CER, WER onl
 - Stable sideload/update signing uses a private JKS supplied through `FVB_SIGNING_*` environment variables / GitHub Actions secrets.
 - CI verifies APK signature and can pin the expected certificate SHA-256 with `FVB_SIGNING_CERT_SHA256`.
 - The private signing key must never be committed to this public repository. See `docs/SIGNING.md`.
+- **Artifact provenance is an active P0 gate** because a stale/wrong APK was previously handed to the user. Use unique source-SHA filenames and re-hash the exact linked file.
 
-Until those repository secrets are provisioned, CI deliberately uses the runner-local Android debug signer for build continuity and does **not** claim the artifact has stable install identity.
+## UI state
 
-## UI split
-
-- `MainActivity` / `VoiceBubbleSettingsScreen`: normal product settings.
-- `QuickCorrectionControls`: frequently changed correction direction.
-- `CorrectionSetupActivity`: BYOK/model selection/connection verification + Gemma quick install.
-- `AdvancedToolsActivity`: full model acquisition, dictionary management, ground truth, competitor imports, ASR tournament.
-- Main screen exposes one compact `管理` FAB. Research/debug controls do not dominate daily-use UI.
-- Main/correction screens use `WindowInsets.safeDrawing` and explicit Material surface content colors so status/cutout areas and dark mode do not inherit stale black text.
+The current UI split is **not considered final**. `docs/CURRENT_ISSUES.md` records P0 defects covering duplicated normal/detail/management settings, developer jargon, ambiguous punctuation/filler controls, and invisible effective per-app overrides. The stabilization target is one canonical everyday settings surface plus clearly scoped subpages.
 
 ## Automated diagnostics / CI
 
-`SelfDiagnostics` checks what software can check without real-world audio/OEM behavior. Shareable output redacts secrets and user content.
+`SelfDiagnostics` exists, but its current short provider probe is **not production-equivalent**. The active ledger requires separate reachability and full-finalization probes, effective-settings reporting, provider/body observability, and explicit timeout/fallback evidence.
 
-CI must stay green for:
+CI must stay green for pinned model URLs, lint, JVM tests, debug/release assembly, APK/native alignment/signature/manifest checks, API33, and API36. **Do not weaken tests to make a change green.**
 
-- pinned official-model URL reachability
-- lint
-- JVM tests, including transcript segmentation/overlap, endpoint timing, BYOK endpoint normalization, and correction preference guard behavior
-- debug + release/R8 assembly
-- APK archive/native ABI checks
-- 16 KiB alignment
-- signature/manifest/app-label/icon assertions
-- API 33 emulator install/launch/Accessibility/instrumentation
-- API 36 emulator install/launch/Accessibility/instrumentation
+## Remaining work boundary — historical, currently superseded
 
-Do not weaken tests to make a change green.
-
-## Remaining work boundary
-
-At handoff, the intended boundary is: **only observations that intrinsically require a physical Android device, real microphone/audio, third-party apps/services, provider credentials, or device performance remain.**
-
-Use `docs/REAL_DEVICE_VALIDATION.md`. Do not reopen already-closed architectural questions unless real-device evidence falsifies an assumption.
-
-Typical device-only outputs:
-
-- OEM microphone/HAL and `SpeechRecognizer` segmented-session behavior
-- overlay/focus/input/IME-window compatibility in real third-party apps
-- labeled Japanese CER on real utterances
-- external competitor transcripts generated by their actual products
-- real BYOK credentials/quota/provider model-list behavior
-- Gemma CPU/GPU latency, memory, thermals, battery
-- multi-GB download behavior under real phone storage/network constraints
-- stable signing secret provisioning in repository settings
+The earlier intended boundary was “only physical-device/external-provider observations remain.” Real-device evidence falsified that assumption. **Until every P0 in `docs/CURRENT_ISSUES.md` is VERIFIED, substantial software-side work remains.**
 
 ## Invariants — do not regress
 
@@ -186,23 +122,27 @@ Typical device-only outputs:
 8. Do not replace the Notion spec with this handoff file.
 9. Do not treat a provider/OEM recognition segment boundary as the end of the user's VoiceBubble utterance.
 10. Do not let an older correction result overwrite a newer active transcript UI.
+11. Do not expose development-policy prose or unexplained engineering jargon as user-facing product copy.
+12. Do not call output-integrity validation a “safety guard” in user-facing UI.
 
 ## Handoff closeout procedure
 
 Before ending a development session:
 
-1. Ensure working branch/PR head contains all intended changes.
-2. Run the full GitHub Actions workflow and wait for model-catalog + verify + API33 + API36.
-3. Update PR #1 body with the exact validated head/run/artifact.
-4. Append a concise implementation-status note to Notion without rewriting the authoritative requirements.
-5. Stop adding software work when `docs/REQUIREMENTS_MATRIX.md` has no non-device gap; proceed with `docs/REAL_DEVICE_VALIDATION.md` instead.
+1. Update `docs/CURRENT_ISSUES.md`: no issue may skip `FIXED`/`VERIFIED` evidence.
+2. Ensure branch/PR head contains all intended changes.
+3. Run full Actions (model-catalog + verify + API33 + API36) plus the issue-specific provider/prompt/mock-server regressions required by the ledger.
+4. Update PR #1 body with the exact state; never claim complete while ledger blockers remain.
+5. Append a concise status note to Notion without rewriting authoritative requirements.
+6. Only after all P0/P1 release gates are VERIFIED may a stable APK be freshly signed and handed to the user.
 
 ## Validation pointer
 
-Do **not** pin a supposedly “current head” in this tracked file: editing the SHA here would create a new commit and immediately make that SHA stale. The durable validation snapshot is therefore:
+Do **not** pin a supposedly current head in this tracked file. Use:
 
-- **PR #1 body:** exact validated head, GitHub Actions run, APK artifact and digest.
-- **GitHub Actions for the current PR head:** source of truth for model-catalog / verify / API33 / API36 status.
-- **`docs/REQUIREMENTS_MATRIX.md`:** source of truth for the software-vs-device boundary.
+- `docs/CURRENT_ISSUES.md`: current stabilization state and acceptance criteria.
+- PR #1 body: current high-level status.
+- GitHub Actions for current PR head: CI status.
+- Notion: authoritative product requirements and stabilization note.
 
-At a proper handoff closeout, the software-completable requirement rows are closed and the only remaining actions are those in `docs/REAL_DEVICE_VALIDATION.md`. If a later CI run is red, that red run overrides this readiness statement until fixed.
+If a later CI run is red or real-device evidence contradicts a prior assumption, that evidence reopens the relevant ledger item.
