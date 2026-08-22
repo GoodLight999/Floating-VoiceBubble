@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -49,13 +51,19 @@ internal fun HomeSettingsScreen(
     onRuntimeStatusChanged: () -> Unit,
 ) {
     val store = remember(activity) { SettingsStore(activity) }
+    val profileStore = remember(activity) { AppProfileStore(activity) }
+    val correctionStatus = remember(activity) { CorrectionStatusStore(activity) }
     var settings by remember { mutableStateOf(store.load()) }
+    var lastFailure by remember { mutableStateOf(correctionStatus.loadFailure()) }
+    var recentOverride by remember { mutableStateOf(loadRecentOverride(activity, profileStore, settings)) }
     var diagnosticBusy by remember { mutableStateOf(false) }
     var diagnosticReport by remember { mutableStateOf<DiagnosticReport?>(null) }
     var diagnosticMessage by remember { mutableStateOf("") }
 
     LaunchedEffect(refreshRevision) {
         settings = store.load()
+        lastFailure = correctionStatus.loadFailure()
+        recentOverride = loadRecentOverride(activity, profileStore, settings)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -106,6 +114,47 @@ internal fun HomeSettingsScreen(
                 if (!accessibilityEnabled) {
                     OutlinedButton(onClick = { activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
                         Text("文字入力を許可")
+                    }
+                }
+            }
+        }
+
+        lastFailure?.let { failure ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("last-correction-failure"),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("前回の文章補正に失敗しました", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        buildString {
+                            if (failure.model.isNotBlank()) append(failure.model)
+                            if (failure.reasoning.isNotBlank()) append(" / ").append(failure.reasoning)
+                            failure.latencyMs?.let { append(" / ").append(formatLatency(it)) }
+                        }.ifBlank { failure.provider },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(failure.reason, style = MaterialTheme.typography.bodySmall)
+                    if (failure.fallback.isNotBlank()) {
+                        Text("結果: ${failure.fallback}", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+
+        recentOverride?.let { override ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("app-profile-override-indicator"),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+            ) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("${override.appLabel} ではアプリ別設定が有効", fontWeight = FontWeight.SemiBold)
+                    if (override.differences.isNotEmpty()) {
+                        Text(override.differences.joinToString(" / "), style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
@@ -211,6 +260,36 @@ internal fun HomeSettingsScreen(
     }
 }
 
+private data class RecentOverride(
+    val appLabel: String,
+    val differences: List<String>,
+)
+
+private fun loadRecentOverride(
+    activity: MainActivity,
+    profileStore: AppProfileStore,
+    base: AppSettings,
+): RecentOverride? {
+    val packageName = profileStore.recentPackages(limit = 1).firstOrNull() ?: return null
+    val profile = profileStore.profile(packageName)?.takeIf { it.enabled } ?: return null
+    val effective = profile.applyTo(base)
+    val differences = buildList {
+        if (effective.correctionMode != base.correctionMode) add("補正方法")
+        if (effective.recognitionRepairMode != base.recognitionRepairMode) add("聞き取り修復")
+        if (effective.correctionLineBreakMode != base.correctionLineBreakMode) add("改行")
+        if (effective.correctionAddCommas != base.correctionAddCommas) add("読点")
+        if (effective.correctionAddPeriods != base.correctionAddPeriods) add("句点")
+        if (effective.correctionRemoveFillers != base.correctionRemoveFillers) add("『えー』等の削除")
+        if (effective.correctionPolite != base.correctionPolite ||
+            effective.correctionBusinessPolite != base.correctionBusinessPolite) add("話し方")
+    }
+    val label = runCatching {
+        val appInfo = activity.packageManager.getApplicationInfo(packageName, 0)
+        activity.packageManager.getApplicationLabel(appInfo).toString()
+    }.getOrDefault(packageName)
+    return RecentOverride(label, differences)
+}
+
 @Composable
 private fun HomeToggleChip(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
     FilterChip(
@@ -231,6 +310,8 @@ private fun finalRecognitionLabel(mode: FinalAsrMode): String = when (mode) {
     FinalAsrMode.LIVE_RESULT -> "そのまま"
     FinalAsrMode.REAZON_SPEECH -> "ReazonSpeechで再認識"
 }
+
+private fun formatLatency(ms: Long): String = if (ms < 1_000L) "${ms}ms" else "%.1f秒".format(ms / 1_000.0)
 
 private fun copyDiagnostic(activity: MainActivity, report: DiagnosticReport) {
     activity.getSystemService(ClipboardManager::class.java)
