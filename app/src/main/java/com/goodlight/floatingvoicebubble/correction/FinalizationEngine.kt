@@ -12,6 +12,7 @@ import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
 import com.goodlight.floatingvoicebubble.trace.FinalizationTrace
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
 import java.io.File
+import java.net.URI
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
@@ -34,6 +35,13 @@ data class FinalizationResult(
     val correctionProvider: String? = null,
     val correctionModel: String? = null,
     val correctionReasoning: String? = null,
+    val correctionAttempts: Int = 0,
+    val correctionHttpStatus: Int? = null,
+    val correctionFailureStage: String? = null,
+    val correctionErrorClass: String? = null,
+    val correctionResponsePresent: Boolean = false,
+    val correctionEndpoint: String? = null,
+    val correctionIntegrityResult: String? = null,
     val fallbackSource: String? = null,
 )
 
@@ -75,7 +83,13 @@ class FinalizationEngine(
                 modelChanged = false,
                 deterministicFormattingChanged = false,
                 correctionLatencyMs = null,
-                route = CorrectionRoute(null, null, null),
+                correctionAttempts = 0,
+                correctionHttpStatus = null,
+                correctionFailureStage = null,
+                correctionErrorClass = null,
+                correctionResponsePresent = false,
+                correctionIntegrityResult = "bypassed",
+                route = CorrectionRoute(null, null, null, null),
                 fallbackSource = null,
                 settings = settings,
             )
@@ -89,6 +103,7 @@ class FinalizationEngine(
                 correctionChanged = false,
                 correctionBypassed = true,
                 modelOutput = null,
+                correctionIntegrityResult = "bypassed",
             )
         }
 
@@ -133,23 +148,48 @@ class FinalizationEngine(
         val route = correctionRoute(settings)
 
         var correctionError: String? = null
+        var correctionAttempts = 0
+        var correctionHttpStatus: Int? = null
+        var correctionFailureStage: String? = null
+        var correctionErrorClass: String? = null
+        var correctionResponsePresent = false
         val corrector = runCatching { selectCorrector(settings) }
-            .onFailure { correctionError = it.message ?: it.javaClass.simpleName }
+            .onFailure { failure ->
+                correctionError = failure.message ?: failure.javaClass.simpleName
+                correctionFailureStage = "select-backend"
+                correctionErrorClass = failure.javaClass.simpleName
+            }
             .getOrNull()
         val attempted = corrector != null
         var modelOutput: String? = null
         var correctionLatencyMs: Long? = null
         if (corrector != null) {
             val started = System.nanoTime()
-            modelOutput = runCatching {
+            val detailed = runCatching {
                 bounded(
                     CorrectionTimeoutPolicy.correctionTimeoutMs(settings.reasoningEffort),
                     "補正モデル",
-                ) { corrector.correct(request) }
-            }.onFailure { correctionError = it.message ?: it.javaClass.simpleName }.getOrNull()
+                ) { corrector.correctDetailed(request) }
+            }.onFailure { failure ->
+                correctionError = failure.message ?: failure.javaClass.simpleName
+                val structured = failure as? CorrectionCallException
+                correctionAttempts = structured?.attempts ?: 1
+                correctionHttpStatus = structured?.httpStatus
+                correctionFailureStage = structured?.stage ?: if (failure is TimeoutException) "model-timeout" else "model-call"
+                correctionErrorClass = structured?.errorClass ?: failure.javaClass.simpleName
+                correctionResponsePresent = structured?.responsePresent ?: false
+            }.getOrNull()
+            if (detailed != null) {
+                modelOutput = detailed.text
+                correctionAttempts = detailed.metadata.attempts
+                correctionHttpStatus = detailed.metadata.httpStatus
+                correctionResponsePresent = detailed.metadata.responsePresent
+            }
             correctionLatencyMs = (System.nanoTime() - started) / 1_000_000L
         } else if (settings.correctionMode != CorrectionMode.NONE && correctionError == null) {
             correctionError = "補正バックエンドが利用できません"
+            correctionFailureStage = "select-backend"
+            correctionErrorClass = "BackendUnavailable"
         }
 
         val rawModelOutput = modelOutput
@@ -166,6 +206,11 @@ class FinalizationEngine(
         val decision = CorrectionGuard.choose(correctionInput, candidate, preferences)
         val finalText = decision.text
         val changed = finalText != correctionInput
+        if (!decision.accepted && correctionFailureStage == null) {
+            correctionFailureStage = "integrity-check"
+            correctionErrorClass = "OutputIntegrityRejected"
+        }
+        val integrityResult = if (decision.accepted) "accepted" else "rejected:${decision.reason ?: "unknown"}"
         val fallbackSource = when {
             correctionError != null && deterministicFormattingChanged -> "音声認識結果＋指定整形"
             correctionError != null -> "音声認識結果"
@@ -195,6 +240,12 @@ class FinalizationEngine(
             modelChanged = modelChanged,
             deterministicFormattingChanged = deterministicFormattingChanged,
             correctionLatencyMs = correctionLatencyMs,
+            correctionAttempts = correctionAttempts,
+            correctionHttpStatus = correctionHttpStatus,
+            correctionFailureStage = correctionFailureStage,
+            correctionErrorClass = correctionErrorClass,
+            correctionResponsePresent = correctionResponsePresent,
+            correctionIntegrityResult = integrityResult,
             route = route,
             fallbackSource = fallbackSource,
             settings = settings,
@@ -216,6 +267,13 @@ class FinalizationEngine(
             correctionProvider = route.provider,
             correctionModel = route.model,
             correctionReasoning = route.reasoning,
+            correctionAttempts = correctionAttempts,
+            correctionHttpStatus = correctionHttpStatus,
+            correctionFailureStage = correctionFailureStage,
+            correctionErrorClass = correctionErrorClass,
+            correctionResponsePresent = correctionResponsePresent,
+            correctionEndpoint = route.endpoint,
+            correctionIntegrityResult = integrityResult,
             fallbackSource = fallbackSource,
         )
     }
@@ -223,16 +281,18 @@ class FinalizationEngine(
     private fun correctionRoute(settings: AppSettings): CorrectionRoute {
         val gemmaAvailable = File(settings.gemmaModelPath).isFile
         return when (CorrectionBackendResolver.resolve(settings, gemmaAvailable)) {
-            CorrectionBackend.NONE -> CorrectionRoute("none", null, null)
+            CorrectionBackend.NONE -> CorrectionRoute("none", null, null, null)
             CorrectionBackend.GEMMA -> CorrectionRoute(
                 provider = "on-device",
                 model = if (settings.gemmaVariant.name == "UNKNOWN") "Gemma" else "Gemma ${settings.gemmaVariant.name}",
                 reasoning = null,
+                endpoint = "on-device",
             )
             CorrectionBackend.BYOK -> CorrectionRoute(
                 provider = CloudCorrectorFactory.protocolFor(settings.byokEndpoint).name.lowercase(),
                 model = settings.byokModel,
                 reasoning = ReasoningCapabilities.label(settings.byokEndpoint, settings.byokModel, settings.reasoningEffort),
+                endpoint = redactedEndpoint(settings.byokEndpoint),
             )
         }
     }
@@ -270,6 +330,12 @@ class FinalizationEngine(
         modelChanged: Boolean,
         deterministicFormattingChanged: Boolean,
         correctionLatencyMs: Long?,
+        correctionAttempts: Int,
+        correctionHttpStatus: Int?,
+        correctionFailureStage: String?,
+        correctionErrorClass: String?,
+        correctionResponsePresent: Boolean,
+        correctionIntegrityResult: String?,
         route: CorrectionRoute,
         fallbackSource: String?,
         settings: AppSettings,
@@ -295,7 +361,13 @@ class FinalizationEngine(
                 correctionModel = route.model,
                 correctionReasoning = route.reasoning,
                 correctionLatencyMs = correctionLatencyMs,
-                correctionAttempts = if (attempted) 1 else 0,
+                correctionAttempts = correctionAttempts,
+                correctionHttpStatus = correctionHttpStatus,
+                correctionFailureStage = correctionFailureStage,
+                correctionErrorClass = correctionErrorClass,
+                correctionResponsePresent = correctionResponsePresent,
+                correctionEndpoint = route.endpoint,
+                correctionIntegrityResult = correctionIntegrityResult,
                 fallbackSource = fallbackSource,
                 finalAsrId = finalAsrId,
                 finalAsrLatencyMs = finalAsrLatencyMs,
@@ -305,6 +377,17 @@ class FinalizationEngine(
             enabled = settings.keepSessionTraces,
         )
     }
+
+    private fun redactedEndpoint(endpoint: String): String = runCatching {
+        val uri = URI(endpoint.trim())
+        buildString {
+            append(uri.scheme ?: "https")
+            append("://")
+            append(uri.host.orEmpty())
+            if (uri.port >= 0) append(":${uri.port}")
+            append(uri.path.orEmpty())
+        }
+    }.getOrElse { endpoint.substringBefore('?').substringBefore('#').take(220) }
 
     private fun <T> bounded(timeoutMs: Long, label: String, block: () -> T): T {
         val future = inferenceWorker.submit<T> { block() }
@@ -326,6 +409,7 @@ class FinalizationEngine(
         val provider: String?,
         val model: String?,
         val reasoning: String?,
+        val endpoint: String?,
     )
 
     companion object {
