@@ -11,11 +11,13 @@ import android.os.Build
 import android.provider.Settings
 import android.speech.SpeechRecognizer
 import com.goodlight.floatingvoicebubble.AppProfileStore
+import com.goodlight.floatingvoicebubble.AppSettings
 import com.goodlight.floatingvoicebubble.BuildConfig
 import com.goodlight.floatingvoicebubble.CorrectionMode
 import com.goodlight.floatingvoicebubble.FinalAsrMode
 import com.goodlight.floatingvoicebubble.GemmaVariant
 import com.goodlight.floatingvoicebubble.RecognitionMode
+import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService
 import com.goodlight.floatingvoicebubble.correction.ByokEndpointResolver
@@ -24,13 +26,15 @@ import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
 import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
 import com.goodlight.floatingvoicebubble.correction.CorrectionPostProcessor
-import com.goodlight.floatingvoicebubble.correction.GemmaCorrector
+import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
+import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.model.GemmaModelVerifier
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackend
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackendResolver
+import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
 import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
 import com.goodlight.floatingvoicebubble.speech.SherpaStreamingEngine
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
@@ -38,6 +42,7 @@ import com.k2fsa.sherpa.onnx.VersionInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.Executors
 
 enum class DiagnosticStatus { PASS, WARN, FAIL, SKIP }
 
@@ -61,7 +66,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 7)
+        .put("schema", 8)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -95,7 +100,10 @@ class SelfDiagnostics(
     fun run(includeExternalProbes: Boolean = true): DiagnosticReport {
         val started = System.currentTimeMillis()
         val results = mutableListOf<DiagnosticItem>()
-        val settings = settingsStore.load()
+        val globalSettings = settingsStore.load()
+        val profileStore = AppProfileStore(appContext)
+        val recentPackage = profileStore.recentPackages(limit = 1).firstOrNull()
+        val settings = recentPackage?.let { profileStore.effectiveSettings(globalSettings, it) } ?: globalSettings
         val asrModelStore = AsrModelStore(appContext)
         val streamingModel = asrModelStore.resolve(settings.streamingAsrModelId)
         val finalAsrModelStore = FinalAsrModelStore(appContext)
@@ -160,15 +168,15 @@ class SelfDiagnostics(
         }
 
         results += if (settings.offlineMode && streamingModel == null) {
-            fail("offline-asr-readiness", "offline mode is enabled but no valid true-streaming ASR model is selected")
+            fail("offline-recognition-readiness", "通信しない設定ですが端末内音声認識モデルがありません")
         } else {
-            pass("offline-asr-readiness", if (settings.offlineMode) "ready" else "offline mode inactive")
+            pass("offline-recognition-readiness", if (settings.offlineMode) "ready" else "offline mode inactive")
         }
 
         results += when {
-            settings.finalAsrMode == FinalAsrMode.LIVE_RESULT -> pass("final-asr-readiness", "live result selected")
-            finalAsrModel == null -> fail("final-asr-readiness", "ReazonSpeech selected but model is missing or invalid")
-            else -> pass("final-asr-readiness", "${finalAsrModel.family}; size=${finalAsrModel.totalBytes} bytes")
+            settings.finalAsrMode == FinalAsrMode.LIVE_RESULT -> pass("final-recognition-readiness", "live result selected")
+            finalAsrModel == null -> fail("final-recognition-readiness", "ReazonSpeech selected but model is missing or invalid")
+            else -> pass("final-recognition-readiness", "${finalAsrModel.family}; size=${finalAsrModel.totalBytes} bytes")
         }
 
         results += probe("dictionary-db") {
@@ -178,13 +186,12 @@ class SelfDiagnostics(
             }
         }
         results += probe("app-profile-store") {
-            val profileStore = AppProfileStore(appContext)
             val health = profileStore.health()
             check(health.healthy) {
                 "profile storage decode mismatch: serialized=${health.serializedProfiles}, decoded=${health.decodedProfiles}"
             }
-            profileStore.profiles().forEach { profile -> profile.applyTo(settings) }
-            "profiles=${health.decodedProfiles}; recent=${health.recentPackages}; decode/apply OK"
+            profileStore.profiles().forEach { profile -> profile.applyTo(globalSettings) }
+            "profiles=${health.decodedProfiles}; recent=${health.recentPackages}; effectivePackage=${recentPackage ?: "none"}"
         }
         results += probe("trace-storage") {
             val dir = SessionTraceStore(appContext).audioDir.apply { mkdirs() }
@@ -201,12 +208,8 @@ class SelfDiagnostics(
             check(configured.generationUrl.startsWith("https://")) { "normalized generation endpoint is not HTTPS" }
             check(configured.modelsUrl.startsWith("https://")) { "normalized model endpoint is not HTTPS" }
             val versionless = ByokEndpointResolver.resolve("https://voicebubble.invalid")
-            check(versionless.generationUrl == "https://voicebubble.invalid/v1/chat/completions") {
-                "versionless OpenAI-compatible root did not normalize to /v1/chat/completions"
-            }
-            check(versionless.modelsUrl == "https://voicebubble.invalid/v1/models") {
-                "versionless OpenAI-compatible root did not normalize to /v1/models"
-            }
+            check(versionless.generationUrl == "https://voicebubble.invalid/v1/chat/completions")
+            check(versionless.modelsUrl == "https://voicebubble.invalid/v1/models")
             "protocol=${configured.protocol}; generation/models normalization OK"
         }
 
@@ -214,9 +217,7 @@ class SelfDiagnostics(
         val gemmaStructurallyAvailable = modelFile?.isFile == true && modelFile.length() >= MIN_GEMMA_BYTES
         val gemmaFingerprint = if (gemmaStructurallyAvailable) {
             runCatching { GemmaModelVerifier.inspect(requireNotNull(modelFile)) }
-        } else {
-            null
-        }
+        } else null
         val gemmaAvailable = gemmaStructurallyAvailable
 
         results += when {
@@ -248,17 +249,14 @@ class SelfDiagnostics(
             }
         }
 
-        val selectedOfflineCorrection = CorrectionBackendResolver.resolve(settings.copy(offlineMode = true), gemmaAvailable)
+        val selectedBackend = CorrectionBackendResolver.resolve(settings, gemmaAvailable)
         results += when {
             !settings.offlineMode -> pass("offline-correction-readiness", "offline mode inactive")
             settings.correctionMode == CorrectionMode.GEMMA && !gemmaAvailable ->
                 fail("offline-correction-readiness", "Gemma correction is explicitly selected but the model is missing")
-            selectedOfflineCorrection == CorrectionBackend.GEMMA ->
-                pass("offline-correction-readiness", "Gemma available; offline correction ready")
-            settings.correctionMode == CorrectionMode.NONE ->
-                pass("offline-correction-readiness", "correction explicitly disabled; no Gemma model required")
-            else ->
-                pass("offline-correction-readiness", "cloud blocked; no Gemma available, so correction will be disabled")
+            selectedBackend == CorrectionBackend.GEMMA -> pass("offline-correction-readiness", "Gemma available")
+            settings.correctionMode == CorrectionMode.NONE -> pass("offline-correction-readiness", "correction disabled")
+            else -> pass("offline-correction-readiness", "cloud blocked; correction will not use network")
         }
 
         results += probe("offline-cloud-block") {
@@ -267,87 +265,124 @@ class SelfDiagnostics(
                 correctionMode = CorrectionMode.BYOK,
                 byokModel = "diagnostic-cloud-model",
             )
-            val backendWithGemma = CorrectionBackendResolver.resolve(forcedOffline, gemmaAvailable = true)
-            val backendWithoutGemma = CorrectionBackendResolver.resolve(forcedOffline, gemmaAvailable = false)
-            val explicitNone = CorrectionBackendResolver.resolve(
-                forcedOffline.copy(correctionMode = CorrectionMode.NONE),
-                gemmaAvailable = true,
+            check(CorrectionBackendResolver.resolve(forcedOffline, true) == CorrectionBackend.GEMMA)
+            check(CorrectionBackendResolver.resolve(forcedOffline, false) == CorrectionBackend.NONE)
+            check(
+                CorrectionBackendResolver.resolve(
+                    forcedOffline.copy(correctionMode = CorrectionMode.NONE),
+                    true,
+                ) == CorrectionBackend.NONE,
             )
-            check(backendWithGemma == CorrectionBackend.GEMMA) { "forced offline mode selected $backendWithGemma with Gemma" }
-            check(backendWithoutGemma == CorrectionBackend.NONE) { "forced offline mode selected $backendWithoutGemma without Gemma" }
-            check(explicitNone == CorrectionBackend.NONE) { "explicit NONE was overridden by $explicitNone" }
-            "policy verified: offline never selects cloud; BYOK→Gemma/NONE and explicit NONE stays NONE"
+            "offline never selects cloud"
         }
 
-        results += probeCorrectionGuard()
+        results += probeCorrectionIntegrity()
+        results += correctionRouteItem(settings, selectedBackend)
 
         if (includeExternalProbes) {
             if (streamingModel != null) {
-                results += probe("streaming-asr-model-load") {
+                results += probe("streaming-recognition-model-load") {
                     SherpaStreamingEngine.preload(streamingModel)
-                    "Sherpa OnlineRecognizer loaded model successfully"
+                    "streaming recognizer loaded model successfully"
                 }
-            } else {
-                results += skip("streaming-asr-model-load", "model not configured")
-            }
+            } else results += skip("streaming-recognition-model-load", "model not configured")
 
             if (finalAsrModel != null) {
-                results += probe("final-asr-model-load") {
+                results += probe("final-recognition-model-load") {
                     SherpaFinalAsrEngine.preload(finalAsrModel)
-                    "Sherpa OfflineRecognizer loaded ReazonSpeech successfully"
+                    "final recognizer loaded ReazonSpeech successfully"
                 }
-            } else {
-                results += skip("final-asr-model-load", "model not configured")
-            }
+            } else results += skip("final-recognition-model-load", "model not configured")
 
-            if (gemmaAvailable) {
-                results += probe("gemma-semantic-correction") {
-                    val request = CorrectionPostProcessor.correctionProbeRequest()
-                    val output = GemmaCorrector(appContext, requireNotNull(modelFile).absolutePath, settings.gemmaBackend)
-                        .correct(request)
-                    check(output.isNotBlank()) { "Gemma returned empty output" }
-                    CorrectionPostProcessor.probeFailure(output)?.let { error(it) }
-                    "real inference passed N-best/context ASR-repair contract"
+            when (selectedBackend) {
+                CorrectionBackend.NONE -> {
+                    results += skip("production-correction-short", "correction disabled or unavailable")
+                    results += skip("production-correction-long", "correction disabled or unavailable")
                 }
-            } else {
-                results += skip("gemma-semantic-correction", "model not configured or invalid")
-            }
-
-            val selectedBackend = CorrectionBackendResolver.resolve(settings, gemmaAvailable)
-            val shouldProbeCloud = !settings.offlineMode &&
-                selectedBackend == CorrectionBackend.BYOK &&
-                settings.byokModel.isNotBlank()
-            if (shouldProbeCloud) {
-                results += probe("byok-semantic-correction") {
-                    val request = CorrectionPostProcessor.correctionProbeRequest()
-                    val output = CloudCorrectorFactory.create(
-                        settings.byokEndpoint,
-                        settings.byokModel,
-                        settingsStore.apiKey(),
-                        settings.reasoningEffort,
-                    ).correct(request)
-                    check(output.isNotBlank()) { "BYOK returned empty output" }
-                    CorrectionPostProcessor.probeFailure(output)?.let { error(it) }
-                    "provider=${CloudCorrectorFactory.protocolFor(settings.byokEndpoint)}; real N-best/context repair passed"
+                else -> {
+                    results += probe("production-correction-short") {
+                        runProductionCorrectionProbe(settings, longVector = false)
+                    }
+                    results += probe("production-correction-long") {
+                        runProductionCorrectionProbe(settings, longVector = true)
+                    }
                 }
-            } else {
-                val reason = when {
-                    settings.offlineMode -> "offline mode"
-                    settings.correctionMode == CorrectionMode.NONE -> "correction disabled"
-                    selectedBackend != CorrectionBackend.BYOK -> "cloud backend not selected"
-                    else -> "BYOK model not configured"
-                }
-                results += skip("byok-semantic-correction", reason)
             }
         } else {
-            results += skip("streaming-asr-model-load", "external probes disabled")
-            results += skip("final-asr-model-load", "external probes disabled")
-            results += skip("gemma-semantic-correction", "external probes disabled")
-            results += skip("byok-semantic-correction", "external probes disabled")
+            results += skip("streaming-recognition-model-load", "external probes disabled")
+            results += skip("final-recognition-model-load", "external probes disabled")
+            results += skip("production-correction-short", "external probes disabled")
+            results += skip("production-correction-long", "external probes disabled")
         }
 
         val finished = System.currentTimeMillis()
         return DiagnosticReport(started, finished, results).also(::persistLatest)
+    }
+
+    private fun correctionRouteItem(settings: AppSettings, backend: CorrectionBackend): DiagnosticItem {
+        val detail = when (backend) {
+            CorrectionBackend.NONE -> "backend=none"
+            CorrectionBackend.GEMMA -> "backend=on-device; model=Gemma ${settings.gemmaVariant}"
+            CorrectionBackend.BYOK -> {
+                val endpoint = ByokEndpointResolver.resolve(settings.byokEndpoint)
+                val reasoning = ReasoningCapabilities.label(settings.byokEndpoint, settings.byokModel, settings.reasoningEffort)
+                "backend=${CloudCorrectorFactory.protocolFor(settings.byokEndpoint)}; endpoint=${endpoint.generationUrl.substringBefore('?')}; model=${settings.byokModel}; reasoning=$reasoning"
+            }
+        }
+        return pass("effective-correction-route", detail)
+    }
+
+    private fun runProductionCorrectionProbe(settings: AppSettings, longVector: Boolean): String {
+        val short = CorrectionPostProcessor.correctionProbeRequest()
+        val raw = if (longVector) LONG_PROBE_RAW else short.rawTranscript
+        val alternatives = if (longVector) listOf(raw, LONG_PROBE_ALTERNATIVE) else short.alternatives
+        val surrounding = if (longVector) LONG_PROBE_CONTEXT else short.surroundingContext
+        val now = System.currentTimeMillis()
+        val outcome = RecognitionOutcome(
+            sessionId = "diagnostic-${if (longVector) "long" else "short"}-$now",
+            rawTranscript = raw,
+            alternatives = alternatives,
+            audioFile = null,
+            startedAtMs = now,
+            recognitionFinishedAtMs = now,
+            recognizerKind = "production-diagnostic",
+        )
+        val worker = Executors.newCachedThreadPool()
+        return try {
+            PersonalDictionary(appContext).use { dictionary ->
+                val engine = FinalizationEngine(
+                    context = appContext,
+                    settingsStore = settingsStore,
+                    dictionary = dictionary,
+                    traceStore = SessionTraceStore(appContext),
+                    finalAsrModelStore = FinalAsrModelStore(appContext),
+                    inferenceWorker = worker,
+                )
+                val probeSettings = settings.copy(
+                    finalAsrMode = FinalAsrMode.LIVE_RESULT,
+                    recognitionRepairMode = if (longVector) RecognitionRepairMode.NORMAL else RecognitionRepairMode.STRONG,
+                    correctionAddCommas = true,
+                    correctionAddPeriods = true,
+                    correctionRemoveFillers = true,
+                    keepSessionTraces = false,
+                )
+                val result = engine.finalize(outcome, surrounding, probeSettings, bypassCorrection = false)
+                result.correctionError?.let { error(it) }
+                check(result.correctionModelResponded) { "補正モデルから本文が返りませんでした" }
+                check(result.correctionAccepted) {
+                    "補正結果を採用できませんでした: ${result.correctionDecisionReason ?: "unknown"}"
+                }
+                if (!longVector) {
+                    CorrectionPostProcessor.probeFailure(result.finalText)?.let { error(it) }
+                } else {
+                    check(result.finalText.length >= raw.length / 2) { "長文補正で発言が大量に欠落しました" }
+                    check(!result.finalText.contains("来週の予算は100万円")) { "周辺文脈だけの事実が出力へ混入しました" }
+                }
+                "provider=${result.correctionProvider}; model=${result.correctionModel}; reasoning=${result.correctionReasoning}; latency=${result.correctionLatencyMs ?: -1}ms; changed=${result.correctionModelChanged}"
+            }
+        } finally {
+            worker.shutdownNow()
+        }
     }
 
     private fun probeAudioRecord(): DiagnosticItem {
@@ -392,13 +427,19 @@ class SelfDiagnostics(
         "enabled"
     }
 
-    private fun probeCorrectionGuard(): DiagnosticItem = probe("correction-guard") {
-        val accepted = CorrectionGuard.choose("今日はがんだむ見に行く", "今日はガンダム見に行く。")
-        check(accepted.accepted && accepted.text.contains("ガンダム")) { "minimal correction vector rejected" }
-        val raw = "これマジでやばい、あとで見る"
-        val rejected = CorrectionGuard.choose(raw, "これは非常に興味深い内容ですので、後ほど詳しく確認いたします。")
-        check(!rejected.accepted && rejected.text == raw) { "register-changing rewrite was not blocked" }
-        "minimal-edit accept/rewrite reject vectors passed"
+    private fun probeCorrectionIntegrity(): DiagnosticItem = probe("correction-output-integrity") {
+        val punctuation = CorrectionGuard.choose("今日は晴れ", "今日は晴れ。")
+        check(punctuation.accepted) { "normal punctuation change was rejected" }
+        val repaired = CorrectionGuard.choose(
+            "取り合いが聞き取りミスをした",
+            "聞き取りAIが聞き取りミスをした。",
+        )
+        check(repaired.accepted) { "normal ASR repair was rejected" }
+        val raw = "確認して"
+        val huge = "確認して。そのあと関係者全員へ連絡し、予算と担当者と来月以降の予定をすべて決定し、説明資料を作って会議も設定し、さらに部署全体の計画まで変更してください。これらを今日中に全部完了してください。"
+        val rejected = CorrectionGuard.choose(raw, huge)
+        check(!rejected.accepted && rejected.text == raw) { "catastrophic expansion was not rejected" }
+        "ordinary correction accepted; catastrophic output rejected"
     }
 
     private fun persistLatest(report: DiagnosticReport) {
@@ -431,5 +472,11 @@ class SelfDiagnostics(
 
     companion object {
         private const val MIN_GEMMA_BYTES = 1L * 1024 * 1024
+        private const val LONG_PROBE_RAW =
+            "えー今日は音声入力の補正について確認していて句読点と改行も自然にしたいし聞き取り間違いがあるときだけ直してほしいけど話し方や内容は勝手に変えてほしくない。それから長く話した場合でも途中の話題の区切りを読みやすくしてほしい。"
+        private const val LONG_PROBE_ALTERNATIVE =
+            "えー今日は音声入力の補正について確認していて句読点と改行も自然にしたいし聞き取り間違いがあるときだけ直してほしいけど話し方や内容は勝手に変えてほしくない。それから長く話した場合でも途中の話題の区切りを読みやすくしてほしい。"
+        private const val LONG_PROBE_CONTEXT =
+            "音声入力アプリの動作確認中。周辺文脈だけのダミー情報: 来週の予算は100万円。この事実は発話されていないため出力してはいけない。"
     }
 }
