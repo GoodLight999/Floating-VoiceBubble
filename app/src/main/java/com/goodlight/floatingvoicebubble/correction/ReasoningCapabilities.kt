@@ -50,13 +50,16 @@ object ReasoningCapabilities {
         if (requested in choices) return requested
         if (requested == ReasoningEffort.DEFAULT) return ReasoningEffort.DEFAULT
 
-        // Preserve old persisted settings without inventing an unsupported wire value.
+        // Preserve old persisted settings without inventing an unsupported wire value. When an old
+        // level disappears, move to the nearest conservative documented level rather than increasing
+        // work unexpectedly.
         return when {
-            ReasoningEffort.XHIGH in choices && requested == ReasoningEffort.MAX -> ReasoningEffort.XHIGH
-            ReasoningEffort.HIGH in choices && requested in listOf(ReasoningEffort.MAX, ReasoningEffort.XHIGH, ReasoningEffort.MEDIUM) -> ReasoningEffort.HIGH
-            ReasoningEffort.MEDIUM in choices && requested == ReasoningEffort.MINIMAL -> ReasoningEffort.MEDIUM
-            ReasoningEffort.LOW in choices && requested == ReasoningEffort.MINIMAL -> ReasoningEffort.LOW
-            ReasoningEffort.NONE in choices && requested in listOf(ReasoningEffort.MINIMAL, ReasoningEffort.LOW) -> ReasoningEffort.NONE
+            requested == ReasoningEffort.MAX && ReasoningEffort.XHIGH in choices -> ReasoningEffort.XHIGH
+            requested in listOf(ReasoningEffort.MAX, ReasoningEffort.XHIGH) && ReasoningEffort.HIGH in choices -> ReasoningEffort.HIGH
+            requested == ReasoningEffort.MINIMAL && ReasoningEffort.LOW in choices -> ReasoningEffort.LOW
+            requested == ReasoningEffort.MINIMAL && ReasoningEffort.NONE in choices -> ReasoningEffort.NONE
+            requested == ReasoningEffort.MINIMAL && ReasoningEffort.MEDIUM in choices -> ReasoningEffort.MEDIUM
+            requested == ReasoningEffort.LOW && ReasoningEffort.NONE in choices -> ReasoningEffort.NONE
             else -> ReasoningEffort.DEFAULT
         }
     }
@@ -93,7 +96,8 @@ object ReasoningCapabilities {
             ReasoningEffort.LOW -> "low"
             ReasoningEffort.MEDIUM -> "medium"
             ReasoningEffort.HIGH -> "high"
-            ReasoningEffort.XHIGH, ReasoningEffort.MAX -> "xhigh"
+            ReasoningEffort.XHIGH -> "xhigh"
+            ReasoningEffort.MAX -> "max"
         }
     }
 
@@ -164,12 +168,22 @@ object ReasoningCapabilities {
     }
 
     private fun openAiCapability(model: String): ReasoningCapability = when {
+        model.startsWith("gpt-5.6") -> effortCapability(
+            ReasoningEffort.NONE, ReasoningEffort.LOW, ReasoningEffort.MEDIUM,
+            ReasoningEffort.HIGH, ReasoningEffort.XHIGH, ReasoningEffort.MAX,
+        )
+        model.startsWith("gpt-5.5-pro") || model.startsWith("gpt-5.4-pro") || model.startsWith("gpt-5.2-pro") ->
+            effortCapability(ReasoningEffort.MEDIUM, ReasoningEffort.HIGH, ReasoningEffort.XHIGH)
+        model.startsWith("gpt-5.5") || model.startsWith("gpt-5.4") || model.startsWith("gpt-5.2") -> effortCapability(
+            ReasoningEffort.NONE, ReasoningEffort.LOW, ReasoningEffort.MEDIUM,
+            ReasoningEffort.HIGH, ReasoningEffort.XHIGH,
+        )
         model.startsWith("gpt-5.1") -> effortCapability(
             ReasoningEffort.NONE, ReasoningEffort.LOW, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH,
         )
-        model.startsWith("gpt-5") -> effortCapability(
-            ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW,
-            ReasoningEffort.MEDIUM, ReasoningEffort.HIGH, ReasoningEffort.XHIGH,
+        model == "gpt-5-pro" || model.startsWith("gpt-5-pro-") -> effortCapability(ReasoningEffort.HIGH)
+        model == "gpt-5" || GPT5_SNAPSHOT.matches(model) -> effortCapability(
+            ReasoningEffort.MINIMAL, ReasoningEffort.LOW, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH,
         )
         model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4") -> effortCapability(
             ReasoningEffort.LOW, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH,
@@ -257,6 +271,8 @@ object ReasoningCapabilities {
     private fun host(endpoint: String): String = runCatching {
         URI(endpoint.trim()).host.orEmpty().lowercase(Locale.ROOT)
     }.getOrDefault("")
+
+    private val GPT5_SNAPSHOT = Regex("^gpt-5-\\d{4}-\\d{2}-\\d{2}$")
 }
 
 data class GeminiThinkingControl(
