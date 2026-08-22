@@ -23,6 +23,12 @@ data class FinalizationTrace(
     val correctionModelResponded: Boolean = modelOutputText != null,
     val correctionModelChanged: Boolean = false,
     val deterministicFormattingChanged: Boolean = false,
+    val correctionProvider: String? = null,
+    val correctionModel: String? = null,
+    val correctionReasoning: String? = null,
+    val correctionLatencyMs: Long? = null,
+    val correctionAttempts: Int = if (correctionAttempted) 1 else 0,
+    val fallbackSource: String? = null,
     val finalAsrId: String = "live-result",
     val finalAsrLatencyMs: Long? = null,
     val finalAsrRtf: Double? = null,
@@ -36,8 +42,6 @@ class SessionTraceStore(context: Context) {
 
     init {
         migrateLegacyDirectory()
-        // Only AccessibilityService construction is guaranteed to happen before a new capture can
-        // begin. Diagnostics/management contexts must never delete a live recording as a side effect.
         if (context is AccessibilityService) cleanupOrphans()
     }
 
@@ -48,7 +52,7 @@ class SessionTraceStore(context: Context) {
             return
         }
         val json = JSONObject()
-            .put("schema", 4)
+            .put("schema", 5)
             .put("sessionId", trace.outcome.sessionId)
             .put("liveRecognizer", trace.outcome.recognizerKind)
             .put("corrector", trace.correctorId)
@@ -69,6 +73,12 @@ class SessionTraceStore(context: Context) {
             .put("modelOutput", trace.modelOutputText ?: JSONObject.NULL)
             .put("finalText", trace.finalText)
             .put("correctionAttempted", trace.correctionAttempted)
+            .put("correctionAttempts", trace.correctionAttempts)
+            .put("correctionProvider", trace.correctionProvider ?: JSONObject.NULL)
+            .put("correctionModel", trace.correctionModel ?: JSONObject.NULL)
+            .put("correctionReasoning", trace.correctionReasoning ?: JSONObject.NULL)
+            .put("correctionLatencyMs", trace.correctionLatencyMs ?: JSONObject.NULL)
+            .put("fallbackSource", trace.fallbackSource ?: JSONObject.NULL)
             .put("correctionModelResponded", trace.correctionModelResponded)
             .put("correctionModelChanged", trace.correctionModelChanged)
             .put("deterministicFormattingChanged", trace.deterministicFormattingChanged)
@@ -93,13 +103,6 @@ class SessionTraceStore(context: Context) {
         ?.take(limit.coerceAtLeast(0))
         .orEmpty()
 
-    /**
-     * Removes crash/cancel leftovers that have no committed trace metadata.
-     *
-     * This is not a general constructor side effect. It runs automatically only when the store is
-     * created directly from AccessibilityService, before that service can start a new recording,
-     * and can be invoked explicitly by tests/recovery code.
-     */
     internal fun cleanupOrphans() {
         val files = audioDir.listFiles().orEmpty()
         val committedIds = files.asSequence()
