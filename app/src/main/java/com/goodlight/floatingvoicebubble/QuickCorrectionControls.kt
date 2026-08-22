@@ -48,8 +48,8 @@ internal fun QuickCorrectionControls(
         settings = store.load()
     }
 
-    val cloudReasoningVisible = settings.correctionMode == CorrectionMode.BYOK ||
-        (settings.correctionMode == CorrectionMode.AUTO && settings.byokModel.isNotBlank())
+    val reasoningRelevant = settings.correctionMode == CorrectionMode.BYOK || settings.correctionMode == CorrectionMode.AUTO
+    val reasoningEnabled = reasoningRelevant && !settings.offlineMode && settings.byokModel.isNotBlank()
     val reasoningCapability = remember(settings.byokEndpoint, settings.byokModel) {
         ReasoningCapabilities.capability(settings.byokEndpoint, settings.byokModel)
     }
@@ -96,21 +96,29 @@ internal fun QuickCorrectionControls(
                 settings = store.update { it.copy(correctionMode = mode) }
             }
 
-            if (cloudReasoningVisible) {
-                ChoiceRowField(
-                    title = "推論の深さ",
-                    value = normalizedReasoning,
-                    values = reasoningCapability.choices,
-                    label = { ReasoningCapabilities.label(settings.byokEndpoint, settings.byokModel, it) },
-                    testTag = "reasoning-effort-control",
-                ) { effort ->
-                    settings = store.update { it.copy(reasoningEffort = effort) }
+            if (reasoningRelevant) {
+                if (reasoningEnabled) {
+                    ChoiceRowField(
+                        title = "推論の深さ",
+                        value = normalizedReasoning,
+                        values = reasoningCapability.choices,
+                        label = { ReasoningCapabilities.label(settings.byokEndpoint, settings.byokModel, it) },
+                        testTag = "reasoning-effort-control",
+                    ) { effort ->
+                        settings = store.update { it.copy(reasoningEffort = effort) }
+                    }
+                    Text(
+                        reasoningCapability.note,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    ReadOnlySettingRow(
+                        title = "推論の深さ",
+                        value = if (settings.offlineMode) "通信しない間は未使用" else "モデル選択後に設定",
+                        testTag = "reasoning-effort-control",
+                    )
                 }
-                Text(
-                    reasoningCapability.note,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
 
             ChoiceRowField(
@@ -192,18 +200,11 @@ private fun <T> ChoiceRowField(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(
-            title,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-        )
+        Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
         Box {
             OutlinedButton(
                 onClick = { expanded = true },
-                modifier = Modifier
-                    .testTag(testTag)
-                    .heightIn(min = 38.dp),
+                modifier = Modifier.testTag(testTag).heightIn(min = 38.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
             ) {
                 Text(label(value), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -221,6 +222,23 @@ private fun <T> ChoiceRowField(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ReadOnlySettingRow(title: String, value: String, testTag: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        Text(
+            value,
+            modifier = Modifier.testTag(testTag),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -272,8 +290,7 @@ private fun modelSummary(settings: AppSettings): String = when (settings.correct
     }
     CorrectionMode.AUTO -> when {
         settings.byokModel.isNotBlank() -> settings.byokModel
-        settings.gemmaModelPath.isNotBlank() && settings.gemmaVariant != GemmaVariant.UNKNOWN ->
-            "Gemma ${settings.gemmaVariant.name}"
+        settings.gemmaModelPath.isNotBlank() && settings.gemmaVariant != GemmaVariant.UNKNOWN -> "Gemma ${settings.gemmaVariant.name}"
         settings.gemmaModelPath.isNotBlank() -> "端末内Gemma"
         else -> "モデル未設定"
     }
