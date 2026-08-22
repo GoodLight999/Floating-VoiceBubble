@@ -31,14 +31,18 @@ class AnthropicCorrector(
                         .put("content", CorrectionPrompt.user(request)),
                 ),
             )
-        anthropicEffort(reasoningEffort)?.let { effort ->
+
+        ReasoningCapabilities.anthropicThinkingType(endpoint, model, reasoningEffort)?.let { type ->
+            body.put("thinking", JSONObject().put("type", type))
+        }
+        ReasoningCapabilities.anthropicEffort(endpoint, model, reasoningEffort)?.let { effort ->
             body.put("output_config", JSONObject().put("effort", effort))
         }
 
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
+            readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
@@ -51,7 +55,11 @@ class AnthropicCorrector(
             val responseText = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             if (status !in 200..299) {
-                error("Anthropic request failed: HTTP $status ${responseText.take(500).replace(Regex("\\s+"), " ")}")
+                val detail = responseText.take(500).replace(Regex("\\s+"), " ")
+                if (reasoningEffort != ReasoningEffort.DEFAULT && status in listOf(400, 422)) {
+                    error("選択したClaude推論設定を適用できません: HTTP $status $detail")
+                }
+                error("Anthropic request failed: HTTP $status $detail")
             }
 
             val content = JSONObject(responseText).optJSONArray("content")
@@ -67,24 +75,14 @@ class AnthropicCorrector(
         }
     }
 
-    private fun anthropicEffort(value: ReasoningEffort): String? = when (value) {
-        ReasoningEffort.DEFAULT -> null
-        // Claude's current effort ladder starts at low; map requests below it to the minimum.
-        ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> "low"
-        ReasoningEffort.MEDIUM -> "medium"
-        ReasoningEffort.HIGH -> "high"
-        ReasoningEffort.XHIGH -> "xhigh"
-        ReasoningEffort.MAX -> "max"
-    }
-
-    private fun outputTokenBudget(): Int = when (reasoningEffort) {
-        ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 4096
-        ReasoningEffort.HIGH -> 2048
-        else -> 1024
+    private fun outputTokenBudget(): Int = when (ReasoningCapabilities.normalize(endpoint, model, reasoningEffort)) {
+        ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 16_384
+        ReasoningEffort.HIGH -> 8_192
+        ReasoningEffort.MEDIUM -> 4_096
+        else -> 2_048
     }
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 8_000
-        private const val READ_TIMEOUT_MS = 25_000
     }
 }
