@@ -47,7 +47,6 @@ internal fun HomeSettingsScreen(
     accessibilityEnabled: Boolean,
     refreshRevision: Int,
     onRuntimeStatusChanged: () -> Unit,
-    onOpenDetailedSettings: () -> Unit,
 ) {
     val store = remember(activity) { SettingsStore(activity) }
     var settings by remember { mutableStateOf(store.load()) }
@@ -70,7 +69,7 @@ internal fun HomeSettingsScreen(
             .testTag("home-settings-scroll")
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 12.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         Row(
             modifier = Modifier
@@ -86,12 +85,11 @@ internal fun HomeSettingsScreen(
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                if (ready) "● 準備OK" else "● 要設定",
+                if (ready) "● 使用可能" else "● 初期設定が必要",
                 color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
             )
-            TextButton(onClick = onOpenDetailedSettings) { Text("詳細") }
         }
 
         if (!ready) {
@@ -102,12 +100,12 @@ internal fun HomeSettingsScreen(
             ) {
                 if (!microphoneGranted) {
                     OutlinedButton(onClick = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }) {
-                        Text("マイク許可")
+                        Text("マイクを許可")
                     }
                 }
                 if (!accessibilityEnabled) {
                     OutlinedButton(onClick = { activity.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }) {
-                        Text("入力権限")
+                        Text("文字入力を許可")
                     }
                 }
             }
@@ -121,18 +119,7 @@ internal fun HomeSettingsScreen(
 
         HorizontalDivider()
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text("音声認識", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            Text(
-                finalAsrLabel(settings.finalAsrMode),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Text("音声認識", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             RecognitionMode.entries.forEach { mode ->
                 FilterChip(
@@ -143,17 +130,24 @@ internal fun HomeSettingsScreen(
             }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            HomeToggleChip("完全オフライン", settings.offlineMode) { checked ->
+            HomeToggleChip("通信しない", settings.offlineMode) { checked ->
                 settings = store.update { it.copy(offlineMode = checked) }
             }
-            HomeToggleChip("無音で自動確定", settings.autoStop) { checked ->
+            HomeToggleChip("無音になったら自動確定", settings.autoStop) { checked ->
                 settings = store.update { it.copy(autoStop = checked) }
             }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("確定時の認識", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
             FinalAsrMode.entries.forEach { mode ->
                 FilterChip(
                     selected = settings.finalAsrMode == mode,
                     onClick = { settings = store.update { it.copy(finalAsrMode = mode) } },
-                    label = { Text(finalAsrLabel(mode)) },
+                    label = { Text(finalRecognitionLabel(mode)) },
                 )
             }
         }
@@ -163,13 +157,16 @@ internal fun HomeSettingsScreen(
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             OutlinedButton(onClick = { activity.startActivity(Intent(activity, DictionaryActivity::class.java)) }) {
                 Text("個人辞書")
             }
             OutlinedButton(onClick = { activity.startActivity(Intent(activity, AppProfilesActivity::class.java)) }) {
-                Text("アプリ別")
+                Text("アプリ別設定")
+            }
+            OutlinedButton(onClick = { activity.startActivity(Intent(activity, AdvancedToolsActivity::class.java)) }) {
+                Text("オフライン音声認識")
             }
             Button(
                 onClick = {
@@ -195,9 +192,6 @@ internal fun HomeSettingsScreen(
                 },
                 enabled = !diagnosticBusy,
             ) { Text(if (diagnosticBusy) "診断中…" else "全自動診断") }
-            OutlinedButton(onClick = { activity.startActivity(Intent(activity, AdvancedToolsActivity::class.java)) }) {
-                Text("管理・検証")
-            }
             diagnosticReport?.let { report ->
                 TextButton(onClick = { copyDiagnostic(activity, report) }) { Text("診断結果をコピー") }
             }
@@ -228,14 +222,14 @@ private fun HomeToggleChip(label: String, checked: Boolean, onChecked: (Boolean)
 
 private fun recognitionLabel(mode: RecognitionMode): String = when (mode) {
     RecognitionMode.AUTO -> "自動"
-    RecognitionMode.SYSTEM -> "Android"
+    RecognitionMode.SYSTEM -> "Android音声認識"
     RecognitionMode.ON_DEVICE -> "Android端末内"
-    RecognitionMode.SHERPA_STREAMING -> "ローカルASR"
+    RecognitionMode.SHERPA_STREAMING -> "端末内ストリーミング"
 }
 
-private fun finalAsrLabel(mode: FinalAsrMode): String = when (mode) {
-    FinalAsrMode.LIVE_RESULT -> "最終ASR: ライブ"
-    FinalAsrMode.REAZON_SPEECH -> "最終ASR: Reazon"
+private fun finalRecognitionLabel(mode: FinalAsrMode): String = when (mode) {
+    FinalAsrMode.LIVE_RESULT -> "そのまま"
+    FinalAsrMode.REAZON_SPEECH -> "ReazonSpeechで再認識"
 }
 
 private fun copyDiagnostic(activity: MainActivity, report: DiagnosticReport) {
