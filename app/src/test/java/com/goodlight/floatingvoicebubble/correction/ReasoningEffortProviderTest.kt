@@ -7,19 +7,72 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ReasoningEffortProviderTest {
+    private val openAiEndpoint = "https://api.openai.com/v1/chat/completions"
+
     @Test
-    fun openAiUsesOnlyDocumentedDepthsAndOmitsDefault() {
-        val endpoint = "https://api.openai.com/v1/chat/completions"
-        assertNull(OpenAiProviderCompatibility.resolve(endpoint, "gpt-5", ReasoningEffort.DEFAULT).openAiReasoningEffort)
-        assertEquals("minimal", OpenAiProviderCompatibility.resolve(endpoint, "gpt-5", ReasoningEffort.MINIMAL).openAiReasoningEffort)
-        assertEquals("high", OpenAiProviderCompatibility.resolve(endpoint, "gpt-5", ReasoningEffort.HIGH).openAiReasoningEffort)
-        assertEquals("xhigh", OpenAiProviderCompatibility.resolve(endpoint, "gpt-5", ReasoningEffort.MAX).openAiReasoningEffort)
+    fun legacyGpt5UsesOnlyMinimalLowMediumHigh() {
+        assertEquals(
+            listOf(
+                ReasoningEffort.DEFAULT,
+                ReasoningEffort.MINIMAL,
+                ReasoningEffort.LOW,
+                ReasoningEffort.MEDIUM,
+                ReasoningEffort.HIGH,
+            ),
+            ReasoningCapabilities.capability(openAiEndpoint, "gpt-5").choices,
+        )
+        assertNull(OpenAiProviderCompatibility.resolve(openAiEndpoint, "gpt-5", ReasoningEffort.DEFAULT).openAiReasoningEffort)
+        assertEquals("minimal", OpenAiProviderCompatibility.resolve(openAiEndpoint, "gpt-5", ReasoningEffort.MINIMAL).openAiReasoningEffort)
+        assertEquals("high", OpenAiProviderCompatibility.resolve(openAiEndpoint, "gpt-5", ReasoningEffort.MAX).openAiReasoningEffort)
+        assertNull(OpenAiProviderCompatibility.resolve(openAiEndpoint, "gpt-5", ReasoningEffort.NONE).openAiReasoningEffort)
+    }
+
+    @Test
+    fun gpt52RemovesMinimalAndSupportsXHigh() {
+        assertEquals(
+            listOf(
+                ReasoningEffort.DEFAULT,
+                ReasoningEffort.NONE,
+                ReasoningEffort.LOW,
+                ReasoningEffort.MEDIUM,
+                ReasoningEffort.HIGH,
+                ReasoningEffort.XHIGH,
+            ),
+            ReasoningCapabilities.capability(openAiEndpoint, "gpt-5.2").choices,
+        )
+        assertEquals("low", OpenAiProviderCompatibility.resolve(openAiEndpoint, "gpt-5.2", ReasoningEffort.MINIMAL).openAiReasoningEffort)
+        assertEquals("xhigh", OpenAiProviderCompatibility.resolve(openAiEndpoint, "gpt-5.2", ReasoningEffort.XHIGH).openAiReasoningEffort)
+    }
+
+    @Test
+    fun gpt56SupportsMaxAsDistinctWireValue() {
+        assertEquals(
+            listOf(
+                ReasoningEffort.DEFAULT,
+                ReasoningEffort.NONE,
+                ReasoningEffort.LOW,
+                ReasoningEffort.MEDIUM,
+                ReasoningEffort.HIGH,
+                ReasoningEffort.XHIGH,
+                ReasoningEffort.MAX,
+            ),
+            ReasoningCapabilities.capability(openAiEndpoint, "gpt-5.6-terra").choices,
+        )
+        assertEquals("max", OpenAiProviderCompatibility.resolve(openAiEndpoint, "gpt-5.6-terra", ReasoningEffort.MAX).openAiReasoningEffort)
+        assertEquals("low", OpenAiProviderCompatibility.resolve(openAiEndpoint, "gpt-5.6-terra", ReasoningEffort.MINIMAL).openAiReasoningEffort)
+    }
+
+    @Test
+    fun proFamiliesExposeOnlyDocumentedHigherEfforts() {
+        val expected = listOf(ReasoningEffort.DEFAULT, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH, ReasoningEffort.XHIGH)
+        assertEquals(expected, ReasoningCapabilities.capability(openAiEndpoint, "gpt-5.2-pro").choices)
+        assertEquals(expected, ReasoningCapabilities.capability(openAiEndpoint, "gpt-5.4-pro").choices)
+        assertEquals(expected, ReasoningCapabilities.capability(openAiEndpoint, "gpt-5.5-pro").choices)
     }
 
     @Test
     fun unknownOpenAiModelDoesNotReceiveGuessedReasoningParameter() {
-        val endpoint = "https://api.openai.com/v1/chat/completions"
-        val options = OpenAiProviderCompatibility.resolve(endpoint, "unknown-model", ReasoningEffort.HIGH)
+        val options = OpenAiProviderCompatibility.resolve(openAiEndpoint, "unknown-model", ReasoningEffort.HIGH)
         assertNull(options.openAiReasoningEffort)
     }
 
