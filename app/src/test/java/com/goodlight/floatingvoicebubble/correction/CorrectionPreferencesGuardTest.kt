@@ -9,23 +9,17 @@ import org.junit.Test
 
 class CorrectionPreferencesGuardTest {
     @Test
-    fun rejectsPunctuationThatWasExplicitlyDisabled() {
+    fun punctuationDifferencesAreNotWholeOutputRejectionReasons() {
         val noPeriods = CorrectionPreferences(addPeriods = false)
         val decision = CorrectionGuard.choose("今日は晴れ", "今日は晴れ。", noPeriods)
-        assertFalse(decision.accepted)
-    }
-
-    @Test
-    fun acceptsPunctuationWhenEnabled() {
-        val decision = CorrectionGuard.choose("今日は晴れ", "今日は晴れ。", CorrectionPreferences(addPeriods = true))
         assertTrue(decision.accepted)
     }
 
     @Test
-    fun rejectsFillerRemovalWhenDisabled() {
+    fun fillerRemovalDifferenceIsNotAWholeOutputRejectionReason() {
         val keepFillers = CorrectionPreferences(removeFillers = false)
         val decision = CorrectionGuard.choose("えー今日は晴れ", "今日は晴れ", keepFillers)
-        assertFalse(decision.accepted)
+        assertTrue(decision.accepted)
     }
 
     @Test
@@ -47,7 +41,7 @@ class CorrectionPreferencesGuardTest {
         val raw = "取り合いが聞き取りミスをした"
         val lexical = CorrectionGuard.choose(raw, "聞き取りAIが聞き取りミスをした", off)
         assertFalse(lexical.accepted)
-        assertEquals("recognition-repair-off", lexical.reason)
+        assertEquals("word-changes-disabled", lexical.reason)
 
         val punctuation = CorrectionGuard.choose("今日は晴れ", "今日は晴れ。", off)
         assertTrue(punctuation.accepted)
@@ -74,30 +68,29 @@ class CorrectionPreferencesGuardTest {
     }
 
     @Test
-    fun strongRepairStillRejectsRunawayContentExpansion() {
+    fun strongRepairStillRejectsCatastrophicExpansion() {
         val strong = CorrectionPreferences(recognitionRepairMode = RecognitionRepairMode.STRONG)
         val raw = "確認して"
-        val runaway = "確認して、その結果を関係者全員へ共有し、今後の計画と予算と担当者まで決定したうえで明日の会議資料も作成しておいてください"
+        val runaway = "確認して、その結果を関係者全員へ共有し、今後の計画と予算と担当者まで決定したうえで明日の会議資料も作成しておいてください。さらに来月以降の予定も全て変更し、関係部署への説明資料も追加で用意してください。"
         val decision = CorrectionGuard.choose(raw, runaway, strong)
         assertFalse(decision.accepted)
-        assertEquals("runaway-expansion", decision.reason)
+        assertEquals("output-expanded-too-much", decision.reason)
     }
 
     @Test
-    fun longUtteranceRejectsSummaryLikeContraction() {
-        val raw = "今日は音声入力アプリの補正について話していて句読点と改行と聞き取りミスの修復を全部ちゃんと動くようにしたいという話をしている"
+    fun longUtteranceRejectsSummaryLikeCatastrophicLoss() {
+        val raw = "今日は音声入力アプリの補正について話していて句読点と改行と聞き取りミスの修復を全部ちゃんと動くようにしたいという話をしている。さらにモデルごとの推論設定やタイムアウトの表示も正しくして、実際に使った設定が画面から分かるようにしたい。"
         val summarized = "補正を改善したい。"
         val decision = CorrectionGuard.choose(raw, summarized, CorrectionPreferences())
         assertFalse(decision.accepted)
-        assertEquals("runaway-contraction", decision.reason)
+        assertEquals("output-lost-too-much", decision.reason)
     }
 
     @Test
-    fun rejectsNewLineBreaksWhenDisabled() {
+    fun lineBreakDifferencesAreNeverTreatedAsContentSafetyFailures() {
         val preferences = CorrectionPreferences(lineBreakMode = LineBreakMode.NONE)
         val decision = CorrectionGuard.choose("今日は晴れ。明日は雨。", "今日は晴れ。\n明日は雨。", preferences)
-        assertFalse(decision.accepted)
-        assertEquals("linebreak-not-allowed", decision.reason)
+        assertTrue(decision.accepted)
     }
 
     @Test
@@ -111,16 +104,16 @@ class CorrectionPreferencesGuardTest {
     }
 
     @Test
-    fun lineBreakPermissionDoesNotPermitRunawayExpansion() {
+    fun lineBreakPermissionDoesNotPermitCatastrophicExpansion() {
         val preferences = CorrectionPreferences(lineBreakMode = LineBreakMode.SMART)
         val raw = "今日は晴れ。明日は雨。"
-        val rewritten = "今日は晴れ。\n明日は雨なので外出をやめ、予定をすべて取り消し、関係者へ連絡し、買い物も済ませ、家で一日中ゆっくり過ごすことにしました。さらに来週の予定も変更します。"
+        val rewritten = "今日は晴れ。\n明日は雨なので外出をやめ、予定をすべて取り消し、関係者へ連絡し、買い物も済ませ、家で一日中ゆっくり過ごすことにしました。さらに来週の予定も変更し、その次の週の予定もすべて調整して関係者全員へ説明資料を送付します。"
         val decision = CorrectionGuard.choose(raw, rewritten, preferences)
         assertFalse(decision.accepted)
     }
 
     @Test
-    fun explicitPoliteRewriteGetsLargerStructuralBudget() {
+    fun explicitPoliteRewriteGetsNormalRoom() {
         val polite = CorrectionPreferences(polite = true)
         val decision = CorrectionGuard.choose("やってくれ", "やってください", polite)
         assertTrue(decision.accepted)
@@ -134,10 +127,10 @@ class CorrectionPreferencesGuardTest {
     }
 
     @Test
-    fun explicitRegisterRewriteStillRejectsRunawayExpansion() {
+    fun explicitRegisterRewriteStillRejectsCatastrophicExpansion() {
         val business = CorrectionPreferences(businessPolite = true)
         val raw = "確認して"
-        val runaway = "ご確認ください。なお本件につきましては背景事情を踏まえ、今後の進め方や関係者への共有方法まで含めて慎重に検討する必要があると考えております。"
+        val runaway = "ご確認ください。なお本件につきましては背景事情を踏まえ、今後の進め方や関係者への共有方法まで含めて慎重に検討する必要があると考えております。そのうえで来期の予算、担当者、スケジュール、説明会の日程までこちらで決定しておきます。"
         val decision = CorrectionGuard.choose(raw, runaway, business)
         assertFalse(decision.accepted)
     }
