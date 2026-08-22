@@ -14,6 +14,7 @@ class OpenAiCompatibleCorrector(
     private val model: String,
     private val apiKey: String,
     private val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
+    private val connectionFactory: (URL) -> HttpURLConnection = { url -> url.openConnection() as HttpURLConnection },
 ) : TextCorrector {
     override val id: String = "byok:openai-compatible:$model"
 
@@ -135,7 +136,7 @@ class OpenAiCompatibleCorrector(
     }
 
     private fun execute(body: JSONObject, options: OpenAiProviderOptions): HttpResult {
-        val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+        val connection = connectionFactory(URL(endpoint)).apply {
             requestMethod = "POST"
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
