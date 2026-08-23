@@ -95,7 +95,7 @@ class OfficialModelInstaller(context: Context) {
         val expectedBytes = requireNotNull(entry.expectedBytes) { "Gemma catalog entry has no exact size" }
         val expectedSha = requireNotNull(entry.expectedSha256) { "Gemma catalog entry has no SHA-256" }
         val displayName = requireNotNull(entry.displayName) { "Gemma catalog entry has no file name" }
-        val staging = gemmaImporter.resumableDownloadFile(displayName, expectedSha)
+        val staging = gemmaImporter.resumableDownloadFile(displayName, expectedSha, expectedBytes)
 
         downloadGemmaResumable(entry, staging, expectedBytes, onProgress)
         onProgress?.invoke(ModelInstallProgress("SHA-256を検証", 0L, expectedBytes))
@@ -122,7 +122,7 @@ class OfficialModelInstaller(context: Context) {
         if (staging.length() > expectedBytes) staging.delete()
         onProgress?.invoke(ModelInstallProgress("ダウンロード", staging.length(), expectedBytes))
 
-        var consecutiveFailures = 0
+        var transientFailures = 0
         while (staging.length() < expectedBytes) {
             val requestedOffset = staging.length()
             try {
@@ -140,7 +140,7 @@ class OfficialModelInstaller(context: Context) {
                             output.seek(requestedOffset)
                         } else {
                             // Server ignored Range and returned 200. Reuse this response as a clean
-                            // restart instead of failing and issuing another multi-GB request.
+                            // restart instead of issuing another multi-GB request.
                             output.setLength(0L)
                             output.seek(0L)
                         }
@@ -158,21 +158,21 @@ class OfficialModelInstaller(context: Context) {
                         output.fd.sync()
                     }
                 }
-                consecutiveFailures = 0
                 if (staging.length() < expectedBytes) {
                     throw IOException(
                         "モデル取得が途中で終了しました。${staging.length()} / $expectedBytes bytes から再開します。",
                     )
                 }
             } catch (failure: Throwable) {
-                if (!isRetryableDownloadFailure(failure) || consecutiveFailures >= MAX_TRANSIENT_RETRIES) {
+                if (!isRetryableDownloadFailure(failure) || transientFailures >= MAX_TRANSIENT_RETRIES) {
                     throw failure
                 }
-                consecutiveFailures += 1
-                val delayMs = RETRY_BASE_DELAY_MS * (1L shl (consecutiveFailures - 1))
+                transientFailures += 1
+                val exponential = RETRY_BASE_DELAY_MS * (1L shl (transientFailures - 1).coerceAtMost(6))
+                val delayMs = exponential.coerceAtMost(MAX_RETRY_DELAY_MS)
                 onProgress?.invoke(
                     ModelInstallProgress(
-                        "通信が途切れました。${delayMs / 1000.0}秒後に ${staging.length()} bytes から再開",
+                        "通信が途切れました。${formatRetryDelay(delayMs)}後に途中から再開",
                         staging.length(),
                         expectedBytes,
                     ),
@@ -183,6 +183,12 @@ class OfficialModelInstaller(context: Context) {
         check(staging.length() == expectedBytes) {
             "Gemmaモデルのダウンロードサイズが一致しません。期待 $expectedBytes bytes / 実際 ${staging.length()} bytes"
         }
+    }
+
+    private fun formatRetryDelay(delayMs: Long): String = if (delayMs % 1000L == 0L) {
+        "${delayMs / 1000L}秒"
+    } else {
+        "%.2f秒".format(java.util.Locale.ROOT, delayMs / 1000.0)
     }
 
     private fun isRetryableDownloadFailure(failure: Throwable): Boolean = when (failure) {
@@ -273,12 +279,13 @@ class OfficialModelInstaller(context: Context) {
     companion object {
         private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
         private const val MAX_REDIRECTS = 8
-        private const val MAX_TRANSIENT_RETRIES = 5
+        private const val MAX_TRANSIENT_RETRIES = 8
         private const val CONNECT_TIMEOUT_MS = 30_000
         // Inactivity timeout, not a total-download deadline. Large Hugging Face blobs may legitimately
         // take many minutes; a brief CDN stall must not discard gigabytes of completed work.
         private const val READ_TIMEOUT_MS = 300_000
         private const val DOWNLOAD_BUFFER_BYTES = 1024 * 1024
         private const val RETRY_BASE_DELAY_MS = 750L
+        private const val MAX_RETRY_DELAY_MS = 12_000L
     }
 }
