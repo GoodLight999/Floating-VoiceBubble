@@ -94,13 +94,19 @@ class ModelImporter(private val context: Context) {
      * Stable partial file for resumable official downloads. It lives beside the final model so a
      * verified completion can be promoted by rename instead of copying another multi-gigabyte file.
      */
-    internal fun resumableDownloadFile(displayName: String, expectedSha256: String): File {
-        require(SHA256.matches(expectedSha256)) { "GemmaモデルのSHA-256が不正です。" }
+    internal fun resumableDownloadFile(
+        displayName: String,
+        expectedSha256: String,
+        expectedBytes: Long,
+    ): File {
+        requireValidRequest(displayName, expectedBytes, expectedSha256)
         val safeName = safeName(displayName)
         val target = File(modelDir, ".$safeName.${expectedSha256.lowercase().take(16)}.download.part")
         modelDir.listFiles().orEmpty()
             .filter { it.isFile && it.name.startsWith(".$safeName.") && it.name.endsWith(".download.part") && it != target }
             .forEach { runCatching { it.delete() } }
+        if (target.length() > expectedBytes) target.delete()
+        ensureResumeDiskSpace(expectedBytes, target.length())
         return target
     }
 
@@ -214,6 +220,15 @@ class ModelImporter(private val context: Context) {
         }
         require(available >= required) {
             "Gemmaモデル用の空き容量が不足しています。必要約 ${required / (1024 * 1024)} MiB、空き ${available / (1024 * 1024)} MiB。"
+        }
+    }
+
+    private fun ensureResumeDiskSpace(expectedBytes: Long, alreadyDownloaded: Long) {
+        val available = StatFs(modelDir.absolutePath).availableBytes
+        val remaining = (expectedBytes - alreadyDownloaded).coerceAtLeast(0L)
+        val required = remaining + DISK_HEADROOM_BYTES
+        require(available >= required) {
+            "Gemmaモデルの続き用の空き容量が不足しています。残り約 ${remaining / (1024 * 1024)} MiB、余裕込み必要約 ${required / (1024 * 1024)} MiB、空き ${available / (1024 * 1024)} MiB。"
         }
     }
 
