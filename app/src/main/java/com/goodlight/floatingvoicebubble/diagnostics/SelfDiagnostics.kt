@@ -31,6 +31,7 @@ import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
+import com.goodlight.floatingvoicebubble.model.GemmaModelSource
 import com.goodlight.floatingvoicebubble.model.GemmaModelVerifier
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackend
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackendResolver
@@ -213,16 +214,25 @@ class SelfDiagnostics(
             "protocol=${configured.protocol}; generation/models normalization OK"
         }
 
-        val modelFile = settings.gemmaModelPath.takeIf(String::isNotBlank)?.let(::File)
-        val gemmaStructurallyAvailable = modelFile?.isFile == true && modelFile.length() >= MIN_GEMMA_BYTES
-        val gemmaFingerprint = if (gemmaStructurallyAvailable) {
-            runCatching { GemmaModelVerifier.inspect(requireNotNull(modelFile)) }
+        val gemmaReference = settings.gemmaModelPath
+        val gemmaExternal = GemmaModelSource.isExternal(gemmaReference)
+        val gemmaAvailable = GemmaModelSource.isAvailable(appContext, gemmaReference)
+        val modelFile = gemmaReference.takeIf { it.isNotBlank() && !gemmaExternal }?.let(::File)
+        val gemmaFingerprint = if (modelFile?.isFile == true && modelFile.length() >= MIN_GEMMA_BYTES) {
+            runCatching { GemmaModelVerifier.inspect(modelFile) }
         } else null
-        val gemmaAvailable = gemmaStructurallyAvailable
 
         results += when {
-            modelFile == null -> skip("gemma-model", "not configured")
-            !modelFile.isFile -> fail("gemma-model", "configured path is missing")
+            gemmaReference.isBlank() -> skip("gemma-model", "not configured")
+            gemmaExternal && !gemmaAvailable -> fail(
+                "gemma-model",
+                "external .litertlm is unavailable, permission was lost, or the provider is not seekable",
+            )
+            gemmaExternal -> pass(
+                "gemma-model",
+                "external .litertlm accessible without app-private copy; name=${GemmaModelSource.displayName(appContext, gemmaReference)}; variant=${settings.gemmaVariant}",
+            )
+            modelFile == null || !modelFile.isFile -> fail("gemma-model", "configured app-private model is missing")
             modelFile.length() < MIN_GEMMA_BYTES -> fail("gemma-model", "model file is unexpectedly small")
             gemmaFingerprint?.isFailure == true -> warn(
                 "gemma-model",
@@ -322,7 +332,11 @@ class SelfDiagnostics(
     private fun correctionRouteItem(settings: AppSettings, backend: CorrectionBackend): DiagnosticItem {
         val detail = when (backend) {
             CorrectionBackend.NONE -> "backend=none"
-            CorrectionBackend.GEMMA -> "backend=on-device; model=Gemma ${settings.gemmaVariant}"
+            CorrectionBackend.GEMMA -> {
+                val source = if (GemmaModelSource.isExternal(settings.gemmaModelPath)) "external-no-copy" else "app-private"
+                val name = GemmaModelSource.displayName(appContext, settings.gemmaModelPath)
+                "backend=on-device; model=Gemma ${settings.gemmaVariant}; source=$source; name=$name"
+            }
             CorrectionBackend.BYOK -> {
                 val endpoint = ByokEndpointResolver.resolve(settings.byokEndpoint)
                 val reasoning = ReasoningCapabilities.label(settings.byokEndpoint, settings.byokModel, settings.reasoningEffort)
