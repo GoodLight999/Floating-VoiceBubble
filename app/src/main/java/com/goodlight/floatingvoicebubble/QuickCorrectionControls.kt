@@ -33,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
+import com.goodlight.floatingvoicebubble.model.GemmaModelSource
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -74,7 +75,7 @@ internal fun QuickCorrectionControls(
             ) {
                 Text("文章補正", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 Text(
-                    modelSummary(settings),
+                    modelSummary(activity, settings),
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -280,18 +281,25 @@ private fun lineBreakLabel(mode: LineBreakMode): String = when (mode) {
     LineBreakMode.SMART_SPACED -> "段落の間を1行空ける"
 }
 
-private fun modelSummary(settings: AppSettings): String = when (settings.correctionMode) {
+private fun modelSummary(activity: MainActivity, settings: AppSettings): String = when (settings.correctionMode) {
     CorrectionMode.NONE -> "補正なし"
     CorrectionMode.BYOK -> settings.byokModel.ifBlank { "クラウドモデル未選択" }
-    CorrectionMode.GEMMA -> when {
-        settings.gemmaModelPath.isBlank() -> "Gemma未選択"
-        settings.gemmaVariant == GemmaVariant.UNKNOWN -> "端末内Gemma"
-        else -> "Gemma ${settings.gemmaVariant.name}"
-    }
+    CorrectionMode.GEMMA -> gemmaSummary(activity, settings)
     CorrectionMode.AUTO -> when {
         settings.byokModel.isNotBlank() -> settings.byokModel
-        settings.gemmaModelPath.isNotBlank() && settings.gemmaVariant != GemmaVariant.UNKNOWN -> "Gemma ${settings.gemmaVariant.name}"
-        settings.gemmaModelPath.isNotBlank() -> "端末内Gemma"
+        settings.gemmaModelPath.isNotBlank() -> gemmaSummary(activity, settings)
         else -> "モデル未設定"
     }
+}
+
+private fun gemmaSummary(activity: MainActivity, settings: AppSettings): String {
+    val reference = settings.gemmaModelPath
+    if (reference.isBlank()) return "Gemma未選択"
+    if (!GemmaModelSource.isAvailable(activity, reference)) return "Gemmaファイルを開けません"
+    val label = if (settings.gemmaVariant == GemmaVariant.UNKNOWN) {
+        "Gemma"
+    } else {
+        "Gemma ${settings.gemmaVariant.name}"
+    }
+    return if (GemmaModelSource.isExternal(reference)) "$label（外部・コピーなし）" else label
 }
