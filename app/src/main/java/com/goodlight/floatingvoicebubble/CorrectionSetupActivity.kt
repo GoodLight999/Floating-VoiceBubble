@@ -2,7 +2,9 @@ package com.goodlight.floatingvoicebubble
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -47,6 +49,7 @@ import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
 import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
+import com.goodlight.floatingvoicebubble.model.GemmaModelSource
 import com.goodlight.floatingvoicebubble.model.InstalledOfficialModel
 import com.goodlight.floatingvoicebubble.model.ModelInstallProgress
 import com.goodlight.floatingvoicebubble.model.OfficialModelCatalog
@@ -89,6 +92,51 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     var busyAction by remember { mutableStateOf<String?>(null) }
     var message by rememberSaveable { mutableStateOf("") }
     var progress by remember { mutableStateOf<ModelInstallProgress?>(null) }
+
+    val gemmaModelLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        busyAction = "gemma-external"
+        progress = null
+        message = "既存のGemmaモデルをコピーせず検証しています…"
+        Thread({
+            runCatching {
+                val selected = GemmaModelSource.verifyExternal(activity, uri) { readBytes, totalBytes ->
+                    activity.runOnUiThread {
+                        progress = ModelInstallProgress("既存モデルを検証", readBytes, totalBytes)
+                    }
+                }
+                GemmaModelSource.persistReadPermission(activity, uri)
+                selected
+            }.onSuccess { selected ->
+                activity.runOnUiThread {
+                    val previousReference = settings.gemmaModelPath
+                    if (previousReference != selected.reference && GemmaModelSource.isExternal(previousReference)) {
+                        GemmaModelSource.releaseReadPermission(activity, previousReference)
+                    }
+                    val variant = selected.fingerprint.detectedVariant
+                    settings = store.update {
+                        it.copy(
+                            gemmaModelPath = selected.reference,
+                            gemmaVariant = variant,
+                        )
+                    }
+                    busyAction = null
+                    progress = null
+                    message = if (selected.fingerprint.knownOfficialArtifact) {
+                        "${selected.displayName} を検証し、コピーせず使用するモデルに設定しました。"
+                    } else {
+                        "${selected.displayName} をコピーせず使用するモデルに設定しました。"
+                    }
+                }
+            }.onFailure { failure ->
+                activity.runOnUiThread {
+                    busyAction = null
+                    progress = null
+                    message = "Gemmaモデルの選択失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                }
+            }
+        }, "VoiceBubble-GemmaExternalVerify").start()
+    }
 
     fun saveByok(
         modelValue: String = model,
@@ -273,7 +321,8 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             OutlinedButton(
                 onClick = {
                     busyAction = "test"
-                    val persisted = saveByok()
+                    saveByok()
+                    val persisted = SettingsStore(activity).load()
                     message = "本番と同じ補正経路で確認しています…"
                     Thread({
                         runCatching { runProductionCorrectionProbe(activity, store, persisted) }
@@ -318,18 +367,30 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         HorizontalDivider()
         Text("端末内Gemma", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(
-            if (settings.gemmaModelPath.isBlank()) "未導入" else "導入済み: ${settings.gemmaVariant.name}",
+            gemmaStatus(activity, settings),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text("E2Bは軽量、E4Bは精度寄りです。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            "公式E2B/E4Bはアプリから取得できます。通信が切れても途中から再開します。既にある .litertlm はコピーせず、そのファイルを直接使えます。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             GemmaInstallButton(
-                title = "E2Bを導入",
+                title = "E2Bを取得",
                 entry = OfficialModelCatalog.gemmaE2B,
                 enabled = busyAction == null,
-                onStart = { busyAction = it.id; progress = null; message = "${it.title} を取得しています…" },
+                onStart = {
+                    busyAction = it.id
+                    progress = null
+                    message = "${it.title} を取得しています。通信が切れても途中から再開します…"
+                },
                 onProgress = { progress = it },
                 onSuccess = { installed ->
+                    val previousReference = settings.gemmaModelPath
+                    if (GemmaModelSource.isExternal(previousReference)) {
+                        GemmaModelSource.releaseReadPermission(activity, previousReference)
+                    }
                     val variant = installed.fingerprint.detectedVariant
                     settings = store.update { it.copy(gemmaModelPath = installed.file.absolutePath, gemmaVariant = variant) }
                     busyAction = null
@@ -340,12 +401,20 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                 activity = activity,
             )
             GemmaInstallButton(
-                title = "E4Bを導入",
+                title = "E4Bを取得",
                 entry = OfficialModelCatalog.gemmaE4B,
                 enabled = busyAction == null,
-                onStart = { busyAction = it.id; progress = null; message = "${it.title} を取得しています…" },
+                onStart = {
+                    busyAction = it.id
+                    progress = null
+                    message = "${it.title} を取得しています。通信が切れても途中から再開します…"
+                },
                 onProgress = { progress = it },
                 onSuccess = { installed ->
+                    val previousReference = settings.gemmaModelPath
+                    if (GemmaModelSource.isExternal(previousReference)) {
+                        GemmaModelSource.releaseReadPermission(activity, previousReference)
+                    }
                     val variant = installed.fingerprint.detectedVariant
                     settings = store.update { it.copy(gemmaModelPath = installed.file.absolutePath, gemmaVariant = variant) }
                     busyAction = null
@@ -355,11 +424,46 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                 onFailure = { error -> busyAction = null; progress = null; message = "Gemma導入失敗: $error" },
                 activity = activity,
             )
+            OutlinedButton(
+                onClick = { gemmaModelLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
+                enabled = busyAction == null,
+            ) {
+                Text(if (busyAction == "gemma-external") "検証中…" else "端末にある .litertlm をそのまま使う")
+            }
+        }
+        if (settings.gemmaModelPath.isNotBlank()) {
+            TextButton(
+                enabled = busyAction == null,
+                onClick = {
+                    val previousReference = settings.gemmaModelPath
+                    if (GemmaModelSource.isExternal(previousReference)) {
+                        GemmaModelSource.releaseReadPermission(activity, previousReference)
+                    }
+                    settings = store.update {
+                        it.copy(gemmaModelPath = "", gemmaVariant = GemmaVariant.UNKNOWN)
+                    }
+                    message = if (GemmaModelSource.isExternal(previousReference)) {
+                        "外部Gemmaの選択を解除しました。元のモデルファイルは削除していません。"
+                    } else {
+                        "Gemmaの使用を解除しました。取得済みファイルは削除していません。"
+                    }
+                },
+            ) { Text("このGemmaを使用しない") }
         }
         progress?.let { p ->
             Text(formatProgress(p), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
     }
+}
+
+private fun gemmaStatus(activity: CorrectionSetupActivity, settings: AppSettings): String {
+    val reference = settings.gemmaModelPath
+    if (reference.isBlank()) return "モデル未設定"
+    val available = GemmaModelSource.isAvailable(activity, reference)
+    val name = GemmaModelSource.displayName(activity, reference)
+    val source = if (GemmaModelSource.isExternal(reference)) "外部ファイル・コピーなし" else "アプリ内"
+    val variant = settings.gemmaVariant.takeIf { it != GemmaVariant.UNKNOWN }?.name?.let { "Gemma $it / " }.orEmpty()
+    return if (available) "$variant$name / $source" else "$variant$name / ファイルを開けません"
 }
 
 private fun runProductionCorrectionProbe(
