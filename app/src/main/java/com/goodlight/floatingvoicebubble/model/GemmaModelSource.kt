@@ -89,6 +89,14 @@ object GemmaModelSource {
         context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
 
+    fun releaseReadPermission(context: Context, reference: String) {
+        if (!isExternal(reference)) return
+        val uri = Uri.parse(reference)
+        runCatching {
+            context.contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
     /**
      * Verifies a user-selected model in place. No application-private model copy is created.
      * The full read is deliberate: it proves the selected document remains readable and identifies
