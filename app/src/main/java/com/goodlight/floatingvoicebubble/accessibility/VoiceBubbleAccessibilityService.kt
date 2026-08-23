@@ -29,13 +29,13 @@ import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
+import com.goodlight.floatingvoicebubble.model.GemmaModelSource
 import com.goodlight.floatingvoicebubble.overlay.FloatingBubbleController
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
 import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
 import com.goodlight.floatingvoicebubble.speech.SherpaStreamingEngine
 import com.goodlight.floatingvoicebubble.speech.SpeechRecognitionSession
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
-import java.io.File
 import java.util.LinkedHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -189,9 +189,9 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
             errorUi("端末内ストリーミング音声認識モデルを導入してください。")
             return
         }
-        val gemma = File(effective.gemmaModelPath).isFile
+        val gemma = GemmaModelSource.isAvailable(this, effective.gemmaModelPath)
         if (effective.correctionMode == CorrectionMode.GEMMA && !gemma) {
-            errorUi("端末内Gemma補正モデルを導入してください。")
+            errorUi("端末内Gemma補正モデルを導入するか、既存の .litertlm を選択してください。")
             return
         }
         if (CorrectionBackendResolver.resolve(effective, gemma) == CorrectionBackend.BYOK) {
@@ -343,7 +343,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     }
 
     private fun finalizationExecutor(effective: AppSettings): ExecutorService {
-        val gemmaAvailable = File(effective.gemmaModelPath).isFile
+        val gemmaAvailable = GemmaModelSource.isAvailable(this, effective.gemmaModelPath)
         val backend = CorrectionBackendResolver.resolve(effective, gemmaAvailable)
         return if (effective.finalAsrMode == FinalAsrMode.REAZON_SPEECH || backend == CorrectionBackend.GEMMA) {
             localFinalization
@@ -485,7 +485,10 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val detail = failure.message?.takeIf(String::isNotBlank)?.let(::short)
             ?: "確定処理を完了できませんでした"
         effective?.let { current ->
-            val backend = CorrectionBackendResolver.resolve(current, File(current.gemmaModelPath).isFile)
+            val backend = CorrectionBackendResolver.resolve(
+                current,
+                GemmaModelSource.isAvailable(this, current.gemmaModelPath),
+            )
             correctionStatus.saveFailure(
                 LastCorrectionFailure(
                     occurredAtMs = System.currentTimeMillis(),
@@ -563,7 +566,10 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     }
 
     private fun correctionProgressLabel(effective: AppSettings): String {
-        val backend = CorrectionBackendResolver.resolve(effective, File(effective.gemmaModelPath).isFile)
+        val backend = CorrectionBackendResolver.resolve(
+            effective,
+            GemmaModelSource.isAvailable(this, effective.gemmaModelPath),
+        )
         return when (backend) {
             CorrectionBackend.NONE -> "文章を確定しています"
             CorrectionBackend.GEMMA -> "端末内Gemmaで文章を補正しています"
@@ -580,7 +586,10 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
     private fun finalizationWatchdogMs(effective: AppSettings): Long {
         val finalRecognitionBudget = if (effective.finalAsrMode == FinalAsrMode.REAZON_SPEECH) 32_000L else 2_000L
-        val backend = CorrectionBackendResolver.resolve(effective, File(effective.gemmaModelPath).isFile)
+        val backend = CorrectionBackendResolver.resolve(
+            effective,
+            GemmaModelSource.isAvailable(this, effective.gemmaModelPath),
+        )
         val correctionBudget = if (backend == CorrectionBackend.NONE) 2_000L else {
             CorrectionTimeoutPolicy.correctionTimeoutMs(effective.reasoningEffort) + 3_000L
         }
@@ -588,7 +597,10 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     }
 
     private fun providerLabel(effective: AppSettings): String {
-        val backend = CorrectionBackendResolver.resolve(effective, File(effective.gemmaModelPath).isFile)
+        val backend = CorrectionBackendResolver.resolve(
+            effective,
+            GemmaModelSource.isAvailable(this, effective.gemmaModelPath),
+        )
         return when (backend) {
             CorrectionBackend.NONE -> "none"
             CorrectionBackend.GEMMA -> "on-device"
@@ -598,7 +610,11 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
     private fun failureEndpoint(effective: AppSettings, backend: CorrectionBackend): String = when (backend) {
         CorrectionBackend.NONE -> ""
-        CorrectionBackend.GEMMA -> "on-device"
+        CorrectionBackend.GEMMA -> if (GemmaModelSource.isExternal(effective.gemmaModelPath)) {
+            "external-document"
+        } else {
+            "on-device"
+        }
         CorrectionBackend.BYOK -> runCatching {
             ByokEndpointResolver.resolve(effective.byokEndpoint).generationUrl.substringBefore('?').substringBefore('#')
         }.getOrElse { effective.byokEndpoint.substringBefore('?').substringBefore('#').take(220) }
