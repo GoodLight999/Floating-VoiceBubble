@@ -2,7 +2,9 @@ package com.goodlight.floatingvoicebubble.model
 
 import android.content.Context
 import java.io.FilterInputStream
+import java.io.IOException
 import java.io.InputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -93,23 +95,103 @@ class OfficialModelInstaller(context: Context) {
         val expectedBytes = requireNotNull(entry.expectedBytes) { "Gemma catalog entry has no exact size" }
         val expectedSha = requireNotNull(entry.expectedSha256) { "Gemma catalog entry has no SHA-256" }
         val displayName = requireNotNull(entry.displayName) { "Gemma catalog entry has no file name" }
-        openCatalogStream(entry).use { source ->
-            val installed = gemmaImporter.installVerifiedStream(
-                displayName = displayName,
-                expectedBytes = expectedBytes,
-                expectedSha256 = expectedSha,
-                input = source.stream,
-            ) { copied, total ->
-                onProgress?.invoke(ModelInstallProgress("ダウンロード・検証", copied, total))
+        val staging = gemmaImporter.resumableDownloadFile(displayName, expectedSha)
+
+        downloadGemmaResumable(entry, staging, expectedBytes, onProgress)
+        onProgress?.invoke(ModelInstallProgress("SHA-256を検証", 0L, expectedBytes))
+        val installed = gemmaImporter.installVerifiedDownloadedFile(
+            staging = staging,
+            displayName = displayName,
+            expectedBytes = expectedBytes,
+            expectedSha256 = expectedSha,
+        ) { hashed, total ->
+            onProgress?.invoke(ModelInstallProgress("SHA-256を検証", hashed, total))
+        }
+        check(installed.fingerprint.knownOfficialArtifact) {
+            "Gemmaモデルはハッシュ一致したにもかかわらず公式artifactとして認識できませんでした。"
+        }
+        return InstalledOfficialModel.Gemma(installed)
+    }
+
+    private fun downloadGemmaResumable(
+        entry: OfficialModelEntry,
+        staging: java.io.File,
+        expectedBytes: Long,
+        onProgress: ((ModelInstallProgress) -> Unit)?,
+    ) {
+        if (staging.length() > expectedBytes) staging.delete()
+        onProgress?.invoke(ModelInstallProgress("ダウンロード", staging.length(), expectedBytes))
+
+        var consecutiveFailures = 0
+        while (staging.length() < expectedBytes) {
+            val requestedOffset = staging.length()
+            try {
+                openCatalogStream(entry, requestedOffset.takeIf { it > 0L }).use { source ->
+                    val append = requestedOffset > 0L && source.status == HttpURLConnection.HTTP_PARTIAL
+                    if (append) {
+                        val contentRange = source.contentRange.orEmpty()
+                        require(contentRange.startsWith("bytes $requestedOffset-")) {
+                            "モデル取得先が不正なContent-Rangeを返しました: $contentRange"
+                        }
+                    }
+
+                    RandomAccessFile(staging, "rw").use { output ->
+                        if (append) {
+                            output.seek(requestedOffset)
+                        } else {
+                            // Server ignored Range and returned 200. Reuse this response as a clean
+                            // restart instead of failing and issuing another multi-GB request.
+                            output.setLength(0L)
+                            output.seek(0L)
+                        }
+                        val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
+                        while (true) {
+                            val read = source.stream.read(buffer)
+                            if (read <= 0) break
+                            output.write(buffer, 0, read)
+                            val completed = output.filePointer
+                            check(completed <= expectedBytes) {
+                                "モデル取得先が期待サイズを超えるデータを返しました。"
+                            }
+                            onProgress?.invoke(ModelInstallProgress("ダウンロード", completed, expectedBytes))
+                        }
+                        output.fd.sync()
+                    }
+                }
+                consecutiveFailures = 0
+                if (staging.length() < expectedBytes) {
+                    throw IOException(
+                        "モデル取得が途中で終了しました。${staging.length()} / $expectedBytes bytes から再開します。",
+                    )
+                }
+            } catch (failure: Throwable) {
+                if (!isRetryableDownloadFailure(failure) || consecutiveFailures >= MAX_TRANSIENT_RETRIES) {
+                    throw failure
+                }
+                consecutiveFailures += 1
+                val delayMs = RETRY_BASE_DELAY_MS * (1L shl (consecutiveFailures - 1))
+                onProgress?.invoke(
+                    ModelInstallProgress(
+                        "通信が途切れました。${delayMs / 1000.0}秒後に ${staging.length()} bytes から再開",
+                        staging.length(),
+                        expectedBytes,
+                    ),
+                )
+                Thread.sleep(delayMs)
             }
-            check(installed.fingerprint.knownOfficialArtifact) {
-                "Gemmaモデルはハッシュ一致したにもかかわらず公式artifactとして認識できませんでした。"
-            }
-            return InstalledOfficialModel.Gemma(installed)
+        }
+        check(staging.length() == expectedBytes) {
+            "Gemmaモデルのダウンロードサイズが一致しません。期待 $expectedBytes bytes / 実際 ${staging.length()} bytes"
         }
     }
 
-    private fun openCatalogStream(entry: OfficialModelEntry): NetworkStream {
+    private fun isRetryableDownloadFailure(failure: Throwable): Boolean = when (failure) {
+        is RetryableHttpException -> true
+        is IOException -> true
+        else -> failure.cause?.let(::isRetryableDownloadFailure) == true
+    }
+
+    private fun openCatalogStream(entry: OfficialModelEntry, rangeStart: Long? = null): NetworkStream {
         require(OfficialModelCatalog.find(entry.id) == entry) {
             "未登録のモデル取得先は自動インストールできません。"
         }
@@ -125,6 +207,7 @@ class OfficialModelInstaller(context: Context) {
                 requestMethod = "GET"
                 setRequestProperty("Accept-Encoding", "identity")
                 setRequestProperty("User-Agent", "FloatingVoiceBubble/${appContext.packageName}")
+                rangeStart?.takeIf { it > 0L }?.let { setRequestProperty("Range", "bytes=$it-") }
             }
             val status = connection.responseCode
             if (status in REDIRECT_CODES) {
@@ -145,13 +228,19 @@ class OfficialModelInstaller(context: Context) {
             if (status !in 200..299) {
                 val errorText = connection.errorStream?.bufferedReader()?.use { it.readText().take(500) }.orEmpty()
                 connection.disconnect()
-                error("モデル取得に失敗しました: HTTP $status ${errorText.replace(Regex("\\s+"), " ")}")
+                val message = "モデル取得に失敗しました: HTTP $status ${errorText.replace(Regex("\\s+"), " ")}"
+                if (status == 408 || status == 429 || status in 500..599) {
+                    throw RetryableHttpException(message)
+                }
+                error(message)
             }
             val total = connection.contentLengthLong.takeIf { it > 0L }
             return NetworkStream(
-                connection,
-                ProgressInputStream(connection.inputStream.buffered()),
-                total,
+                connection = connection,
+                stream = ProgressInputStream(connection.inputStream.buffered()),
+                totalBytes = total,
+                status = status,
+                contentRange = connection.getHeaderField("Content-Range"),
             )
         }
         error("モデル取得先を解決できませんでした。")
@@ -170,6 +259,8 @@ class OfficialModelInstaller(context: Context) {
         private val connection: HttpURLConnection,
         val stream: ProgressInputStream,
         val totalBytes: Long?,
+        val status: Int,
+        val contentRange: String?,
     ) : AutoCloseable {
         override fun close() {
             runCatching { stream.close() }
@@ -177,10 +268,17 @@ class OfficialModelInstaller(context: Context) {
         }
     }
 
+    private class RetryableHttpException(message: String) : IOException(message)
+
     companion object {
         private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
         private const val MAX_REDIRECTS = 8
-        private const val CONNECT_TIMEOUT_MS = 15_000
-        private const val READ_TIMEOUT_MS = 60_000
+        private const val MAX_TRANSIENT_RETRIES = 5
+        private const val CONNECT_TIMEOUT_MS = 30_000
+        // Inactivity timeout, not a total-download deadline. Large Hugging Face blobs may legitimately
+        // take many minutes; a brief CDN stall must not discard gigabytes of completed work.
+        private const val READ_TIMEOUT_MS = 300_000
+        private const val DOWNLOAD_BUFFER_BYTES = 1024 * 1024
+        private const val RETRY_BASE_DELAY_MS = 750L
     }
 }
