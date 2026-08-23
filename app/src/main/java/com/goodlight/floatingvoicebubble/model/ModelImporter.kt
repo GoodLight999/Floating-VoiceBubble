@@ -21,7 +21,7 @@ class ModelImporter(private val context: Context) {
         AtomicFileInstaller.recoverBackups(this)
     }
 
-    /** Backward-compatible entry point used by the settings UI. */
+    /** Backward-compatible entry point used by the legacy settings UI. */
     fun importGemma(uri: Uri): File = importGemmaVerified(uri).file
 
     /** Copies once while simultaneously calculating the exact fingerprint. */
@@ -43,8 +43,8 @@ class ModelImporter(private val context: Context) {
     }
 
     /**
-     * Installs a model from a trusted streaming source without materializing a second copy.
-     * When expected size/hash are supplied, the model is not promoted unless both match exactly.
+     * Installs a model from a trusted streaming source. Kept for compatibility with callers that
+     * cannot provide a seekable staging file.
      */
     fun installVerifiedStream(
         displayName: String,
@@ -53,14 +53,10 @@ class ModelImporter(private val context: Context) {
         input: InputStream,
         onProgress: ((copiedBytes: Long, totalBytes: Long?) -> Unit)? = null,
     ): ImportedGemmaModel {
-        require(displayName.endsWith(".litertlm", ignoreCase = true)) {
-            "LiteRT-LM の .litertlm モデルを指定してください。"
-        }
-        expectedBytes?.let { require(it >= MIN_MODEL_BYTES) { "Gemmaモデルの期待サイズが不正です。" } }
-        expectedSha256?.let { require(SHA256.matches(it)) { "GemmaモデルのSHA-256が不正です。" } }
+        requireValidRequest(displayName, expectedBytes, expectedSha256)
         ensureDiskSpace(expectedBytes ?: -1L)
 
-        val safeName = displayName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val safeName = safeName(displayName)
         val destination = File(modelDir, safeName)
         val temporary = File(modelDir, ".$safeName.part-${UUID.randomUUID()}")
         val digest = MessageDigest.getInstance("SHA-256")
@@ -79,27 +75,106 @@ class ModelImporter(private val context: Context) {
                 }
                 output.flush()
             }
-            check(copied >= MIN_MODEL_BYTES) { "モデルファイルが小さすぎるため拒否しました。" }
-            expectedBytes?.let { expected ->
-                check(copied == expected) {
-                    "モデルのコピーサイズが一致しません。期待 $expected bytes / 実際 $copied bytes"
-                }
-            }
             FileOutputStream(temporary, true).use { it.fd.sync() }
-
-            val hash = digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-            expectedSha256?.let { expected ->
-                check(hash.equals(expected, ignoreCase = true)) {
-                    "GemmaモデルのSHA-256が一致しません。期待 ${expected.lowercase()} / 実際 $hash"
-                }
-            }
-            val fingerprint = GemmaModelVerifier.identify(copied, hash)
+            val fingerprint = verifyFingerprint(
+                bytes = copied,
+                sha256 = digest.digest().toHex(),
+                expectedBytes = expectedBytes,
+                expectedSha256 = expectedSha256,
+            )
             AtomicFileInstaller.replace(temporary, destination, "Gemmaモデル")
             return ImportedGemmaModel(destination, fingerprint)
         } catch (failure: Throwable) {
             temporary.delete()
             throw failure
         }
+    }
+
+    /**
+     * Stable partial file for resumable official downloads. It lives beside the final model so a
+     * verified completion can be promoted by rename instead of copying another multi-gigabyte file.
+     */
+    internal fun resumableDownloadFile(displayName: String, expectedSha256: String): File {
+        require(SHA256.matches(expectedSha256)) { "GemmaモデルのSHA-256が不正です。" }
+        val safeName = safeName(displayName)
+        val target = File(modelDir, ".$safeName.${expectedSha256.lowercase().take(16)}.download.part")
+        modelDir.listFiles().orEmpty()
+            .filter { it.isFile && it.name.startsWith(".$safeName.") && it.name.endsWith(".download.part") && it != target }
+            .forEach { runCatching { it.delete() } }
+        return target
+    }
+
+    /**
+     * Verifies an already-downloaded staging file in place and atomically promotes it. No second
+     * model-sized copy is created.
+     */
+    internal fun installVerifiedDownloadedFile(
+        staging: File,
+        displayName: String,
+        expectedBytes: Long,
+        expectedSha256: String,
+        onProgress: ((hashedBytes: Long, totalBytes: Long) -> Unit)? = null,
+    ): ImportedGemmaModel {
+        requireValidRequest(displayName, expectedBytes, expectedSha256)
+        require(staging.isFile) { "Gemmaダウンロード途中ファイルが見つかりません。" }
+        require(staging.parentFile?.canonicalFile == modelDir.canonicalFile) {
+            "Gemmaダウンロード途中ファイルの保存場所が不正です。"
+        }
+        require(staging.length() == expectedBytes) {
+            "Gemmaモデルのダウンロードサイズが一致しません。期待 $expectedBytes bytes / 実際 ${staging.length()} bytes"
+        }
+
+        val digest = MessageDigest.getInstance("SHA-256")
+        var hashed = 0L
+        staging.inputStream().buffered(COPY_BUFFER_BYTES).use { input ->
+            val buffer = ByteArray(COPY_BUFFER_BYTES)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+                hashed += read
+                onProgress?.invoke(hashed, expectedBytes)
+            }
+        }
+        val fingerprint = verifyFingerprint(
+            bytes = hashed,
+            sha256 = digest.digest().toHex(),
+            expectedBytes = expectedBytes,
+            expectedSha256 = expectedSha256,
+        )
+        FileOutputStream(staging, true).use { it.fd.sync() }
+
+        val destination = File(modelDir, safeName(displayName))
+        AtomicFileInstaller.replace(staging, destination, "Gemmaモデル")
+        return ImportedGemmaModel(destination, fingerprint)
+    }
+
+    private fun verifyFingerprint(
+        bytes: Long,
+        sha256: String,
+        expectedBytes: Long?,
+        expectedSha256: String?,
+    ): GemmaModelFingerprint {
+        check(bytes >= MIN_MODEL_BYTES) { "モデルファイルが小さすぎるため拒否しました。" }
+        expectedBytes?.let { expected ->
+            check(bytes == expected) {
+                "モデルのサイズが一致しません。期待 $expected bytes / 実際 $bytes bytes"
+            }
+        }
+        expectedSha256?.let { expected ->
+            check(sha256.equals(expected, ignoreCase = true)) {
+                "GemmaモデルのSHA-256が一致しません。期待 ${expected.lowercase()} / 実際 $sha256"
+            }
+        }
+        return GemmaModelVerifier.identify(bytes, sha256)
+    }
+
+    private fun requireValidRequest(displayName: String, expectedBytes: Long?, expectedSha256: String?) {
+        require(displayName.endsWith(".litertlm", ignoreCase = true)) {
+            "LiteRT-LM の .litertlm モデルを指定してください。"
+        }
+        expectedBytes?.let { require(it >= MIN_MODEL_BYTES) { "Gemmaモデルの期待サイズが不正です。" } }
+        expectedSha256?.let { require(SHA256.matches(it)) { "GemmaモデルのSHA-256が不正です。" } }
     }
 
     private fun sourceMetadata(uri: Uri): SourceMetadata {
@@ -141,6 +216,10 @@ class ModelImporter(private val context: Context) {
             "Gemmaモデル用の空き容量が不足しています。必要約 ${required / (1024 * 1024)} MiB、空き ${available / (1024 * 1024)} MiB。"
         }
     }
+
+    private fun safeName(displayName: String): String = displayName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+
+    private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     private data class SourceMetadata(val displayName: String, val sizeBytes: Long)
 
