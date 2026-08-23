@@ -1,6 +1,6 @@
 # Floating VoiceBubble — Current blocking issues
 
-Updated: 2026-08-22
+Updated: 2026-08-23
 
 This file is the durable execution ledger for the current stabilization pass. It exists so no issue is lost if a chat context is compacted or restarted.
 
@@ -213,6 +213,31 @@ Required fix:
 
 Acceptance:
 - Tests prove global vs per-app effective settings and visible override indication agree.
+
+### P0-12 — Gemma download is brittle and external models are duplicated
+Status: FIXED
+
+Observed:
+- Official E2B/E4B downloads used a one-shot multi-gigabyte HTTP stream with a 60-second read timeout and no Range resume.
+- A transient stall could discard gigabytes of progress and force a complete restart.
+- The older local-import route copied an already-owned `.litertlm` into app-private storage, needlessly consuming another 2–4 GB.
+
+Required fix:
+- Official Gemma downloads must keep a stable partial file, resume with HTTP Range, tolerate transient I/O/408/429/5xx failures, and never discard valid completed bytes merely because one connection stalls.
+- Retry must be bounded and visible; it must never become an infinite loop.
+- Validate exact expected byte length and SHA-256 before promoting a partial download.
+- Promotion must be an atomic rename on the same filesystem, not a second model-sized copy.
+- Existing seekable `.litertlm` files selected through Android's document picker must be usable in place with a persisted read grant; no app-private duplicate is created.
+- Runtime, diagnostics, and settings must understand both app-private file paths and persisted external document references.
+- Releasing an external model must not delete the user's source file.
+
+Acceptance:
+- JVM regression: an injected mid-stream I/O failure leaves the partial bytes intact, the next request resumes from that exact offset, and the reconstructed file matches the source byte-for-byte.
+- JVM regression: a server that ignores Range and returns HTTP 200 is reused as a clean restart without an extra request.
+- JVM regression: malformed Content-Range is rejected without corrupting the existing partial and repeated early EOF stops after bounded retries.
+- Device/instrumentation: select a seekable external `.litertlm`, restart the app, and verify the same source is still accessible without an app-private model copy.
+- Device/instrumentation: deleting/moving the selected external source produces an explicit unavailable-model state rather than a silent fallback.
+- Full production-equivalent Gemma correction succeeds from the external reference on at least one supported device/backend.
 
 ## P1 — Required stabilization work
 
