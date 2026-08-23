@@ -2,36 +2,46 @@ package com.goodlight.floatingvoicebubble.correction
 
 import android.content.Context
 import com.goodlight.floatingvoicebubble.GemmaBackend
+import com.goodlight.floatingvoicebubble.model.GemmaModelSource
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.SamplerConfig
-import java.io.File
 
-class GemmaCorrector(context: Context, private val modelPath: String, private val backendPreference: GemmaBackend) : TextCorrector {
-    override val id: String = "gemma:${File(modelPath).name}"
+class GemmaCorrector(
+    context: Context,
+    private val modelReference: String,
+    private val backendPreference: GemmaBackend,
+) : TextCorrector {
+    override val id: String = "gemma:${GemmaModelSource.displayName(context, modelReference)}"
     private val appContext = context.applicationContext
 
-    override fun correct(request: CorrectionRequest): String = GemmaEnginePool.withEngine(appContext, modelPath, backendPreference) { engine ->
-        val config = ConversationConfig(
-            systemInstruction = Contents.of(CorrectionPrompt.system(request)),
-            samplerConfig = SamplerConfig(topK = 1, topP = 1.0, temperature = 0.0),
-        )
-        engine.createConversation(config).use { conversation ->
-            conversation.sendMessage(CorrectionPrompt.user(request)).toString().trim()
+    override fun correct(request: CorrectionRequest): String =
+        GemmaEnginePool.withEngine(appContext, modelReference, backendPreference) { engine ->
+            val config = ConversationConfig(
+                systemInstruction = Contents.of(CorrectionPrompt.system(request)),
+                samplerConfig = SamplerConfig(topK = 1, topP = 1.0, temperature = 0.0),
+            )
+            engine.createConversation(config).use { conversation ->
+                conversation.sendMessage(CorrectionPrompt.user(request)).toString().trim()
+            }
         }
-    }
 }
 
 private object GemmaEnginePool {
-    private data class Loaded(val key: String, val engine: Engine)
+    private data class Loaded(
+        val key: String,
+        val engine: Engine,
+        val source: GemmaModelSource.Opened,
+    )
+
     private var loaded: Loaded? = null
 
     @Synchronized
-    fun <T> withEngine(context: Context, modelPath: String, preference: GemmaBackend, block: (Engine) -> T): T {
-        require(File(modelPath).isFile) { "Gemma model file is not configured" }
+    fun <T> withEngine(context: Context, modelReference: String, preference: GemmaBackend, block: (Engine) -> T): T {
+        require(GemmaModelSource.isAvailable(context, modelReference)) { "Gemma model file is not configured or unavailable" }
         val candidates = when (preference) {
             GemmaBackend.CPU -> listOf(Backend.CPU())
             GemmaBackend.GPU -> listOf(Backend.GPU())
@@ -39,30 +49,42 @@ private object GemmaEnginePool {
         }
         var lastFailure: Throwable? = null
         for (backend in candidates) {
-            val key = "$modelPath:${backend.name}"
+            val sourceKey = if (GemmaModelSource.isExternal(modelReference)) "content:$modelReference" else "file:$modelReference"
+            val key = "$sourceKey:${backend.name}"
+            var newlyOpened: GemmaModelSource.Opened? = null
             try {
-                val engine = if (loaded?.key == key) loaded!!.engine else {
-                    loaded?.engine?.close()
+                val engine = if (loaded?.key == key) {
+                    loaded!!.engine
+                } else {
+                    closeLoaded()
+                    val source = GemmaModelSource.openForEngine(context, modelReference)
+                    newlyOpened = source
                     Engine(
                         EngineConfig(
-                            modelPath = modelPath,
+                            modelPath = source.enginePath,
                             backend = backend,
-                            cacheDir = File(context.cacheDir, "litertlm").apply { mkdirs() }.absolutePath,
+                            cacheDir = java.io.File(context.cacheDir, "litertlm").apply { mkdirs() }.absolutePath,
                         )
-                    ).also {
-                        it.initialize()
-                        loaded = Loaded(key, it)
+                    ).also { created ->
+                        created.initialize()
+                        loaded = Loaded(key, created, source)
+                        newlyOpened = null
                     }
                 }
                 return block(engine)
             } catch (failure: Throwable) {
                 lastFailure = failure
-                if (loaded?.key == key) {
-                    runCatching { loaded?.engine?.close() }
-                    loaded = null
-                }
+                newlyOpened?.close()
+                if (loaded?.key == key) closeLoaded()
             }
         }
         throw IllegalStateException("Gemma initialization/inference failed", lastFailure)
+    }
+
+    private fun closeLoaded() {
+        val current = loaded ?: return
+        loaded = null
+        runCatching { current.engine.close() }
+        current.source.close()
     }
 }
