@@ -52,6 +52,7 @@ private object GemmaEnginePool {
             val sourceKey = if (GemmaModelSource.isExternal(modelReference)) "content:$modelReference" else "file:$modelReference"
             val key = "$sourceKey:${backend.name}"
             var newlyOpened: GemmaModelSource.Opened? = null
+            var initializingEngine: Engine? = null
             try {
                 val engine = if (loaded?.key == key) {
                     loaded!!.engine
@@ -66,14 +67,17 @@ private object GemmaEnginePool {
                             cacheDir = java.io.File(context.cacheDir, "litertlm").apply { mkdirs() }.absolutePath,
                         )
                     ).also { created ->
+                        initializingEngine = created
                         created.initialize()
                         loaded = Loaded(key, created, source)
+                        initializingEngine = null
                         newlyOpened = null
                     }
                 }
                 return block(engine)
             } catch (failure: Throwable) {
                 lastFailure = failure
+                runCatching { initializingEngine?.close() }
                 newlyOpened?.close()
                 if (loaded?.key == key) closeLoaded()
             }
