@@ -26,7 +26,7 @@ internal class ResumableFileDownloader(
     private val maxRetries: Int = 8,
     private val retryBaseDelayMs: Long = 750L,
     private val maxRetryDelayMs: Long = 12_000L,
-    private val sleeper: (Long) -> Unit = Thread::sleep,
+    private val sleeper: (Long) -> Unit = { delayMs -> Thread.sleep(delayMs) },
 ) {
     fun download(
         destination: File,
@@ -49,8 +49,10 @@ internal class ResumableFileDownloader(
                     require(response.status == HTTP_OK || response.status == HTTP_PARTIAL) {
                         "unexpected successful download status ${response.status}"
                     }
+                    if (response.status == HTTP_PARTIAL) {
+                        validateContentRange(response.contentRange, requestedOffset, expectedBytes)
+                    }
                     val append = requestedOffset > 0L && response.status == HTTP_PARTIAL
-                    if (append) validateContentRange(response.contentRange, requestedOffset, expectedBytes)
 
                     RandomAccessFile(destination, "rw").use { output ->
                         if (append) {
@@ -61,17 +63,22 @@ internal class ResumableFileDownloader(
                             output.setLength(0L)
                             output.seek(0L)
                         }
-                        val buffer = ByteArray(BUFFER_BYTES)
-                        while (true) {
-                            val read = response.body.read(buffer)
-                            if (read <= 0) break
-                            output.write(buffer, 0, read)
-                            check(output.filePointer <= expectedBytes) {
-                                "download exceeded expected size $expectedBytes"
+                        try {
+                            val buffer = ByteArray(BUFFER_BYTES)
+                            while (true) {
+                                val read = response.body.read(buffer)
+                                if (read <= 0) break
+                                output.write(buffer, 0, read)
+                                check(output.filePointer <= expectedBytes) {
+                                    "download exceeded expected size $expectedBytes"
+                                }
+                                onProgress?.invoke(output.filePointer)
                             }
-                            onProgress?.invoke(output.filePointer)
+                        } finally {
+                            // A mid-read IOException must still make every successfully written byte
+                            // durable before the next Range request or a process restart.
+                            output.fd.sync()
                         }
-                        output.fd.sync()
                     }
                 }
 
