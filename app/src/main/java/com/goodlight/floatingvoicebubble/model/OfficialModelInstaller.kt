@@ -4,7 +4,6 @@ import android.content.Context
 import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
-import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URI
 
@@ -119,82 +118,41 @@ class OfficialModelInstaller(context: Context) {
         expectedBytes: Long,
         onProgress: ((ModelInstallProgress) -> Unit)?,
     ) {
-        if (staging.length() > expectedBytes) staging.delete()
-        onProgress?.invoke(ModelInstallProgress("ダウンロード", staging.length(), expectedBytes))
-
-        var transientFailures = 0
-        while (staging.length() < expectedBytes) {
-            val requestedOffset = staging.length()
-            try {
-                openCatalogStream(entry, requestedOffset.takeIf { it > 0L }).use { source ->
-                    val append = requestedOffset > 0L && source.status == HttpURLConnection.HTTP_PARTIAL
-                    if (append) {
-                        val contentRange = source.contentRange.orEmpty()
-                        require(contentRange.startsWith("bytes $requestedOffset-")) {
-                            "モデル取得先が不正なContent-Rangeを返しました: $contentRange"
-                        }
-                    }
-
-                    RandomAccessFile(staging, "rw").use { output ->
-                        if (append) {
-                            output.seek(requestedOffset)
-                        } else {
-                            // Server ignored Range and returned 200. Reuse this response as a clean
-                            // restart instead of issuing another multi-GB request.
-                            output.setLength(0L)
-                            output.seek(0L)
-                        }
-                        val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
-                        while (true) {
-                            val read = source.stream.read(buffer)
-                            if (read <= 0) break
-                            output.write(buffer, 0, read)
-                            val completed = output.filePointer
-                            check(completed <= expectedBytes) {
-                                "モデル取得先が期待サイズを超えるデータを返しました。"
-                            }
-                            onProgress?.invoke(ModelInstallProgress("ダウンロード", completed, expectedBytes))
-                        }
-                        output.fd.sync()
-                    }
-                }
-                if (staging.length() < expectedBytes) {
-                    throw IOException(
-                        "モデル取得が途中で終了しました。${staging.length()} / $expectedBytes bytes から再開します。",
-                    )
-                }
-            } catch (failure: Throwable) {
-                if (!isRetryableDownloadFailure(failure) || transientFailures >= MAX_TRANSIENT_RETRIES) {
-                    throw failure
-                }
-                transientFailures += 1
-                val exponential = RETRY_BASE_DELAY_MS * (1L shl (transientFailures - 1).coerceAtMost(6))
-                val delayMs = exponential.coerceAtMost(MAX_RETRY_DELAY_MS)
+        ResumableFileDownloader(
+            maxRetries = MAX_TRANSIENT_RETRIES,
+            retryBaseDelayMs = RETRY_BASE_DELAY_MS,
+            maxRetryDelayMs = MAX_RETRY_DELAY_MS,
+        ).download(
+            destination = staging,
+            expectedBytes = expectedBytes,
+            open = { rangeStart ->
+                val source = openCatalogStream(entry, rangeStart)
+                ResumableDownloadResponse(
+                    status = source.status,
+                    contentRange = source.contentRange,
+                    body = source.stream,
+                    closeAction = source::close,
+                )
+            },
+            onProgress = { completed ->
+                onProgress?.invoke(ModelInstallProgress("ダウンロード", completed, expectedBytes))
+            },
+            onRetry = { _, delayMs, completed, _ ->
                 onProgress?.invoke(
                     ModelInstallProgress(
                         "通信が途切れました。${formatRetryDelay(delayMs)}後に途中から再開",
-                        staging.length(),
+                        completed,
                         expectedBytes,
                     ),
                 )
-                Thread.sleep(delayMs)
-            }
-        }
-        check(staging.length() == expectedBytes) {
-            "Gemmaモデルのダウンロードサイズが一致しません。期待 $expectedBytes bytes / 実際 ${staging.length()} bytes"
-        }
+            },
+        )
     }
 
     private fun formatRetryDelay(delayMs: Long): String = if (delayMs % 1000L == 0L) {
         "${delayMs / 1000L}秒"
     } else {
         "%.2f秒".format(java.util.Locale.ROOT, delayMs / 1000.0)
-    }
-
-    private fun isRetryableDownloadFailure(failure: Throwable): Boolean = when (failure) {
-        is RetryableHttpException -> true
-        is IOException -> true
-        else -> failure.cause?.let(::isRetryableDownloadFailure) == true
     }
 
     private fun openCatalogStream(entry: OfficialModelEntry, rangeStart: Long? = null): NetworkStream {
@@ -284,7 +242,6 @@ class OfficialModelInstaller(context: Context) {
         // Inactivity timeout, not a total-download deadline. Large Hugging Face blobs may legitimately
         // take many minutes; a brief CDN stall must not discard gigabytes of completed work.
         private const val READ_TIMEOUT_MS = 300_000
-        private const val DOWNLOAD_BUFFER_BYTES = 1024 * 1024
         private const val RETRY_BASE_DELAY_MS = 750L
         private const val MAX_RETRY_DELAY_MS = 12_000L
     }
