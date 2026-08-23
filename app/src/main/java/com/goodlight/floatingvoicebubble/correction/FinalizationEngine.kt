@@ -7,11 +7,11 @@ import com.goodlight.floatingvoicebubble.FinalAsrMode
 import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
+import com.goodlight.floatingvoicebubble.model.GemmaModelSource
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
 import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
 import com.goodlight.floatingvoicebubble.trace.FinalizationTrace
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
-import java.io.File
 import java.net.URI
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
@@ -279,14 +279,14 @@ class FinalizationEngine(
     }
 
     private fun correctionRoute(settings: AppSettings): CorrectionRoute {
-        val gemmaAvailable = File(settings.gemmaModelPath).isFile
+        val gemmaAvailable = GemmaModelSource.isAvailable(context, settings.gemmaModelPath)
         return when (CorrectionBackendResolver.resolve(settings, gemmaAvailable)) {
             CorrectionBackend.NONE -> CorrectionRoute("none", null, null, null)
             CorrectionBackend.GEMMA -> CorrectionRoute(
                 provider = "on-device",
                 model = if (settings.gemmaVariant.name == "UNKNOWN") "Gemma" else "Gemma ${settings.gemmaVariant.name}",
                 reasoning = null,
-                endpoint = "on-device",
+                endpoint = if (GemmaModelSource.isExternal(settings.gemmaModelPath)) "external-document" else "on-device",
             )
             CorrectionBackend.BYOK -> CorrectionRoute(
                 provider = CloudCorrectorFactory.protocolFor(settings.byokEndpoint).name.lowercase(),
@@ -299,7 +299,7 @@ class FinalizationEngine(
 
     private fun selectCorrector(settings: AppSettings): TextCorrector? {
         correctorOverride?.let { return it(settings) }
-        val gemmaAvailable = File(settings.gemmaModelPath).isFile
+        val gemmaAvailable = GemmaModelSource.isAvailable(context, settings.gemmaModelPath)
         return when (CorrectionBackendResolver.resolve(settings, gemmaAvailable)) {
             CorrectionBackend.NONE -> null
             CorrectionBackend.BYOK -> CloudCorrectorFactory.create(
