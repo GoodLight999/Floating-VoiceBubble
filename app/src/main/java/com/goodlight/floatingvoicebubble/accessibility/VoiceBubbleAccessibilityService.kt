@@ -26,16 +26,19 @@ import com.goodlight.floatingvoicebubble.correction.CorrectionTimeoutPolicy
 import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
 import com.goodlight.floatingvoicebubble.correction.FinalizationResult
 import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
+import com.goodlight.floatingvoicebubble.correction.ReasoningWireDescriptor
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.model.GemmaModelSource
+import com.goodlight.floatingvoicebubble.model.GemmaModelStorage
 import com.goodlight.floatingvoicebubble.overlay.FloatingBubbleController
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
 import com.goodlight.floatingvoicebubble.speech.SherpaFinalAsrEngine
 import com.goodlight.floatingvoicebubble.speech.SherpaStreamingEngine
 import com.goodlight.floatingvoicebubble.speech.SpeechRecognitionSession
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
+import java.io.File
 import java.util.LinkedHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -420,6 +423,8 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     modelChanged = result.correctionModelChanged,
                     integrityResult = result.correctionIntegrityResult.orEmpty(),
                     endpoint = result.correctionEndpoint.orEmpty(),
+                    reasoningWire = result.correctionReasoningWire.orEmpty(),
+                    attemptTimingSummary = result.correctionAttemptTimings.joinToString(" | ") { it.redactedSummary() },
                 ),
             )
         } else if (result.correctionModelResponded) {
@@ -512,6 +517,12 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                     modelChanged = false,
                     integrityResult = "not-run",
                     endpoint = failureEndpoint(current, backend),
+                    reasoningWire = if (backend == CorrectionBackend.BYOK && current.byokModel.isNotBlank()) {
+                        ReasoningWireDescriptor.describe(current.byokEndpoint, current.byokModel, current.reasoningEffort)
+                    } else {
+                        ""
+                    },
+                    attemptTimingSummary = "",
                 ),
             )
         }
@@ -613,14 +624,19 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
     private fun failureEndpoint(effective: AppSettings, backend: CorrectionBackend): String = when (backend) {
         CorrectionBackend.NONE -> ""
-        CorrectionBackend.GEMMA -> if (GemmaModelSource.isExternal(effective.gemmaModelPath)) {
-            "external-document"
-        } else {
-            "on-device"
-        }
+        CorrectionBackend.GEMMA -> gemmaSourceLabel(effective.gemmaModelPath)
         CorrectionBackend.BYOK -> runCatching {
             ByokEndpointResolver.resolve(effective.byokEndpoint).generationUrl.substringBefore('?').substringBefore('#')
         }.getOrElse { effective.byokEndpoint.substringBefore('?').substringBefore('#').take(220) }
+    }
+
+    private fun gemmaSourceLabel(reference: String): String {
+        val file = reference.takeUnless(GemmaModelSource::isExternal)?.let(::File)
+        return when {
+            GemmaModelSource.isExternal(reference) -> "legacy-content-uri-unrunnable"
+            file != null && GemmaModelStorage.isInSharedDirectory(this, file) -> "shared-real-file-no-copy"
+            else -> "real-file-path"
+        }
     }
 
     private fun integrityReason(reason: String?): String = when (reason) {
