@@ -11,7 +11,6 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import com.goodlight.floatingvoicebubble.RecognitionMode
-import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.model.StreamingAsrModel
 import java.io.File
 import java.util.Locale
@@ -36,7 +35,7 @@ class SpeechRecognitionSession(
     private val biasTerms: List<String>,
     private val traceAudioDir: File,
     private val streamingModel: StreamingAsrModel?,
-    private val geminiTranscribeApiKey: String? = null,
+    private val geminiTranscribeApiKey: String,
     private val onPartial: (String) -> Unit,
     private val onState: (String) -> Unit,
     private val onComplete: (RecognitionOutcome) -> Unit,
@@ -50,8 +49,7 @@ class SpeechRecognitionSession(
     private val completionPublished = AtomicBoolean(false)
     private val accumulator = TranscriptAccumulator()
     private val resolvedGeminiApiKey: String = if (mode == RecognitionMode.GEMINI_TRANSCRIBE) {
-        geminiTranscribeApiKey?.trim()?.takeIf(String::isNotEmpty)
-            ?: SettingsStore(context).geminiTranscribeApiKey().trim()
+        geminiTranscribeApiKey.trim()
     } else {
         ""
     }
