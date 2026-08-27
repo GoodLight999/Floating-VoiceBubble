@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.ReasoningEffort
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -13,8 +14,14 @@ data class ByokModelInfo(
     val promptPricePerMillion: Double? = null,
     val completionPricePerMillion: Double? = null,
     val description: String = "",
+    /** Exact effort values advertised by the provider's model catalog, when available. */
+    val reasoningEfforts: List<ReasoningEffort> = emptyList(),
+    val reasoningMandatory: Boolean? = null,
+    val reasoningDefaultEffort: ReasoningEffort? = null,
 ) {
-    val supportsReasoning: Boolean get() = "reasoning" in supportedParameters || "reasoning_effort" in supportedParameters
+    val supportsReasoning: Boolean get() =
+        "reasoning" in supportedParameters || "reasoning_effort" in supportedParameters ||
+            reasoningEfforts.isNotEmpty() || reasoningMandatory == true
 }
 
 class ByokModelDiscovery {
@@ -31,36 +38,8 @@ class ByokModelDiscovery {
         return models.distinctBy { it.id }.sortedBy { it.id.lowercase() }
     }
 
-    private fun listOpenAiCompatible(url: String, apiKey: String): List<ByokModelInfo> {
-        val json = getJson(url, CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE, apiKey)
-        val data = json.optJSONArray("data") ?: error("モデル一覧レスポンスに data がありません。")
-        return buildList {
-            for (index in 0 until data.length()) {
-                val item = data.optJSONObject(index) ?: continue
-                val id = item.optString("id").trim()
-                if (id.isBlank()) continue
-                val supported = item.optJSONArray("supported_parameters")?.let { values ->
-                    buildSet {
-                        for (i in 0 until values.length()) values.optString(i).trim().takeIf(String::isNotBlank)?.let(::add)
-                    }
-                }.orEmpty()
-                val pricing = item.optJSONObject("pricing")
-                add(
-                    ByokModelInfo(
-                        id = id,
-                        displayName = item.optString("name").ifBlank {
-                            item.optString("display_name", id).ifBlank { id }
-                        },
-                        contextLength = item.optLong("context_length").takeIf { it > 0L },
-                        supportedParameters = supported,
-                        promptPricePerMillion = pricing?.optString("prompt")?.toDoubleOrNull()?.times(1_000_000.0),
-                        completionPricePerMillion = pricing?.optString("completion")?.toDoubleOrNull()?.times(1_000_000.0),
-                        description = item.optString("description").trim(),
-                    ),
-                )
-            }
-        }
-    }
+    private fun listOpenAiCompatible(url: String, apiKey: String): List<ByokModelInfo> =
+        parseOpenAiCompatibleModels(getJson(url, CloudCorrectorFactory.Protocol.OPENAI_COMPATIBLE, apiKey))
 
     private fun listAnthropic(baseUrl: String, apiKey: String): List<ByokModelInfo> {
         val result = mutableListOf<ByokModelInfo>()
@@ -160,5 +139,68 @@ class ByokModelDiscovery {
 
     companion object {
         private const val MAX_PAGES = 100
+
+        /**
+         * OpenRouter extends the OpenAI-compatible model catalog with a `reasoning` object.
+         * Keep parsing tolerant so ordinary OpenAI-compatible `/models` responses still work.
+         */
+        internal fun parseOpenAiCompatibleModels(json: JSONObject): List<ByokModelInfo> {
+            val data = json.optJSONArray("data") ?: error("モデル一覧レスポンスに data がありません。")
+            return buildList {
+                for (index in 0 until data.length()) {
+                    val item = data.optJSONObject(index) ?: continue
+                    val id = item.optString("id").trim()
+                    if (id.isBlank()) continue
+                    val supported = item.optJSONArray("supported_parameters")?.let { values ->
+                        buildSet {
+                            for (i in 0 until values.length()) {
+                                values.optString(i).trim().takeIf(String::isNotBlank)?.let(::add)
+                            }
+                        }
+                    }.orEmpty()
+                    val reasoning = item.optJSONObject("reasoning")
+                    val efforts = reasoning?.optJSONArray("supported_efforts")?.let { values ->
+                        buildList {
+                            for (i in 0 until values.length()) {
+                                parseReasoningEffort(values.optString(i))?.let { effort ->
+                                    if (effort !in this) add(effort)
+                                }
+                            }
+                        }
+                    }.orEmpty()
+                    val defaultEffort = reasoning?.optString("default_effort")
+                        ?.let(::parseReasoningEffort)
+                    val mandatory = reasoning?.takeIf { it.has("mandatory") }?.optBoolean("mandatory")
+                    val pricing = item.optJSONObject("pricing")
+                    add(
+                        ByokModelInfo(
+                            id = id,
+                            displayName = item.optString("name").ifBlank {
+                                item.optString("display_name", id).ifBlank { id }
+                            },
+                            contextLength = item.optLong("context_length").takeIf { it > 0L },
+                            supportedParameters = supported,
+                            promptPricePerMillion = pricing?.optString("prompt")?.toDoubleOrNull()?.times(1_000_000.0),
+                            completionPricePerMillion = pricing?.optString("completion")?.toDoubleOrNull()?.times(1_000_000.0),
+                            description = item.optString("description").trim(),
+                            reasoningEfforts = efforts,
+                            reasoningMandatory = mandatory,
+                            reasoningDefaultEffort = defaultEffort,
+                        ),
+                    )
+                }
+            }
+        }
+
+        private fun parseReasoningEffort(raw: String): ReasoningEffort? = when (raw.trim().lowercase()) {
+            "none" -> ReasoningEffort.NONE
+            "minimal" -> ReasoningEffort.MINIMAL
+            "low" -> ReasoningEffort.LOW
+            "medium" -> ReasoningEffort.MEDIUM
+            "high" -> ReasoningEffort.HIGH
+            "xhigh" -> ReasoningEffort.XHIGH
+            "max" -> ReasoningEffort.MAX
+            else -> null
+        }
     }
 }
