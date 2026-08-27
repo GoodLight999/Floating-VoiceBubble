@@ -3,6 +3,7 @@ package com.goodlight.floatingvoicebubble.speech
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Base64
@@ -21,6 +22,35 @@ class GeminiTranscribeProtocolTest {
         assertEquals(0, transcription.getJSONArray("languageCodes").length())
         assertEquals(GeminiTranscribeProtocol.MAX_CUSTOM_VOCABULARY, transcription.getJSONArray("customVocabulary").length())
         assertEquals("resume-123", setup.getJSONObject("sessionResumption").getString("handle"))
+    }
+
+    @Test
+    fun manualModelIsUsedWithoutRequiringAPreset() {
+        val root = JSONObject(
+            GeminiTranscribeProtocol.setupMessage(
+                customVocabulary = emptyList(),
+                model = "models/custom-transcribe-model",
+            ),
+        )
+        assertEquals("models/custom-transcribe-model", root.getJSONObject("setup").getString("model"))
+    }
+
+    @Test
+    fun secureWebSocketEndpointIsNormalizedOnlyAtTransportBoundary() {
+        assertEquals(
+            "https://example.com/ws/live?mode=test",
+            GeminiTranscribeProtocol.httpTransportEndpoint("wss://example.com/ws/live?mode=test"),
+        )
+        assertEquals(
+            "https://example.com/ws/live",
+            GeminiTranscribeProtocol.httpTransportEndpoint("https://example.com/ws/live"),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            GeminiTranscribeProtocol.httpTransportEndpoint("ws://example.com/ws/live")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            GeminiTranscribeProtocol.httpTransportEndpoint("https://user:secret@example.com/ws/live")
+        }
     }
 
     @Test
