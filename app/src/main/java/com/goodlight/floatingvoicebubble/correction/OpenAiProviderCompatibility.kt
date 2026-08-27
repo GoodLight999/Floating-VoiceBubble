@@ -29,12 +29,20 @@ object OpenAiProviderCompatibility {
         val isOpenRouter = host == "openrouter.ai"
         val isZai = host == "api.z.ai"
         val isOpenAi = host == "api.openai.com" || host.endsWith(".openai.azure.com")
-        val effectiveEffort = ReasoningCapabilities.effortString(endpoint, model, reasoningEffort)
+        val normalizedEffort = ReasoningCapabilities.effortString(endpoint, model, reasoningEffort)
+        // OpenRouter's current reasoning abstraction supports `max` as a gateway effort even when
+        // an older local capability table would conservatively normalize MAX to XHIGH. The model
+        // catalog now carries exact supported_efforts and the UI filters against that metadata.
+        val openRouterEffort = if (isOpenRouter && reasoningEffort == ReasoningEffort.MAX) {
+            "max"
+        } else {
+            normalizedEffort
+        }
 
         return OpenAiProviderOptions(
             requestModel = if (isZai) model.lowercase(Locale.ROOT) else model,
-            openAiReasoningEffort = if (isOpenAi) effectiveEffort else null,
-            openRouterReasoningEffort = if (isOpenRouter) effectiveEffort else null,
+            openAiReasoningEffort = if (isOpenAi) normalizedEffort else null,
+            openRouterReasoningEffort = if (isOpenRouter) openRouterEffort else null,
             zaiThinkingEnabled = if (isZai) ReasoningCapabilities.zaiThinking(endpoint, model, reasoningEffort) else null,
             // Z.AI documents do_sample=false as its deterministic path. Keep provider-specific
             // sampling options away from generic OpenAI-compatible endpoints.
