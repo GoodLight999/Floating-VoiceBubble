@@ -11,15 +11,17 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Real-time Gemini 3.5 Transcribe backend.
+ * Real-time Gemini Live-compatible transcription backend.
  *
  * Audio capture remains owned by [AudioCaptureSession]. This class only packetizes its 16 kHz
  * PCM16 stream, maintains a bounded queue while the WebSocket is being established/resumed, and
- * converts Gemini interim/final transcription events into the same callbacks as the local streamer.
+ * converts interim/final transcription events into the same callbacks as the local streamer.
  * It never starts a fresh session after already-sent audio unless there is a resumption handle;
  * silently losing the tail of a dictation is worse than an explicit recognition failure.
  */
 class GeminiTranscribeStreamingEngine(
+    private val endpoint: String,
+    private val model: String,
     private val apiKey: String,
     biasTerms: List<String>,
     private val onState: (String) -> Unit,
@@ -53,10 +55,12 @@ class GeminiTranscribeStreamingEngine(
     private var audioEverSent = false
 
     fun start() {
-        require(apiKey.isNotBlank()) { "Gemini 3.5 TranscribeのAPIキーを設定してください。" }
+        require(apiKey.isNotBlank()) { "クラウド音声認識のAPIキーを設定してください。" }
+        require(model.isNotBlank()) { "クラウド音声認識のモデルIDを設定してください。" }
+        GeminiTranscribeProtocol.httpTransportEndpoint(endpoint)
         synchronized(lock) {
-            check(!closed.get()) { "Gemini Transcribe session is closed" }
-            check(socket == null) { "Gemini Transcribe session already started" }
+            check(!closed.get()) { "Cloud transcription session is closed" }
+            check(socket == null) { "Cloud transcription session already started" }
             openSocketLocked(resume = false)
         }
     }
@@ -70,7 +74,7 @@ class GeminiTranscribeStreamingEngine(
                 if (!sendOrQueueLocked(frame)) overflow = true
             }
         }
-        if (overflow) failTerminal("Gemini音声認識の再接続待ちが長すぎるため、音声を欠落させず処理できませんでした。")
+        if (overflow) failTerminal("クラウド音声認識の再接続待ちが長すぎるため、音声を欠落させず処理できませんでした。")
     }
 
     fun finish() {
@@ -85,9 +89,9 @@ class GeminiTranscribeStreamingEngine(
             sendStreamEndIfReadyLocked()
         }
         if (overflow) {
-            failTerminal("Gemini音声認識の再接続待ちが長すぎるため、音声を欠落させず確定できませんでした。")
+            failTerminal("クラウド音声認識の再接続待ちが長すぎるため、音声を欠落させず確定できませんでした。")
         } else {
-            onState("Geminiで認識を確定しています")
+            onState("クラウド音声認識で確定しています")
         }
     }
 
@@ -108,28 +112,32 @@ class GeminiTranscribeStreamingEngine(
         streamEndSent = false
         val generation = ++socketGeneration
         val handle = if (resume) resumptionHandle else null
-        val url = GeminiTranscribeProtocol.WEBSOCKET_BASE_URL
+        val url = GeminiTranscribeProtocol.httpTransportEndpoint(endpoint)
             .toHttpUrl()
             .newBuilder()
-            .addQueryParameter("key", apiKey)
+            .setQueryParameter("key", apiKey)
             .build()
         val request = Request.Builder().url(url).build()
         socket = CLIENT.newWebSocket(request, listener(generation, handle))
-        onState(if (resume) "Gemini音声認識へ再接続しています" else "Gemini音声認識へ接続しています")
+        onState(if (resume) "クラウド音声認識へ再接続しています" else "クラウド音声認識へ接続しています")
     }
 
     private fun listener(generation: Long, resumeHandleForSetup: String?) = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            val message = GeminiTranscribeProtocol.setupMessage(customVocabulary, resumeHandleForSetup)
+            val message = GeminiTranscribeProtocol.setupMessage(
+                customVocabulary = customVocabulary,
+                resumptionHandle = resumeHandleForSetup,
+                model = model,
+            )
             if (!webSocket.send(message)) {
-                handleSocketFailure(generation, "Gemini音声認識の初期設定を送信できませんでした。")
+                handleSocketFailure(generation, "クラウド音声認識の初期設定を送信できませんでした。")
             }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             val event = runCatching { GeminiTranscribeProtocol.parseServerMessage(text) }
                 .getOrElse {
-                    handleSocketFailure(generation, "Gemini音声認識の応答形式を読み取れませんでした。")
+                    handleSocketFailure(generation, "クラウド音声認識の応答形式を読み取れませんでした。")
                     return
                 }
 
@@ -157,7 +165,7 @@ class GeminiTranscribeStreamingEngine(
                         }
                     }
                     sendStreamEndIfReadyLocked()
-                    if (setupReady) onState(if (finishRequested) "Geminiで認識を確定しています" else "聴いています")
+                    if (setupReady) onState(if (finishRequested) "クラウド音声認識で確定しています" else "聴いています")
                 }
 
                 event.interimTranscript?.let { interim ->
@@ -185,7 +193,7 @@ class GeminiTranscribeStreamingEngine(
             when {
                 reconnect -> reconnectNow(generation, graceful = true)
                 reconnectImpossible -> failTerminal(
-                    "Gemini音声認識から接続更新を求められましたが、再開用情報が得られていないため音声欠落を避けて停止しました。",
+                    "クラウド音声認識から接続更新を求められましたが、再開用情報が得られていないため音声欠落を避けて停止しました。",
                 )
             }
         }
@@ -208,15 +216,15 @@ class GeminiTranscribeStreamingEngine(
             when {
                 shouldReconnect -> reconnectNow(generation, graceful = false)
                 lossyReconnect -> failTerminal(
-                    "Gemini音声認識との接続が切れ、再開用情報が無いため音声欠落を避けて停止しました (code=$code)。",
+                    "クラウド音声認識との接続が切れ、再開用情報が無いため音声欠落を避けて停止しました (code=$code)。",
                 )
-                !finishRequested -> failTerminal("Gemini音声認識との接続が終了しました (code=$code)。")
-                else -> failTerminal("Gemini音声認識との接続が確定前に終了しました (code=$code)。")
+                !finishRequested -> failTerminal("クラウド音声認識との接続が終了しました (code=$code)。")
+                else -> failTerminal("クラウド音声認識との接続が確定前に終了しました (code=$code)。")
             }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            handleSocketFailure(generation, "Gemini音声認識との通信に失敗しました: ${safeNetworkReason(t)}")
+            handleSocketFailure(generation, "クラウド音声認識との通信に失敗しました: ${safeNetworkReason(t)}")
         }
     }
 
