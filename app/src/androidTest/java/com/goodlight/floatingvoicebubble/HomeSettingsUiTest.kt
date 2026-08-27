@@ -18,7 +18,7 @@ class HomeSettingsUiTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun selectedCloudModelShowsRealReasoningChoicesAndPersistsSelection() {
+    fun selectedCloudModelShowsCatalogReasoningChoicesAndPersistsSelection() {
         val store = SettingsStore(composeRule.activity)
         val previous = store.load()
         try {
@@ -28,6 +28,8 @@ class HomeSettingsUiTest {
                     byokEndpoint = "https://openrouter.ai/api/v1/chat/completions",
                     byokModel = "provider/reasoning-model",
                     reasoningEffort = ReasoningEffort.DEFAULT,
+                    byokReasoningMetadataKnown = true,
+                    byokReasoningEfforts = setOf(ReasoningEffort.LOW, ReasoningEffort.HIGH),
                 )
             }
             composeRule.activityRule.scenario.recreate()
@@ -50,6 +52,35 @@ class HomeSettingsUiTest {
             composeRule.onNodeWithTag("reasoning-effort-control")
                 .assertIsDisplayed()
                 .assertTextContains("高")
+        } finally {
+            store.update { previous }
+        }
+    }
+
+    @Test
+    fun manualOpenRouterModelDoesNotInventUnverifiedReasoningDepths() {
+        val store = SettingsStore(composeRule.activity)
+        val previous = store.load()
+        try {
+            store.update {
+                it.copy(
+                    correctionMode = CorrectionMode.BYOK,
+                    byokEndpoint = "https://openrouter.ai/api/v1/chat/completions",
+                    byokModel = "manual/unverified-model",
+                    reasoningEffort = ReasoningEffort.HIGH,
+                    byokReasoningMetadataKnown = false,
+                    byokReasoningEfforts = emptySet(),
+                )
+            }
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+
+            composeRule.onNodeWithTag("reasoning-effort-control")
+                .assertIsDisplayed()
+                .assertTextContains("モデル既定")
+            composeRule.onNodeWithTag("reasoning-effort-control").performClick()
+            composeRule.onNodeWithText("高", useUnmergedTree = true).assertDoesNotExist()
+            composeRule.onNodeWithText("モデル既定", useUnmergedTree = true).assertIsDisplayed()
         } finally {
             store.update { previous }
         }
