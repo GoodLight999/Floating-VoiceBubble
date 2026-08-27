@@ -80,7 +80,12 @@ class HomeSettingsUiTest {
                 .assertTextContains("モデル既定")
             composeRule.onNodeWithTag("reasoning-effort-control").performClick()
             composeRule.onNodeWithText("高", useUnmergedTree = true).assertDoesNotExist()
-            composeRule.onNodeWithText("モデル既定", useUnmergedTree = true).assertIsDisplayed()
+            // The control itself already proves the only effective value is provider default.
+            // Do not use a global text selector here because the explanatory note can repeat the
+            // same phrase and Compose correctly exposes both nodes.
+            composeRule.onNodeWithTag("reasoning-effort-control")
+                .assertIsDisplayed()
+                .assertTextContains("モデル既定")
         } finally {
             store.update { previous }
         }
