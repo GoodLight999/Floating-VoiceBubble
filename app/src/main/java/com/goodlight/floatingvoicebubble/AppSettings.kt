@@ -55,6 +55,8 @@ data class AppSettings(
     val gemmaVariant: GemmaVariant = GemmaVariant.UNKNOWN,
     val streamingAsrModelId: String = "",
     val finalAsrModelId: String = "",
+    val recognitionApiEndpoint: String = DEFAULT_CLOUD_RECOGNITION_ENDPOINT,
+    val recognitionApiModel: String = DEFAULT_CLOUD_RECOGNITION_MODEL,
     val keepSessionTraces: Boolean = true,
 )
 
@@ -90,6 +92,10 @@ class SettingsStore(context: Context) {
         gemmaVariant = enumValueOr(prefs.getString("gemma_variant", null), GemmaVariant.UNKNOWN),
         streamingAsrModelId = prefs.getString("streaming_asr_model_id", "").orEmpty(),
         finalAsrModelId = prefs.getString("final_asr_model_id", "").orEmpty(),
+        recognitionApiEndpoint = prefs.getString("recognition_api_endpoint", null)
+            ?: DEFAULT_CLOUD_RECOGNITION_ENDPOINT,
+        recognitionApiModel = prefs.getString("recognition_api_model", null)
+            ?: DEFAULT_CLOUD_RECOGNITION_MODEL,
         keepSessionTraces = prefs.getBoolean("keep_session_traces", true),
     )
 
@@ -116,6 +122,8 @@ class SettingsStore(context: Context) {
             .putString("gemma_variant", value.gemmaVariant.name)
             .putString("streaming_asr_model_id", value.streamingAsrModelId)
             .putString("final_asr_model_id", value.finalAsrModelId)
+            .putString("recognition_api_endpoint", value.recognitionApiEndpoint)
+            .putString("recognition_api_model", value.recognitionApiModel)
             .putBoolean("keep_session_traces", value.keepSessionTraces)
             .apply()
         return value
@@ -124,17 +132,34 @@ class SettingsStore(context: Context) {
     fun apiKey(): String = secrets.read(KEY_API_KEY)
     fun setApiKey(value: String) = secrets.write(KEY_API_KEY, value)
 
-    fun geminiTranscribeApiKey(): String = secrets.read(KEY_GEMINI_TRANSCRIBE_API_KEY)
-    fun setGeminiTranscribeApiKey(value: String) = secrets.write(KEY_GEMINI_TRANSCRIBE_API_KEY, value)
+    /** Active cloud-recognition credential. Existing Gemini-only installs migrate lazily. */
+    fun recognitionApiKey(): String {
+        val current = secrets.read(KEY_RECOGNITION_API_KEY)
+        if (current.isNotBlank()) return current
+        val legacy = secrets.read(KEY_GEMINI_TRANSCRIBE_API_KEY)
+        if (legacy.isNotBlank()) secrets.write(KEY_RECOGNITION_API_KEY, legacy)
+        return legacy
+    }
+
+    fun setRecognitionApiKey(value: String) = secrets.write(KEY_RECOGNITION_API_KEY, value)
+
+    // Compatibility wrappers for already-built call sites and previously encrypted settings.
+    fun geminiTranscribeApiKey(): String = recognitionApiKey()
+    fun setGeminiTranscribeApiKey(value: String) = setRecognitionApiKey(value)
 
     private inline fun <reified T : Enum<T>> enumValueOr(raw: String?, fallback: T): T =
         raw?.let { runCatching { enumValueOf<T>(it) }.getOrNull() } ?: fallback
 
     companion object {
         private const val KEY_API_KEY = "byok_api_key"
+        private const val KEY_RECOGNITION_API_KEY = "recognition_api_key"
         private const val KEY_GEMINI_TRANSCRIBE_API_KEY = "gemini_transcribe_api_key"
     }
 }
+
+const val DEFAULT_CLOUD_RECOGNITION_ENDPOINT =
+    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+const val DEFAULT_CLOUD_RECOGNITION_MODEL = "gemini-3.5-transcribe-live"
 
 private class KeystoreSecrets(context: Context) {
     private val prefs = context.getSharedPreferences("floating_voice_bubble_secrets", Context.MODE_PRIVATE)
