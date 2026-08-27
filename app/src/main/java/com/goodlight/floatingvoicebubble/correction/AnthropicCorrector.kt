@@ -45,7 +45,8 @@ class AnthropicCorrector(
             body.put("output_config", JSONObject().put("effort", effort))
         }
 
-        val response = executeAttempt(body)
+        val timings = mutableListOf<CorrectionAttemptTiming>()
+        val response = executeAttempt(body, timings)
         if (response.status !in 200..299) {
             val detail = compact(response.text)
             throw CorrectionCallException(
@@ -63,6 +64,7 @@ class AnthropicCorrector(
                 httpStatus = response.status,
                 responsePresent = response.text.isNotBlank(),
                 errorClass = "HttpResponseError",
+                attemptTimings = timings.toList(),
             )
         }
         if (response.text.isBlank()) {
@@ -73,6 +75,7 @@ class AnthropicCorrector(
                 httpStatus = response.status,
                 responsePresent = false,
                 errorClass = "EmptyResponse",
+                attemptTimings = timings.toList(),
             )
         }
 
@@ -94,17 +97,26 @@ class AnthropicCorrector(
                 httpStatus = response.status,
                 responsePresent = true,
                 errorClass = failure.javaClass.simpleName,
+                attemptTimings = timings.toList(),
                 cause = failure,
             )
         }
 
         return CorrectionCallResult(
             text = text,
-            metadata = CorrectionCallMetadata(attempts = 1, httpStatus = response.status, responsePresent = true),
+            metadata = CorrectionCallMetadata(
+                attempts = 1,
+                httpStatus = response.status,
+                responsePresent = true,
+                attemptTimings = timings.toList(),
+            ),
         )
     }
 
-    private fun executeAttempt(body: JSONObject): HttpResult {
+    private fun executeAttempt(
+        body: JSONObject,
+        timings: MutableList<CorrectionAttemptTiming>,
+    ): TimedHttpResponse {
         val deadlineMs = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
         val connection = try {
             connectionFactory(URL(endpoint)).apply {
@@ -118,22 +130,22 @@ class AnthropicCorrector(
                 setRequestProperty("anthropic-version", "2023-06-01")
             }
         } catch (failure: Throwable) {
-            throw transportFailure(failure)
+            throw transportFailure(failure, timings)
         }
         return try {
-            HttpConnectionDeadline.run(connection, deadlineMs.toLong()) {
-                connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
-                val status = connection.responseCode
-                val text = (if (status in 200..299) connection.inputStream else connection.errorStream)
-                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-                HttpResult(status, text)
+            TimedHttpTransport.execute(connection, body.toString(), 1, deadlineMs.toLong()).also {
+                timings += it.timing
             }
-        } catch (failure: Throwable) {
-            throw transportFailure(failure)
+        } catch (failure: TimedHttpTransportFailure) {
+            timings += failure.timing
+            throw transportFailure(failure.transportCause, timings)
         }
     }
 
-    private fun transportFailure(failure: Throwable): CorrectionCallException {
+    private fun transportFailure(
+        failure: Throwable,
+        timings: List<CorrectionAttemptTiming>,
+    ): CorrectionCallException {
         val stage = when (failure) {
             is UnknownHostException -> "dns"
             is ConnectException -> "connect"
@@ -146,6 +158,7 @@ class AnthropicCorrector(
             attempts = 1,
             responsePresent = false,
             errorClass = failure.javaClass.simpleName,
+            attemptTimings = timings.toList(),
             cause = failure,
         )
     }
@@ -158,8 +171,6 @@ class AnthropicCorrector(
     }
 
     private fun compact(value: String): String = value.take(500).replace(Regex("\\s+"), " ").trim()
-
-    private data class HttpResult(val status: Int, val text: String)
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 8_000
