@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -22,6 +23,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -89,6 +92,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     var reasoningEffort by rememberSaveable { mutableStateOf(settings.reasoningEffort) }
     var modelFilter by rememberSaveable { mutableStateOf("") }
     var models by remember { mutableStateOf<List<ByokModelInfo>>(emptyList()) }
+    var presetOpen by remember { mutableStateOf(false) }
     var busyAction by remember { mutableStateOf<String?>(null) }
     var message by rememberSaveable { mutableStateOf("") }
     var progress by remember { mutableStateOf<ModelInstallProgress?>(null) }
@@ -215,10 +219,37 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
 
         HorizontalDivider()
         Text("クラウドAPI", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            "URL・APIキー・モデルIDはすべて直接入力できます。候補は入力補助だけで、対応先を制限しません。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Box {
+            OutlinedButton(onClick = { presetOpen = true }, enabled = busyAction == null) {
+                Text("接続先の候補から入力")
+            }
+            DropdownMenu(expanded = presetOpen, onDismissRequest = { presetOpen = false }) {
+                ApiProviderPresets.correction.forEach { preset ->
+                    DropdownMenuItem(
+                        text = { Text(preset.label) },
+                        onClick = {
+                            endpoint = preset.endpoint
+                            model = ""
+                            reasoningEffort = ReasoningEffort.DEFAULT
+                            models = emptyList()
+                            modelFilter = ""
+                            presetOpen = false
+                            message = "${preset.label} のAPI URLを入力しました。モデルIDとURLはそのまま編集できます。"
+                        },
+                    )
+                }
+            }
+        }
         OutlinedTextField(
             value = endpoint,
             onValueChange = { endpoint = it; models = emptyList(); message = "" },
             label = { Text("API URL") },
+            supportingText = { Text("候補にないOpenAI互換APIや独自URLも直接入力できます") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -242,14 +273,14 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                             models = fetched
                             busyAction = null
                             message = if (fetched.isEmpty()) {
-                                "接続できましたが、選べるモデルが見つかりませんでした。"
+                                "接続できましたが、選べるモデルが見つかりませんでした。モデルIDは直接入力できます。"
                             } else {
                                 "${fetched.size}件のモデルを取得しました。"
                             }
                         } }
                         .onFailure { failure -> activity.runOnUiThread {
                             busyAction = null
-                            message = "モデル取得失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                            message = "モデル取得失敗: ${failure.message ?: failure.javaClass.simpleName}。モデルIDは直接入力できます。"
                         } }
                 }, "VoiceBubble-ModelDiscovery").start()
             },
@@ -260,7 +291,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             OutlinedTextField(
                 value = modelFilter,
                 onValueChange = { modelFilter = it },
-                label = { Text("モデルを検索") },
+                label = { Text("取得したモデルを検索") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -280,16 +311,16 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                     }
                 }
             }
-        } else {
-            OutlinedTextField(
-                value = model,
-                onValueChange = { model = it },
-                label = { Text("モデルID") },
-                supportingText = { Text("一覧を取得できないAPIの場合だけ手入力します") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
         }
+
+        OutlinedTextField(
+            value = model,
+            onValueChange = { model = it; message = "" },
+            label = { Text("モデルID") },
+            supportingText = { Text("一覧の有無に関係なく直接入力できます") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         if (model.isNotBlank()) {
             Text("推論の深さ", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
