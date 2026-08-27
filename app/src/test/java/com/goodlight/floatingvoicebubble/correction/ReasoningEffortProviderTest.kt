@@ -79,14 +79,14 @@ class ReasoningEffortProviderTest {
     }
 
     @Test
-    fun openRouterOmitsDefaultAndNormalizesLegacyMaxToXHigh() {
+    fun openRouterOmitsDefaultAndPreservesGatewayMax() {
         val endpoint = "https://openrouter.ai/api/v1/chat/completions"
         assertNull(
             OpenAiProviderCompatibility.resolve(endpoint, "provider/model", ReasoningEffort.DEFAULT)
                 .openRouterReasoningEffort,
         )
         assertEquals(
-            "xhigh",
+            "max",
             OpenAiProviderCompatibility.resolve(endpoint, "provider/model", ReasoningEffort.MAX)
                 .openRouterReasoningEffort,
         )
