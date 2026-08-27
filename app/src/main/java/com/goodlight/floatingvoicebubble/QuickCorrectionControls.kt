@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.goodlight.floatingvoicebubble.correction.ByokEndpointResolver
 import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
 import com.goodlight.floatingvoicebubble.model.GemmaModelSource
 
@@ -51,14 +52,40 @@ internal fun QuickCorrectionControls(
 
     val reasoningRelevant = settings.correctionMode == CorrectionMode.BYOK || settings.correctionMode == CorrectionMode.AUTO
     val reasoningEnabled = reasoningRelevant && !settings.offlineMode && settings.byokModel.isNotBlank()
-    val reasoningCapability = remember(settings.byokEndpoint, settings.byokModel) {
+    val baseReasoningCapability = remember(settings.byokEndpoint, settings.byokModel) {
         ReasoningCapabilities.capability(settings.byokEndpoint, settings.byokModel)
+    }
+    val openRouter = ByokEndpointResolver.isOpenRouter(settings.byokEndpoint)
+    val reasoningChoices = remember(
+        settings.byokEndpoint,
+        settings.byokModel,
+        settings.byokReasoningMetadataKnown,
+        settings.byokReasoningEfforts,
+    ) {
+        if (openRouter) {
+            if (settings.byokReasoningMetadataKnown) {
+                listOf(ReasoningEffort.DEFAULT) +
+                    ReasoningEffort.entries.filter { it != ReasoningEffort.DEFAULT && it in settings.byokReasoningEfforts }
+            } else {
+                listOf(ReasoningEffort.DEFAULT)
+            }
+        } else {
+            baseReasoningCapability.choices
+        }
     }
     val normalizedReasoning = ReasoningCapabilities.normalize(
         settings.byokEndpoint,
         settings.byokModel,
         settings.reasoningEffort,
-    )
+    ).takeIf { it in reasoningChoices } ?: ReasoningEffort.DEFAULT
+    val reasoningNote = when {
+        !openRouter -> baseReasoningCapability.note
+        !settings.byokReasoningMetadataKnown ->
+            "OpenRouterのモデル一覧を取得すると、このモデルが実際に対応する推論深度だけを表示します。"
+        settings.byokReasoningEfforts.isEmpty() ->
+            "OpenRouterのモデル情報上、このモデルで指定可能な推論深度は確認できません。モデル既定を使います。"
+        else -> "OpenRouterのモデル情報が返した対応値だけを表示しています。"
+    }
 
     Card(
         modifier = modifier.testTag("primary-correction-card"),
@@ -102,14 +129,14 @@ internal fun QuickCorrectionControls(
                     ChoiceRowField(
                         title = "推論の深さ",
                         value = normalizedReasoning,
-                        values = reasoningCapability.choices,
+                        values = reasoningChoices,
                         label = { ReasoningCapabilities.label(settings.byokEndpoint, settings.byokModel, it) },
                         testTag = "reasoning-effort-control",
                     ) { effort ->
                         settings = store.update { it.copy(reasoningEffort = effort) }
                     }
                     Text(
-                        reasoningCapability.note,
+                        reasoningNote,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
