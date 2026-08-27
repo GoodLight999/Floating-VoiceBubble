@@ -18,7 +18,7 @@ data class ImportedGemmaModel(
 internal class ModelHashMismatchException(message: String) : IllegalStateException(message)
 
 class ModelImporter(private val context: Context) {
-    private val modelDir = File(context.noBackupFilesDir, "models/correction").apply {
+    private val modelDir = GemmaModelStorage.installDirectory(context).apply {
         mkdirs()
         AtomicFileInstaller.recoverBackups(this)
     }
@@ -26,8 +26,15 @@ class ModelImporter(private val context: Context) {
     /** Backward-compatible entry point used by the legacy settings UI. */
     fun importGemma(uri: Uri): File = importGemmaVerified(uri).file
 
-    /** Copies once while simultaneously calculating the exact fingerprint. */
-    fun importGemmaVerified(uri: Uri): ImportedGemmaModel {
+    /**
+     * Copies a SAF-selected model once into the direct-path LiteRT-LM model directory while
+     * calculating its exact fingerprint. The UI must describe this as a copy/import operation;
+     * arbitrary content:// URIs cannot be passed directly to LiteRT-LM's modelPath API.
+     */
+    fun importGemmaVerified(
+        uri: Uri,
+        onProgress: ((copiedBytes: Long, totalBytes: Long?) -> Unit)? = null,
+    ): ImportedGemmaModel {
         val metadata = sourceMetadata(uri)
         require(metadata.displayName.endsWith(".litertlm", ignoreCase = true)) {
             "LiteRT-LM の .litertlm モデルを選択してください。"
@@ -40,6 +47,7 @@ class ModelImporter(private val context: Context) {
                 expectedBytes = metadata.sizeBytes.takeIf { it > 0L },
                 expectedSha256 = null,
                 input = input,
+                onProgress = onProgress,
             )
         }
     }
