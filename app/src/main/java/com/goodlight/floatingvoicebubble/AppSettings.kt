@@ -10,7 +10,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-enum class RecognitionMode { AUTO, SYSTEM, ON_DEVICE, SHERPA_STREAMING }
+enum class RecognitionMode { AUTO, SYSTEM, ON_DEVICE, SHERPA_STREAMING, GEMINI_TRANSCRIBE }
 enum class FinalAsrMode { LIVE_RESULT, REAZON_SPEECH }
 enum class CorrectionMode { AUTO, BYOK, GEMMA, NONE }
 enum class GemmaBackend { AUTO, GPU, CPU }
@@ -124,11 +124,15 @@ class SettingsStore(context: Context) {
     fun apiKey(): String = secrets.read(KEY_API_KEY)
     fun setApiKey(value: String) = secrets.write(KEY_API_KEY, value)
 
+    fun geminiTranscribeApiKey(): String = secrets.read(KEY_GEMINI_TRANSCRIBE_API_KEY)
+    fun setGeminiTranscribeApiKey(value: String) = secrets.write(KEY_GEMINI_TRANSCRIBE_API_KEY, value)
+
     private inline fun <reified T : Enum<T>> enumValueOr(raw: String?, fallback: T): T =
         raw?.let { runCatching { enumValueOf<T>(it) }.getOrNull() } ?: fallback
 
     companion object {
         private const val KEY_API_KEY = "byok_api_key"
+        private const val KEY_GEMINI_TRANSCRIBE_API_KEY = "gemini_transcribe_api_key"
     }
 }
 
