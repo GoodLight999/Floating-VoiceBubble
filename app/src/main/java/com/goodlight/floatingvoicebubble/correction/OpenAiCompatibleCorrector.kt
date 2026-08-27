@@ -34,6 +34,12 @@ class OpenAiCompatibleCorrector(
                     .put(JSONObject().put("role", "system").put("content", CorrectionPrompt.system(request)))
                     .put(JSONObject().put("role", "user").put("content", CorrectionPrompt.user(request))),
             )
+        if (options.zaiProvider) {
+            // Z.AI defaults GLM-4.7/4.5-family max_tokens to 65,536. That ceiling is inappropriate
+            // for an interactive ASR post-editor whose valid output should stay close to RAW.
+            // Bound the generation while retaining headroom for reasoning when it is enabled/default.
+            body.put("max_tokens", zaiCorrectionMaxTokens(request, options.zaiThinkingEnabled))
+        }
         applyProviderOptions(body, options)
 
         var attempts = 1
@@ -91,10 +97,21 @@ class OpenAiCompatibleCorrector(
                 }
                 else -> throw IllegalStateException(
                     message.optString("reasoning_content").takeIf(String::isNotBlank)?.let {
-                        "BYOK response contained reasoning but no final text"
+                        if (options.zaiProvider) {
+                            "Z.AIは思考内容だけを返し、確定本文を返しませんでした。音声補正では『思考OFF』を試してください。"
+                        } else {
+                            "BYOK response contained reasoning but no final text"
+                        }
                     } ?: "BYOK response content is unsupported",
                 )
-            }.trim().ifBlank { throw IllegalStateException("BYOK response has no text") }
+            }.trim().ifBlank {
+                if (options.zaiProvider && message.optString("reasoning_content").isNotBlank()) {
+                    throw IllegalStateException(
+                        "Z.AIは思考内容だけを返し、確定本文を返しませんでした。音声補正では『思考OFF』を試してください。",
+                    )
+                }
+                throw IllegalStateException("BYOK response has no text")
+            }
         } catch (failure: Throwable) {
             if (failure is CorrectionCallException) throw failure
             throw CorrectionCallException(
@@ -195,11 +212,21 @@ class OpenAiCompatibleCorrector(
             .any(lower::contains)
     }
 
+    private fun zaiCorrectionMaxTokens(request: CorrectionRequest, thinkingEnabled: Boolean?): Int {
+        val rawChars = request.rawTranscript.length.coerceAtLeast(1)
+        val reasoningHeadroom = if (thinkingEnabled == false) 256 else 1_024
+        val minimum = if (thinkingEnabled == false) 512 else 2_048
+        return (rawChars * 2L + reasoningHeadroom)
+            .coerceIn(minimum.toLong(), MAX_ZAI_CORRECTION_TOKENS.toLong())
+            .toInt()
+    }
+
     private fun compact(value: String): String = value.take(500).replace(Regex("\\s+"), " ").trim()
 
     private data class HttpResult(val status: Int, val text: String)
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 8_000
+        private const val MAX_ZAI_CORRECTION_TOKENS = 16_384
     }
 }
