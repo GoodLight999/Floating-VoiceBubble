@@ -18,18 +18,24 @@ import java.util.concurrent.atomic.AtomicReference
 internal object GeminiTranscribeProbe {
     data class Result(val elapsedMs: Long)
 
-    fun run(apiKey: String, timeoutMs: Long = DEFAULT_TIMEOUT_MS): Result {
-        require(apiKey.isNotBlank()) { "Gemini 3.5 TranscribeのAPIキーを入力してください。" }
+    fun run(
+        apiKey: String,
+        endpoint: String = GeminiTranscribeProtocol.WEBSOCKET_BASE_URL,
+        model: String = GeminiTranscribeProtocol.MODEL,
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    ): Result {
+        require(apiKey.isNotBlank()) { "クラウド音声認識のAPIキーを入力してください。" }
+        require(model.isNotBlank()) { "クラウド音声認識のモデルIDを入力してください。" }
         require(timeoutMs in 1_000L..60_000L)
 
         val started = System.nanoTime()
         val latch = CountDownLatch(1)
         val failure = AtomicReference<String?>(null)
         val socketRef = AtomicReference<WebSocket?>(null)
-        val url = GeminiTranscribeProtocol.WEBSOCKET_BASE_URL
+        val url = GeminiTranscribeProtocol.httpTransportEndpoint(endpoint)
             .toHttpUrl()
             .newBuilder()
-            .addQueryParameter("key", apiKey)
+            .setQueryParameter("key", apiKey)
             .build()
         val request = Request.Builder().url(url).build()
 
@@ -37,8 +43,8 @@ internal object GeminiTranscribeProbe {
             request,
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    if (!webSocket.send(GeminiTranscribeProtocol.setupMessage(emptyList()))) {
-                        failure.compareAndSet(null, "Gemini音声認識へ初期設定を送れませんでした。")
+                    if (!webSocket.send(GeminiTranscribeProtocol.setupMessage(emptyList(), model = model))) {
+                        failure.compareAndSet(null, "クラウド音声認識へ初期設定を送れませんでした。")
                         latch.countDown()
                     }
                 }
@@ -46,7 +52,7 @@ internal object GeminiTranscribeProbe {
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     val event = runCatching { GeminiTranscribeProtocol.parseServerMessage(text) }
                         .getOrElse {
-                            failure.compareAndSet(null, "Gemini音声認識の応答形式を読み取れませんでした。")
+                            failure.compareAndSet(null, "クラウド音声認識の応答形式を読み取れませんでした。")
                             latch.countDown()
                             return
                         }
@@ -58,11 +64,11 @@ internal object GeminiTranscribeProbe {
                     failure.compareAndSet(
                         null,
                         when (status) {
-                            400 -> "Gemini音声認識APIが設定を受け付けませんでした (HTTP 400)。"
-                            401, 403 -> "Gemini音声認識のAPIキーが拒否されました (HTTP $status)。"
-                            429 -> "Gemini音声認識APIの利用上限に達しています (HTTP 429)。"
-                            null -> "Gemini音声認識APIへ接続できませんでした: ${networkReason(t)}"
-                            else -> "Gemini音声認識APIへ接続できませんでした (HTTP $status)。"
+                            400 -> "クラウド音声認識APIが設定を受け付けませんでした (HTTP 400)。"
+                            401, 403 -> "クラウド音声認識のAPIキーが拒否されました (HTTP $status)。"
+                            429 -> "クラウド音声認識APIの利用上限に達しています (HTTP 429)。"
+                            null -> "クラウド音声認識APIへ接続できませんでした: ${networkReason(t)}"
+                            else -> "クラウド音声認識APIへ接続できませんでした (HTTP $status)。"
                         },
                     )
                     latch.countDown()
@@ -73,7 +79,7 @@ internal object GeminiTranscribeProbe {
 
         try {
             if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
-                throw IOException("Gemini音声認識APIの接続テストが${timeoutMs / 1000}秒で時間切れになりました。")
+                throw IOException("クラウド音声認識APIの接続テストが${timeoutMs / 1000}秒で時間切れになりました。")
             }
             failure.get()?.let { throw IOException(it) }
             val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
