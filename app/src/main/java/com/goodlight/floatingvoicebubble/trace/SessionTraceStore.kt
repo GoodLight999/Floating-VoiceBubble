@@ -57,8 +57,14 @@ class SessionTraceStore(context: Context) {
             trace.outcome.audioFile?.delete()
             return
         }
+        val modelLineBreakChanged = trace.modelOutputText?.let { output ->
+            lineBreakPositions(trace.correctionInputText) != lineBreakPositions(output)
+        } ?: false
+        val modelBasis = trace.modelOutputText ?: trace.correctionInputText
+        val appLineBreakChanged = lineBreakPositions(modelBasis) != lineBreakPositions(trace.finalText)
+
         val json = JSONObject()
-            .put("schema", 6)
+            .put("schema", 7)
             .put("sessionId", trace.outcome.sessionId)
             .put("liveRecognizer", trace.outcome.recognizerKind)
             .put("corrector", trace.correctorId)
@@ -94,6 +100,8 @@ class SessionTraceStore(context: Context) {
             .put("correctionModelResponded", trace.correctionModelResponded)
             .put("correctionModelChanged", trace.correctionModelChanged)
             .put("deterministicFormattingChanged", trace.deterministicFormattingChanged)
+            .put("modelLineBreakChanged", modelLineBreakChanged)
+            .put("appLineBreakChanged", appLineBreakChanged)
             .put("correctionChanged", trace.correctionChanged)
             .put("correctionBypassed", trace.correctionBypassed)
             .put("correctionAccepted", trace.correctionAccepted)
@@ -130,6 +138,29 @@ class SessionTraceStore(context: Context) {
             }
             if (delete) runCatching { file.delete() }
         }
+    }
+
+    private fun lineBreakPositions(value: String): List<Int> {
+        val positions = mutableListOf<Int>()
+        var contentIndex = 0
+        var previousWasCr = false
+        value.forEach { char ->
+            when (char) {
+                '\r' -> {
+                    positions += contentIndex
+                    previousWasCr = true
+                }
+                '\n' -> {
+                    if (!previousWasCr) positions += contentIndex
+                    previousWasCr = false
+                }
+                else -> {
+                    contentIndex += 1
+                    previousWasCr = false
+                }
+            }
+        }
+        return positions
     }
 
     private fun migrateLegacyDirectory() {
