@@ -80,14 +80,44 @@ class HomeSettingsUiTest {
                 .assertTextContains("モデル既定")
             composeRule.onNodeWithTag("reasoning-effort-control").performClick()
             composeRule.onNodeWithText("高", useUnmergedTree = true).assertDoesNotExist()
-            // The control itself already proves the only effective value is provider default.
-            // Do not use a global text selector here because the explanatory note can repeat the
-            // same phrase and Compose correctly exposes both nodes.
             composeRule.onNodeWithTag("reasoning-effort-control")
                 .assertIsDisplayed()
                 .assertTextContains("モデル既定")
         } finally {
             store.update { previous }
+        }
+    }
+
+    @Test
+    fun persistedCorrectionFailureRemainsVisibleWithReasonAndFallback() {
+        val status = CorrectionStatusStore(composeRule.activity)
+        try {
+            status.saveFailure(
+                LastCorrectionFailure(
+                    occurredAtMs = System.currentTimeMillis(),
+                    provider = "openai_compatible",
+                    model = "glm-4.7",
+                    reasoning = "思考ON",
+                    latencyMs = 12_345L,
+                    reason = "Read timed out",
+                    fallback = "音声認識結果",
+                    attempts = 1,
+                    failureStage = "network-timeout",
+                    errorClass = "SocketTimeoutException",
+                    responsePresent = false,
+                    integrityResult = "not-run",
+                    endpoint = "https://api.z.ai/api/coding/paas/v4/chat/completions",
+                ),
+            )
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+
+            composeRule.onNodeWithTag("last-correction-failure").assertIsDisplayed()
+            composeRule.onNodeWithText("前回の文章補正に失敗しました", substring = false).assertIsDisplayed()
+            composeRule.onNodeWithText("Read timed out", substring = false).assertIsDisplayed()
+            composeRule.onNodeWithText("結果: 音声認識結果", substring = false).assertIsDisplayed()
+        } finally {
+            status.clearFailure()
         }
     }
 
