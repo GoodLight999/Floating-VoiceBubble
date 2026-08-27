@@ -74,16 +74,25 @@ class ReasoningCapabilitiesTest {
 
     @Test
     fun anthropicLegacyModelDoesNotPretendToHaveDepthLadder() {
-        val capability = ReasoningCapabilities.capability(
-            "https://api.anthropic.com/v1/messages",
-            "claude-sonnet-4-5",
-        )
-        assertEquals(listOf(ReasoningEffort.DEFAULT, ReasoningEffort.NONE), capability.choices)
+        val endpoint = "https://api.anthropic.com/v1/messages"
+        val capability = ReasoningCapabilities.capability(endpoint, "claude-sonnet-4-5")
+
+        // Sonnet 4.5 uses manual extended-thinking budgets rather than the adaptive
+        // output_config.effort ladder. Floating VoiceBubble deliberately does not invent a
+        // fake depth mapping for that API generation, so only provider/model default is exposed.
+        assertEquals(listOf(ReasoningEffort.DEFAULT), capability.choices)
         assertNull(
             ReasoningCapabilities.anthropicEffort(
-                "https://api.anthropic.com/v1/messages",
+                endpoint,
                 "claude-sonnet-4-5",
                 ReasoningEffort.HIGH,
+            ),
+        )
+        assertNull(
+            ReasoningCapabilities.anthropicThinkingType(
+                endpoint,
+                "claude-sonnet-4-5",
+                ReasoningEffort.NONE,
             ),
         )
     }
