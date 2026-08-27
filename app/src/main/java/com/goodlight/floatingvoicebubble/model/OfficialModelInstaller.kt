@@ -98,13 +98,24 @@ class OfficialModelInstaller(context: Context) {
 
         downloadGemmaResumable(entry, staging, expectedBytes, onProgress)
         onProgress?.invoke(ModelInstallProgress("SHA-256を検証", 0L, expectedBytes))
-        val installed = gemmaImporter.installVerifiedDownloadedFile(
-            staging = staging,
-            displayName = displayName,
-            expectedBytes = expectedBytes,
-            expectedSha256 = expectedSha,
-        ) { hashed, total ->
-            onProgress?.invoke(ModelInstallProgress("SHA-256を検証", hashed, total))
+        val installed = try {
+            gemmaImporter.installVerifiedDownloadedFile(
+                staging = staging,
+                displayName = displayName,
+                expectedBytes = expectedBytes,
+                expectedSha256 = expectedSha,
+            ) { hashed, total ->
+                onProgress?.invoke(ModelInstallProgress("SHA-256を検証", hashed, total))
+            }
+        } catch (failure: ModelHashMismatchException) {
+            // A complete file with a wrong digest cannot be resumed into correctness. Keeping it
+            // would make every later attempt hash the same corrupt multi-gigabyte file forever.
+            // Interrupted/incomplete downloads are deliberately *not* deleted here and remain
+            // resumable from their actual byte count.
+            if (staging.isFile && staging.length() == expectedBytes) {
+                runCatching { staging.delete() }
+            }
+            throw failure
         }
         check(installed.fingerprint.knownOfficialArtifact) {
             "Gemmaモデルはハッシュ一致したにもかかわらず公式artifactとして認識できませんでした。"
