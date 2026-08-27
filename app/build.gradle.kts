@@ -100,6 +100,7 @@ dependencies {
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.14.0")
     implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.5")
     implementation("org.apache.commons:commons-compress:1.28.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.3.21")
