@@ -140,6 +140,15 @@ internal fun HomeSettingsScreen(
                     failureSummary(failure).takeIf(String::isNotBlank)?.let { summary ->
                         Text("状況: $summary", style = MaterialTheme.typography.bodySmall)
                     }
+                    if (failure.reasoningWire.isNotBlank()) {
+                        Text("送信設定: ${failure.reasoningWire}", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (failure.attemptTimingSummary.isNotBlank()) {
+                        Text(
+                            "通信計測: ${humanTimingSummary(failure.attemptTimingSummary)}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     if (failure.fallback.isNotBlank()) {
                         Text("結果: ${failure.fallback}", style = MaterialTheme.typography.bodySmall)
                     }
@@ -326,6 +335,14 @@ private fun failureSummary(failure: LastCorrectionFailure): String = buildList {
         add(if (failure.responsePresent) "API応答あり" else "API応答なし")
     }
 }.joinToString(" / ")
+
+private fun humanTimingSummary(value: String): String = value
+    .replace(Regex("attempt=(\\d+)")) { "試行${it.groupValues[1]}" }
+    .replace(" connect=", " 接続=")
+    .replace(" write=", " 送信=")
+    .replace(" headers=", " 応答開始=")
+    .replace(" body=", " 本文受信=")
+    .replace(" total=", " 合計=")
 
 private fun failureStageLabel(stage: String): String = when (stage) {
     "dns" -> "接続先を名前解決できませんでした"
