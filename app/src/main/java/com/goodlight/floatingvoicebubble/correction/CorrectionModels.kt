@@ -28,11 +28,31 @@ data class CorrectionRequest(
     val forceCorrection: Boolean = false,
 )
 
+/** Redacted phase timings for one provider attempt. No request/response content is retained. */
+data class CorrectionAttemptTiming(
+    val attempt: Int,
+    val connectMs: Long? = null,
+    val requestWriteMs: Long? = null,
+    val responseHeadersMs: Long? = null,
+    val responseBodyMs: Long? = null,
+    val totalMs: Long,
+) {
+    fun redactedSummary(): String = buildString {
+        append("attempt=").append(attempt)
+        connectMs?.let { append(" connect=").append(it).append("ms") }
+        requestWriteMs?.let { append(" write=").append(it).append("ms") }
+        responseHeadersMs?.let { append(" headers=").append(it).append("ms") }
+        responseBodyMs?.let { append(" body=").append(it).append("ms") }
+        append(" total=").append(totalMs).append("ms")
+    }
+}
+
 /** Redacted transport metadata returned with a successful model call. */
 data class CorrectionCallMetadata(
     val attempts: Int = 1,
     val httpStatus: Int? = null,
     val responsePresent: Boolean = true,
+    val attemptTimings: List<CorrectionAttemptTiming> = emptyList(),
 )
 
 data class CorrectionCallResult(
@@ -51,6 +71,7 @@ class CorrectionCallException(
     val httpStatus: Int? = null,
     val responsePresent: Boolean = false,
     val errorClass: String = "CorrectionCallException",
+    val attemptTimings: List<CorrectionAttemptTiming> = emptyList(),
     cause: Throwable? = null,
 ) : RuntimeException(message, cause)
 
