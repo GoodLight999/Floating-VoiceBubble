@@ -16,6 +16,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Audio capture remains owned by [AudioCaptureSession]. This class only packetizes its 16 kHz
  * PCM16 stream, maintains a bounded queue while the WebSocket is being established/resumed, and
  * converts Gemini interim/final transcription events into the same callbacks as the local streamer.
+ * It never starts a fresh session after already-sent audio unless there is a resumption handle;
+ * silently losing the tail of a dictation is worse than an explicit recognition failure.
  */
 class GeminiTranscribeStreamingEngine(
     private val apiKey: String,
@@ -48,7 +50,7 @@ class GeminiTranscribeStreamingEngine(
     private var latestInterim = ""
     private var resumptionHandle: String? = null
     private var reconnectAttempts = 0
-    private var rotateRequested = false
+    private var audioEverSent = false
 
     fun start() {
         require(apiKey.isNotBlank()) { "Gemini 3.5 TranscribeのAPIキーを設定してください。" }
@@ -104,7 +106,6 @@ class GeminiTranscribeStreamingEngine(
         if (closed.get() || terminal.get()) return
         setupReady = false
         streamEndSent = false
-        rotateRequested = false
         val generation = ++socketGeneration
         val handle = if (resume) resumptionHandle else null
         val url = GeminiTranscribeProtocol.WEBSOCKET_BASE_URL
@@ -135,6 +136,7 @@ class GeminiTranscribeStreamingEngine(
             var partialToPublish: String? = null
             var finalToPublish: String? = null
             var reconnect = false
+            var reconnectImpossible = false
             synchronized(lock) {
                 if (generation != socketGeneration || closed.get() || terminal.get()) return
 
@@ -169,17 +171,23 @@ class GeminiTranscribeStreamingEngine(
                     if (finishRequested) finalToPublish = accumulator.display()
                 }
                 if (finishRequested && event.turnComplete && finalToPublish == null && accumulator.hasContent(latestInterim)) {
-                    finalToPublish = accumulator.display(latestInterim)
+                    // turnComplete can accompany a final transcription event, but an interim-only
+                    // hypothesis is not promoted here. The authoritative inputTranscription event
+                    // must arrive before completion.
                 }
                 if (event.goAway && !finishRequested) {
                     setupReady = false
-                    rotateRequested = true
-                    reconnect = true
+                    if (canReconnectWithoutLossLocked()) reconnect = true else reconnectImpossible = true
                 }
             }
             partialToPublish?.let(onPartial)
             finalToPublish?.takeIf(String::isNotBlank)?.let(::deliverFinal)
-            if (reconnect) reconnectNow(generation, graceful = true)
+            when {
+                reconnect -> reconnectNow(generation, graceful = true)
+                reconnectImpossible -> failTerminal(
+                    "Gemini音声認識から接続更新を求められましたが、再開用情報が得られていないため音声欠落を避けて停止しました。",
+                )
+            }
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -189,26 +197,21 @@ class GeminiTranscribeStreamingEngine(
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             if (closed.get() || terminal.get()) return
             var shouldReconnect = false
-            var shouldFail = false
+            var lossyReconnect = false
             synchronized(lock) {
                 if (generation != socketGeneration) return
                 setupReady = false
-                if (!finishRequested && (rotateRequested || reconnectAttempts < MAX_RECONNECT_ATTEMPTS)) {
-                    shouldReconnect = true
-                } else if (finishRequested && !terminal.get()) {
-                    if (accumulator.hasContent(latestInterim)) {
-                        // The connection closed before an authoritative final event. Do not silently
-                        // label an interim hypothesis as final; let the caller's bounded final timeout
-                        // surface the failure/fallback policy.
-                        shouldFail = true
-                    } else {
-                        shouldFail = true
-                    }
+                if (!finishRequested && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    if (canReconnectWithoutLossLocked()) shouldReconnect = true else lossyReconnect = true
                 }
             }
             when {
                 shouldReconnect -> reconnectNow(generation, graceful = false)
-                shouldFail -> failTerminal("Gemini音声認識との接続が確定前に終了しました (code=$code)。")
+                lossyReconnect -> failTerminal(
+                    "Gemini音声認識との接続が切れ、再開用情報が無いため音声欠落を避けて停止しました (code=$code)。",
+                )
+                !finishRequested -> failTerminal("Gemini音声認識との接続が終了しました (code=$code)。")
+                else -> failTerminal("Gemini音声認識との接続が確定前に終了しました (code=$code)。")
             }
         }
 
@@ -226,8 +229,11 @@ class GeminiTranscribeStreamingEngine(
         return true
     }
 
-    private fun sendFrameLocked(frame: ByteArray): Boolean =
-        socket?.send(GeminiTranscribeProtocol.audioMessage(frame)) == true
+    private fun sendFrameLocked(frame: ByteArray): Boolean {
+        val sent = socket?.send(GeminiTranscribeProtocol.audioMessage(frame)) == true
+        if (sent) audioEverSent = true
+        return sent
+    }
 
     private fun sendStreamEndIfReadyLocked() {
         if (!finishRequested || streamEndSent || !setupReady || queuedFrames.isNotEmpty()) return
@@ -238,20 +244,29 @@ class GeminiTranscribeStreamingEngine(
     private fun handleSocketFailure(generation: Long, message: String) {
         if (closed.get() || terminal.get()) return
         var reconnect = false
+        var lossyReconnect = false
         synchronized(lock) {
             if (generation != socketGeneration) return
             setupReady = false
             if (!finishRequested && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                reconnect = true
+                if (canReconnectWithoutLossLocked()) reconnect = true else lossyReconnect = true
             }
         }
-        if (reconnect) reconnectNow(generation, graceful = false) else failTerminal(message)
+        when {
+            reconnect -> reconnectNow(generation, graceful = false)
+            lossyReconnect -> failTerminal("$message 再開用情報が無いため、音声欠落を避けて再接続しません。")
+            else -> failTerminal(message)
+        }
     }
+
+    private fun canReconnectWithoutLossLocked(): Boolean =
+        !audioEverSent || !resumptionHandle.isNullOrBlank()
 
     private fun reconnectNow(generation: Long, graceful: Boolean) {
         if (closed.get() || terminal.get()) return
         synchronized(lock) {
             if (generation != socketGeneration || closed.get() || terminal.get()) return
+            if (!canReconnectWithoutLossLocked()) return
             if (!graceful) reconnectAttempts += 1
             setupReady = false
             val old = socket
@@ -276,12 +291,12 @@ class GeminiTranscribeStreamingEngine(
         onFailure(message)
     }
 
-    private fun safeNetworkReason(failure: Throwable): String =
-        failure.message
-            ?.replace(Regex("https?://\\S+|wss?://\\S+"), "接続先")
-            ?.take(240)
-            ?.takeIf(String::isNotBlank)
-            ?: failure.javaClass.simpleName
+    private fun safeNetworkReason(failure: Throwable): String = when (failure) {
+        is java.net.UnknownHostException -> "接続先を名前解決できません"
+        is java.net.SocketTimeoutException -> "接続が時間切れになりました"
+        is javax.net.ssl.SSLException -> "TLS接続に失敗しました"
+        else -> failure.javaClass.simpleName
+    }
 
     private class Pcm16Chunker(private val frameSamples: Int) {
         private val pending = ShortArray(frameSamples)
