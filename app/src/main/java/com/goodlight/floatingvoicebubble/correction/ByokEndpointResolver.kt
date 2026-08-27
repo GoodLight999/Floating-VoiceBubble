@@ -28,6 +28,13 @@ object ByokEndpointResolver {
         URI(rawEndpoint.trim()).host.equals("openrouter.ai", ignoreCase = true)
     }.getOrDefault(false)
 
+    /** Z.AI documents this endpoint as Coding Plan quota for coding scenarios only. */
+    fun isZaiCodingPlan(rawEndpoint: String): Boolean = runCatching {
+        val uri = URI(rawEndpoint.trim())
+        uri.host.equals("api.z.ai", ignoreCase = true) &&
+            uri.path.orEmpty().lowercase().contains("/api/coding/paas/v4")
+    }.getOrDefault(false)
+
     private fun resolveOpenAiCompatible(uri: URI): ResolvedByokEndpoint {
         if (uri.host.equals("openrouter.ai", ignoreCase = true)) return resolveOpenRouter(uri)
 
