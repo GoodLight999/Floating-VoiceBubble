@@ -24,7 +24,7 @@ class GemmaExternalModelReferenceTest {
         val displayName = "$token.litertlm"
         val bytes = ByteArray(1 * 1024 * 1024 + 257) { index -> (index * 31 + 7).toByte() }
         val privateModelDir = File(context.noBackupFilesDir, "models/correction")
-        val before = privateModelDir.listFiles().orEmpty().map(File::name).sorted()
+        val before = privateModelDir.listFiles().orEmpty().map { it.name }.sorted()
 
         val uri = resolver.insert(
             MediaStore.Downloads.EXTERNAL_CONTENT_URI,
@@ -56,7 +56,7 @@ class GemmaExternalModelReferenceTest {
                 assertArrayEquals(bytes, reread)
             }
 
-            val after = privateModelDir.listFiles().orEmpty().map(File::name).sorted()
+            val after = privateModelDir.listFiles().orEmpty().map { it.name }.sorted()
             assertEquals("external model verification must not create a private model copy", before, after)
         } finally {
             resolver.delete(uri, null, null)
