@@ -4,22 +4,20 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
-import android.system.Os
-import android.system.OsConstants
 import java.io.File
 import java.security.MessageDigest
 
 /**
- * Resolves Gemma model references without forcing a second multi-gigabyte copy.
+ * Resolves Gemma model references for LiteRT-LM.
  *
- * Internal downloads are ordinary file paths. User-selected models are persisted content:// URIs;
- * when LiteRT-LM needs a path, a seekable ParcelFileDescriptor is held open and exposed through
- * /proc/self/fd/<n>. The descriptor lease lives for as long as the cached LiteRT-LM engine.
+ * LiteRT-LM's Android EngineConfig accepts a filesystem modelPath. Normal file references therefore
+ * open directly. Legacy content:// references are recognized only so existing installs fail with an
+ * actionable migration message instead of silently falling back or relying on /proc/self/fd hacks
+ * that are denied on current Android releases.
  */
 object GemmaModelSource {
-    data class ExternalSelection(
+    data class DirectSelection(
         val reference: String,
         val displayName: String,
         val fingerprint: GemmaModelFingerprint,
@@ -28,25 +26,16 @@ object GemmaModelSource {
     class Opened internal constructor(
         val enginePath: String,
         val key: String,
-        private val lease: ParcelFileDescriptor? = null,
     ) : AutoCloseable {
-        override fun close() {
-            runCatching { lease?.close() }
-        }
+        override fun close() = Unit
     }
 
     fun isExternal(reference: String): Boolean =
         reference.trim().startsWith("content://", ignoreCase = true)
 
     fun isAvailable(context: Context, reference: String): Boolean {
-        if (reference.isBlank()) return false
-        if (!isExternal(reference)) return File(reference).isFile
-        return runCatching {
-            context.contentResolver.openFileDescriptor(Uri.parse(reference), "r")?.use { descriptor ->
-                ensureSeekable(descriptor)
-                true
-            } ?: false
-        }.getOrDefault(false)
+        if (reference.isBlank() || isExternal(reference)) return false
+        return File(reference).isFile
     }
 
     fun displayName(context: Context, reference: String): String {
@@ -55,40 +44,62 @@ object GemmaModelSource {
         val uri = Uri.parse(reference)
         return queryMetadata(context.contentResolver, uri).first
             ?: uri.lastPathSegment?.substringAfterLast('/')
-            ?: "external-model.litertlm"
+            ?: "legacy-content-model.litertlm"
     }
 
     fun openForEngine(context: Context, reference: String): Opened {
         require(reference.isNotBlank()) { "Gemma model is not configured" }
-        if (!isExternal(reference)) {
-            val file = File(reference)
-            require(file.isFile) { "Gemma model file is missing: ${file.absolutePath}" }
-            return Opened(file.absolutePath, "file:${file.canonicalPath}")
-        }
-
-        val uri = Uri.parse(reference)
-        val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
-            ?: error("選択したGemmaモデルを開けませんでした。ファイルへの権限を確認してください。")
-        try {
-            ensureSeekable(descriptor)
-            return Opened(
-                enginePath = "/proc/self/fd/${descriptor.fd}",
-                key = "content:$reference",
-                lease = descriptor,
+        if (isExternal(reference)) {
+            error(
+                "このGemma設定はAndroidのcontent URIです。現在のLiteRT-LMは通常のファイルパスを必要とするため直接利用できません。" +
+                    "共有モデルフォルダ ${GemmaModelStorage.userVisiblePath(context)} に .litertlm を置いて再選択するか、" +
+                    "モデル・API画面からコピーして取り込んでください。",
             )
-        } catch (failure: Throwable) {
-            descriptor.close()
-            throw failure
         }
+        val file = File(reference)
+        require(file.isFile) { "Gemma model file is missing: ${file.absolutePath}" }
+        return Opened(file.absolutePath, "file:${file.canonicalPath}")
     }
 
-    fun persistReadPermission(context: Context, uri: Uri) {
-        require(uri.scheme.equals(ContentResolver.SCHEME_CONTENT, ignoreCase = true)) {
-            "外部GemmaモデルはAndroidのファイル選択画面から選択してください。"
+    /**
+     * Hashes a normal filesystem model in place and returns the same absolute path. No model-sized
+     * duplicate is created. Use this for files in GemmaModelStorage.sharedDirectory().
+     */
+    fun verifyDirectFile(
+        file: File,
+        onProgress: ((readBytes: Long, totalBytes: Long?) -> Unit)? = null,
+    ): DirectSelection {
+        require(file.isFile) { "Gemmaモデルファイルが見つかりません: ${file.absolutePath}" }
+        require(file.name.endsWith(".litertlm", ignoreCase = true)) {
+            "LiteRT-LM の .litertlm モデルを選択してください。"
         }
-        context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val total = file.length()
+        require(total >= MIN_MODEL_BYTES) { "選択したGemmaモデルが小さすぎます。" }
+
+        val digest = MessageDigest.getInstance("SHA-256")
+        var readBytes = 0L
+        file.inputStream().buffered(COPY_BUFFER_BYTES).use { input ->
+            val buffer = ByteArray(COPY_BUFFER_BYTES)
+            while (true) {
+                val count = input.read(buffer)
+                if (count <= 0) break
+                digest.update(buffer, 0, count)
+                readBytes += count
+                onProgress?.invoke(readBytes, total)
+            }
+        }
+        require(readBytes == total) {
+            "選択したモデルの読み取りサイズが一致しません。期待 $total bytes / 実際 $readBytes bytes"
+        }
+        val sha256 = digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        return DirectSelection(
+            reference = file.absolutePath,
+            displayName = file.name,
+            fingerprint = GemmaModelVerifier.identify(readBytes, sha256),
+        )
     }
 
+    /** Compatibility cleanup for installs that persisted a legacy SAF grant. */
     fun releaseReadPermission(context: Context, reference: String) {
         if (!isExternal(reference)) return
         val uri = Uri.parse(reference)
@@ -97,66 +108,12 @@ object GemmaModelSource {
         }
     }
 
-    /**
-     * Verifies a user-selected model in place. No application-private model copy is created.
-     * The full read is deliberate: it proves the selected document remains readable and identifies
-     * exact official artifacts by SHA-256 before the reference is persisted as the active model.
-     */
-    fun verifyExternal(
-        context: Context,
-        uri: Uri,
-        onProgress: ((readBytes: Long, totalBytes: Long?) -> Unit)? = null,
-    ): ExternalSelection {
+    /** Compatibility helper retained only for old migrations; new selections are copied instead. */
+    fun persistReadPermission(context: Context, uri: Uri) {
         require(uri.scheme.equals(ContentResolver.SCHEME_CONTENT, ignoreCase = true)) {
-            "Androidのファイル選択画面から .litertlm を選択してください。"
+            "Androidのファイル選択画面からモデルを選択してください。"
         }
-        val (displayNameOrNull, sizeOrNull) = queryMetadata(context.contentResolver, uri)
-        val displayName = displayNameOrNull ?: "external-model.litertlm"
-        require(displayName.endsWith(".litertlm", ignoreCase = true)) {
-            "LiteRT-LM の .litertlm モデルを選択してください。"
-        }
-
-        // Prove that the provider exposes a real random-access descriptor. LiteRT-LM receives a
-        // filesystem path and cannot consume pipe-only document providers without materialization.
-        context.contentResolver.openFileDescriptor(uri, "r")?.use(::ensureSeekable)
-            ?: error("選択したGemmaモデルを開けませんでした。")
-
-        val digest = MessageDigest.getInstance("SHA-256")
-        var readBytes = 0L
-        context.contentResolver.openInputStream(uri)?.buffered(COPY_BUFFER_BYTES).use { input ->
-            requireNotNull(input) { "選択したGemmaモデルを読み取れませんでした。" }
-            val buffer = ByteArray(COPY_BUFFER_BYTES)
-            while (true) {
-                val count = input.read(buffer)
-                if (count <= 0) break
-                digest.update(buffer, 0, count)
-                readBytes += count
-                onProgress?.invoke(readBytes, sizeOrNull)
-            }
-        }
-        require(readBytes >= MIN_MODEL_BYTES) { "選択したGemmaモデルが小さすぎます。" }
-        sizeOrNull?.let { expected ->
-            require(expected <= 0L || expected == readBytes) {
-                "選択したモデルの読み取りサイズが一致しません。期待 $expected bytes / 実際 $readBytes bytes"
-            }
-        }
-        val sha256 = digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-        return ExternalSelection(
-            reference = uri.toString(),
-            displayName = displayName,
-            fingerprint = GemmaModelVerifier.identify(readBytes, sha256),
-        )
-    }
-
-    private fun ensureSeekable(descriptor: ParcelFileDescriptor) {
-        try {
-            Os.lseek(descriptor.fileDescriptor, 0L, OsConstants.SEEK_CUR)
-        } catch (failure: Throwable) {
-            throw IllegalArgumentException(
-                "この保存先はモデルを直接参照できません。端末内ストレージのDocuments/Download等に置いた .litertlm を選択してください。",
-                failure,
-            )
-        }
+        context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
 
     private fun queryMetadata(resolver: ContentResolver, uri: Uri): Pair<String?, Long?> {
