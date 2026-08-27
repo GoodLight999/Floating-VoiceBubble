@@ -142,6 +142,25 @@ class RuntimeSmokeTest {
     }
 
     @Test
+    fun manualCloudRecognitionSettingsPersistAcrossStoreInstances() {
+        val store = SettingsStore(context)
+        val previous = store.load()
+        try {
+            store.update {
+                it.copy(
+                    recognitionApiEndpoint = "wss://custom.example.test/v1/live",
+                    recognitionApiModel = "custom-transcribe-model",
+                )
+            }
+            val reloaded = SettingsStore(context).load()
+            assertEquals("wss://custom.example.test/v1/live", reloaded.recognitionApiEndpoint)
+            assertEquals("custom-transcribe-model", reloaded.recognitionApiModel)
+        } finally {
+            store.update { previous }
+        }
+    }
+
+    @Test
     fun sherpaNativeLibraryLoadsOnAndroidRuntime() {
         assertTrue(VersionInfo.version.isNotBlank())
         assertTrue(VersionInfo.gitSha1.isNotBlank())
@@ -161,15 +180,15 @@ class RuntimeSmokeTest {
     }
 
     @Test
-    fun keystoreBackedGeminiTranscribeSecretRoundTrips() {
+    fun keystoreBackedCloudRecognitionSecretRoundTrips() {
         val store = SettingsStore(context)
-        val previous = store.geminiTranscribeApiKey()
-        val secret = "gemini-transcribe-${System.nanoTime()}"
-        store.setGeminiTranscribeApiKey(secret)
+        val previous = store.recognitionApiKey()
+        val secret = "cloud-recognition-${System.nanoTime()}"
+        store.setRecognitionApiKey(secret)
         try {
-            assertEquals(secret, SettingsStore(context).geminiTranscribeApiKey())
+            assertEquals(secret, SettingsStore(context).recognitionApiKey())
         } finally {
-            store.setGeminiTranscribeApiKey(previous)
+            store.setRecognitionApiKey(previous)
         }
     }
 
@@ -177,17 +196,17 @@ class RuntimeSmokeTest {
     fun automaticDiagnosticsRunsAndRedactsSecrets() {
         val store = SettingsStore(context)
         val previousByok = store.apiKey()
-        val previousGemini = store.geminiTranscribeApiKey()
+        val previousRecognition = store.recognitionApiKey()
         val byokSentinel = "SUPER_SECRET_DIAGNOSTIC_${System.nanoTime()}"
-        val geminiSentinel = "SUPER_SECRET_GEMINI_${System.nanoTime()}"
+        val recognitionSentinel = "SUPER_SECRET_RECOGNITION_${System.nanoTime()}"
         store.setApiKey(byokSentinel)
-        store.setGeminiTranscribeApiKey(geminiSentinel)
+        store.setRecognitionApiKey(recognitionSentinel)
         try {
             val report = SelfDiagnostics(context, store).run(includeExternalProbes = false)
             val ids = report.items.map { it.id }.toSet()
             assertTrue("offline-cloud-block" in ids)
             assertTrue("offline-recognition-policy" in ids)
-            assertTrue("gemini-transcribe-readiness" in ids)
+            assertTrue("cloud-recognition-readiness" in ids)
             assertTrue("sherpa-jni" in ids)
             assertTrue("final-recognition-readiness" in ids)
             assertTrue("correction-output-integrity" in ids)
@@ -195,13 +214,13 @@ class RuntimeSmokeTest {
             assertTrue("trace-storage" in ids)
             val json = report.toRedactedJson()
             assertFalse(json.contains(byokSentinel))
-            assertFalse(json.contains(geminiSentinel))
+            assertFalse(json.contains(recognitionSentinel))
             assertTrue(json.contains("offline-recognition-policy"))
-            assertTrue(json.contains("gemini-transcribe-readiness"))
+            assertTrue(json.contains("cloud-recognition-readiness"))
             assertTrue(json.contains("final-recognition-readiness"))
         } finally {
             store.setApiKey(previousByok)
-            store.setGeminiTranscribeApiKey(previousGemini)
+            store.setRecognitionApiKey(previousRecognition)
         }
     }
 
