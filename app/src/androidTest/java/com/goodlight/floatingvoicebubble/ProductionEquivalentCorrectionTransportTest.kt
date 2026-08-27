@@ -2,7 +2,6 @@ package com.goodlight.floatingvoicebubble
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.goodlight.floatingvoicebubble.correction.CorrectionCallException
 import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
 import com.goodlight.floatingvoicebubble.correction.OpenAiCompatibleCorrector
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
@@ -62,10 +61,13 @@ class ProductionEquivalentCorrectionTransportTest {
         val body = JSONObject(connection.requestBody())
         val messages = body.getJSONArray("messages")
         val user = messages.getJSONObject(1).getString("content")
-        assertTrue(user.contains("RAW:"))
+        assertTrue(user.contains("<RAW>"))
+        assertTrue(user.contains("</RAW>"))
         assertTrue(user.contains(raw))
-        assertTrue(user.contains("N-best"))
-        assertTrue(user.contains("周辺文脈"))
+        assertTrue(user.contains("<N_BEST_ALTERNATIVES>"))
+        assertTrue(user.contains("</N_BEST_ALTERNATIVES>"))
+        assertTrue(user.contains("<SURROUNDING_CONTEXT_FOR_DISAMBIGUATION_ONLY>"))
+        assertTrue(user.contains("</SURROUNDING_CONTEXT_FOR_DISAMBIGUATION_ONLY>"))
         assertTrue("production packet unexpectedly tiny", user.length > raw.length + 300)
     }
 
