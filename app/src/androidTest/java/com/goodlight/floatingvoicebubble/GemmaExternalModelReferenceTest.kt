@@ -27,7 +27,7 @@ class GemmaExternalModelReferenceTest {
         val file = File(dir, "fvb-direct-${System.nanoTime()}.litertlm")
         val bytes = ByteArray(1 * 1024 * 1024 + 257) { index -> (index * 31 + 7).toByte() }
         val privateDir = GemmaModelStorage.legacyPrivateDirectory(context)
-        val beforePrivate = privateDir.listFiles().orEmpty().map(File::name).sorted()
+        val beforePrivate = privateDir.listFiles().orEmpty().map { it.name }.sorted()
 
         try {
             file.outputStream().use { it.write(bytes) }
@@ -43,7 +43,7 @@ class GemmaExternalModelReferenceTest {
             }
 
             if (GemmaModelStorage.isInSharedDirectory(context, file)) {
-                val afterPrivate = privateDir.listFiles().orEmpty().map(File::name).sorted()
+                val afterPrivate = privateDir.listFiles().orEmpty().map { it.name }.sorted()
                 assertEquals("direct shared model must not create a private duplicate", beforePrivate, afterPrivate)
             }
         } finally {
