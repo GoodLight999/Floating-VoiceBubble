@@ -2,9 +2,10 @@ package com.goodlight.floatingvoicebubble.speech
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
 import java.util.Base64
 
-/** Pure wire-format adapter for Gemini 3.5 Transcribe Live. */
+/** Pure wire-format adapter for Gemini Live-compatible transcription endpoints. */
 internal object GeminiTranscribeProtocol {
     const val MODEL = "gemini-3.5-transcribe-live"
     const val WEBSOCKET_BASE_URL =
@@ -20,7 +21,13 @@ internal object GeminiTranscribeProtocol {
         val goAway: Boolean = false,
     )
 
-    fun setupMessage(customVocabulary: List<String>, resumptionHandle: String? = null): String {
+    fun setupMessage(
+        customVocabulary: List<String>,
+        resumptionHandle: String? = null,
+        model: String = MODEL,
+    ): String {
+        val cleanModel = model.trim().removePrefix("models/")
+        require(cleanModel.isNotBlank()) { "クラウド音声認識のモデルIDを入力してください。" }
         val transcription = JSONObject()
             .put("languageCodes", JSONArray())
             // VERBATIM is deliberate: sentence polishing, filler deletion and false-start cleanup
@@ -31,7 +38,7 @@ internal object GeminiTranscribeProtocol {
         }
 
         val setup = JSONObject()
-            .put("model", "models/$MODEL")
+            .put("model", "models/$cleanModel")
             .put(
                 "generationConfig",
                 JSONObject().put("responseModalities", JSONArray().put("TEXT")),
@@ -44,6 +51,28 @@ internal object GeminiTranscribeProtocol {
                 },
             )
         return JSONObject().put("setup", setup).toString()
+    }
+
+    /**
+     * OkHttp's HttpUrl accepts HTTP(S); WebSocket requests are upgraded by newWebSocket().
+     * Keep wss:// in user settings because that is the natural endpoint notation, then map it to
+     * https:// only at the transport boundary. Plain ws/http is intentionally rejected for cloud
+     * microphone audio.
+     */
+    fun httpTransportEndpoint(rawEndpoint: String): String {
+        val raw = rawEndpoint.trim()
+        require(raw.isNotBlank()) { "クラウド音声認識のWebSocket URLを入力してください。" }
+        val uri = runCatching { URI(raw) }.getOrElse {
+            throw IllegalArgumentException("クラウド音声認識のURLが不正です。", it)
+        }
+        require(uri.userInfo.isNullOrBlank()) { "クラウド音声認識のURLに認証情報を含めないでください。" }
+        require(!uri.host.isNullOrBlank()) { "クラウド音声認識の接続先がありません。" }
+        return when (uri.scheme?.lowercase()) {
+            "wss" -> URI("https", null, uri.host, uri.port, uri.path, uri.query, uri.fragment).toString()
+            "https" -> raw
+            "ws", "http" -> throw IllegalArgumentException("クラウド音声認識は暗号化された wss:// または https:// を使ってください。")
+            else -> throw IllegalArgumentException("クラウド音声認識のURLは wss:// または https:// で始めてください。")
+        }
     }
 
     fun audioMessage(pcm16Le: ByteArray): String = JSONObject()
