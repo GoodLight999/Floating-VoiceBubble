@@ -18,6 +18,8 @@ data class LastCorrectionFailure(
     val modelChanged: Boolean = false,
     val integrityResult: String = "",
     val endpoint: String = "",
+    val reasoningWire: String = "",
+    val attemptTimingSummary: String = "",
 )
 
 /**
@@ -44,6 +46,8 @@ class CorrectionStatusStore(context: Context) {
             .putBoolean(KEY_MODEL_CHANGED, value.modelChanged)
             .putString(KEY_INTEGRITY_RESULT, value.integrityResult.take(96))
             .putString(KEY_ENDPOINT, value.endpoint.take(220))
+            .putString(KEY_REASONING_WIRE, value.reasoningWire.take(220))
+            .putString(KEY_ATTEMPT_TIMINGS, value.attemptTimingSummary.take(800))
             .apply()
     }
 
@@ -70,6 +74,8 @@ class CorrectionStatusStore(context: Context) {
             modelChanged = prefs.getBoolean(KEY_MODEL_CHANGED, false),
             integrityResult = prefs.getString(KEY_INTEGRITY_RESULT, "").orEmpty(),
             endpoint = prefs.getString(KEY_ENDPOINT, "").orEmpty(),
+            reasoningWire = prefs.getString(KEY_REASONING_WIRE, "").orEmpty(),
+            attemptTimingSummary = prefs.getString(KEY_ATTEMPT_TIMINGS, "").orEmpty(),
         )
     }
 
@@ -90,5 +96,7 @@ class CorrectionStatusStore(context: Context) {
         private const val KEY_MODEL_CHANGED = "model_changed"
         private const val KEY_INTEGRITY_RESULT = "integrity_result"
         private const val KEY_ENDPOINT = "endpoint"
+        private const val KEY_REASONING_WIRE = "reasoning_wire"
+        private const val KEY_ATTEMPT_TIMINGS = "attempt_timings"
     }
 }
