@@ -53,13 +53,16 @@ import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.model.GemmaModelSource
+import com.goodlight.floatingvoicebubble.model.GemmaModelStorage
 import com.goodlight.floatingvoicebubble.model.InstalledOfficialModel
+import com.goodlight.floatingvoicebubble.model.ModelImporter
 import com.goodlight.floatingvoicebubble.model.ModelInstallProgress
 import com.goodlight.floatingvoicebubble.model.OfficialModelCatalog
 import com.goodlight.floatingvoicebubble.model.OfficialModelEntry
 import com.goodlight.floatingvoicebubble.model.OfficialModelInstaller
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
 import com.goodlight.floatingvoicebubble.trace.SessionTraceStore
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
 
@@ -96,50 +99,91 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     var busyAction by remember { mutableStateOf<String?>(null) }
     var message by rememberSaveable { mutableStateOf("") }
     var progress by remember { mutableStateOf<ModelInstallProgress?>(null) }
+    var directGemmaModels by remember { mutableStateOf(GemmaModelStorage.visibleModelFiles(activity)) }
+
+    fun refreshDirectGemmaModels() {
+        directGemmaModels = GemmaModelStorage.visibleModelFiles(activity)
+    }
 
     val gemmaModelLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
-        busyAction = "gemma-external"
+        busyAction = "gemma-import"
         progress = null
-        message = "既存のGemmaモデルをコピーせず検証しています…"
+        message = "選択したGemmaモデルを共有モデルフォルダへコピーしています…"
         Thread({
             runCatching {
-                val selected = GemmaModelSource.verifyExternal(activity, uri) { readBytes, totalBytes ->
+                ModelImporter(activity).importGemmaVerified(uri) { copiedBytes, totalBytes ->
                     activity.runOnUiThread {
-                        progress = ModelInstallProgress("既存モデルを検証", readBytes, totalBytes)
+                        progress = ModelInstallProgress("モデルをコピー・検証", copiedBytes, totalBytes)
                     }
                 }
-                GemmaModelSource.persistReadPermission(activity, uri)
-                selected
-            }.onSuccess { selected ->
+            }.onSuccess { imported ->
                 activity.runOnUiThread {
                     val previousReference = settings.gemmaModelPath
-                    if (previousReference != selected.reference && GemmaModelSource.isExternal(previousReference)) {
+                    if (GemmaModelSource.isExternal(previousReference)) {
                         GemmaModelSource.releaseReadPermission(activity, previousReference)
                     }
-                    val variant = selected.fingerprint.detectedVariant
+                    val variant = imported.fingerprint.detectedVariant
                     settings = store.update {
                         it.copy(
-                            gemmaModelPath = selected.reference,
+                            gemmaModelPath = imported.file.absolutePath,
                             gemmaVariant = variant,
                         )
                     }
+                    refreshDirectGemmaModels()
                     busyAction = null
                     progress = null
-                    message = if (selected.fingerprint.knownOfficialArtifact) {
-                        "${selected.displayName} を検証し、コピーせず使用するモデルに設定しました。"
+                    message = if (imported.fingerprint.knownOfficialArtifact) {
+                        "${imported.file.name} を検証し、共有モデルフォルダへコピーして使用するモデルに設定しました。"
                     } else {
-                        "${selected.displayName} をコピーせず使用するモデルに設定しました。"
+                        "${imported.file.name} を共有モデルフォルダへコピーして使用するモデルに設定しました。"
                     }
                 }
             }.onFailure { failure ->
                 activity.runOnUiThread {
                     busyAction = null
                     progress = null
-                    message = "Gemmaモデルの選択失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                    message = "Gemmaモデルの取り込み失敗: ${failure.message ?: failure.javaClass.simpleName}"
                 }
             }
-        }, "VoiceBubble-GemmaExternalVerify").start()
+        }, "VoiceBubble-GemmaImport").start()
+    }
+
+    fun selectDirectGemma(file: File) {
+        busyAction = "gemma-direct"
+        progress = null
+        message = "${file.name} をコピーせず検証しています…"
+        Thread({
+            runCatching {
+                GemmaModelSource.verifyDirectFile(file) { readBytes, totalBytes ->
+                    activity.runOnUiThread {
+                        progress = ModelInstallProgress("モデルをその場で検証", readBytes, totalBytes)
+                    }
+                }
+            }.onSuccess { selected ->
+                activity.runOnUiThread {
+                    val previousReference = settings.gemmaModelPath
+                    if (GemmaModelSource.isExternal(previousReference)) {
+                        GemmaModelSource.releaseReadPermission(activity, previousReference)
+                    }
+                    settings = store.update {
+                        it.copy(
+                            gemmaModelPath = selected.reference,
+                            gemmaVariant = selected.fingerprint.detectedVariant,
+                        )
+                    }
+                    busyAction = null
+                    progress = null
+                    message = "${selected.displayName} をコピーせず直接使うモデルに設定しました。"
+                }
+            }.onFailure { failure ->
+                activity.runOnUiThread {
+                    busyAction = null
+                    progress = null
+                    message = "Gemmaモデルの検証失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                }
+            }
+        }, "VoiceBubble-GemmaDirectVerify").start()
     }
 
     fun saveByok(
@@ -402,15 +446,21 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
         if (message.isNotBlank()) {
             Card(
                 colors = CardDefaults.cardColors(
-                    containerColor = if ("失敗" in message || "見つかりません" in message) MaterialTheme.colorScheme.errorContainer
-                    else MaterialTheme.colorScheme.surfaceVariant,
+                    containerColor = if ("失敗" in message || "見つかりません" in message || "利用できません" in message) {
+                        MaterialTheme.colorScheme.errorContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    },
                 ),
             ) {
                 Text(
                     message,
                     modifier = Modifier.padding(12.dp),
-                    color = if ("失敗" in message || "見つかりません" in message) MaterialTheme.colorScheme.onErrorContainer
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if ("失敗" in message || "見つかりません" in message || "利用できません" in message) {
+                        MaterialTheme.colorScheme.onErrorContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
@@ -423,10 +473,21 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            "公式E2B/E4Bはアプリから取得できます。通信が切れても途中から再開します。既にある .litertlm はコピーせず、そのファイルを直接使えます。",
+            "公式E2B/E4Bは下の共有モデルフォルダへ直接保存します。通信が切れても途中から再開し、検証後は同じファイルをそのまま使うため二重コピーしません。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
+        Text(
+            "コピーなしモデル置き場: ${GemmaModelStorage.userVisiblePath(activity)}",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            "既に持っている .litertlm をコピーせず使う場合は上のフォルダへ置いて『再読み込み』してください。Androidのファイル選択画面から選ぶ場合は、このフォルダへ1回コピーして取り込みます。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             GemmaInstallButton(
                 title = "E2Bを取得",
@@ -445,9 +506,10 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                     }
                     val variant = installed.fingerprint.detectedVariant
                     settings = store.update { it.copy(gemmaModelPath = installed.file.absolutePath, gemmaVariant = variant) }
+                    refreshDirectGemmaModels()
                     busyAction = null
                     progress = null
-                    message = "Gemma ${variant.name} を検証して導入しました。"
+                    message = "Gemma ${variant.name} を検証し、共有モデルフォルダへ導入しました。"
                 },
                 onFailure = { error -> busyAction = null; progress = null; message = "Gemma導入失敗: $error" },
                 activity = activity,
@@ -469,20 +531,63 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                     }
                     val variant = installed.fingerprint.detectedVariant
                     settings = store.update { it.copy(gemmaModelPath = installed.file.absolutePath, gemmaVariant = variant) }
+                    refreshDirectGemmaModels()
                     busyAction = null
                     progress = null
-                    message = "Gemma ${variant.name} を検証して導入しました。"
+                    message = "Gemma ${variant.name} を検証し、共有モデルフォルダへ導入しました。"
                 },
                 onFailure = { error -> busyAction = null; progress = null; message = "Gemma導入失敗: $error" },
                 activity = activity,
             )
             OutlinedButton(
+                onClick = {
+                    refreshDirectGemmaModels()
+                    message = if (directGemmaModels.isEmpty()) {
+                        "共有モデルフォルダに .litertlm が見つかりませんでした。"
+                    } else {
+                        "${directGemmaModels.size}件の .litertlm を見つけました。"
+                    }
+                },
+                enabled = busyAction == null,
+            ) { Text("共有モデルフォルダを再読み込み") }
+            OutlinedButton(
                 onClick = { gemmaModelLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
                 enabled = busyAction == null,
             ) {
-                Text(if (busyAction == "gemma-external") "検証中…" else "端末にある .litertlm をそのまま使う")
+                Text(if (busyAction == "gemma-import") "コピー中…" else "端末の .litertlm をコピーして取り込む")
             }
         }
+
+        if (directGemmaModels.isNotEmpty()) {
+            Text("直接使えるモデル", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            directGemmaModels.take(MAX_VISIBLE_GEMMA_MODELS).forEach { file ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(file.name, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (GemmaModelStorage.isInSharedDirectory(activity, file)) {
+                                "共有モデルフォルダ・コピーなし"
+                            } else {
+                                "旧アプリ内モデル・直接参照"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { selectDirectGemma(file) },
+                        enabled = busyAction == null,
+                    ) {
+                        Text(if (settings.gemmaModelPath == file.absolutePath) "使用中" else "このファイルを使う")
+                    }
+                }
+            }
+        }
+
         if (settings.gemmaModelPath.isNotBlank()) {
             TextButton(
                 enabled = busyAction == null,
@@ -494,11 +599,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                     settings = store.update {
                         it.copy(gemmaModelPath = "", gemmaVariant = GemmaVariant.UNKNOWN)
                     }
-                    message = if (GemmaModelSource.isExternal(previousReference)) {
-                        "外部Gemmaの選択を解除しました。元のモデルファイルは削除していません。"
-                    } else {
-                        "Gemmaの使用を解除しました。取得済みファイルは削除していません。"
-                    }
+                    message = "Gemmaの使用を解除しました。モデルファイル自体は削除していません。"
                 },
             ) { Text("このGemmaを使用しない") }
         }
@@ -550,11 +651,22 @@ private fun reasoningNoteFor(
 private fun gemmaStatus(activity: CorrectionSetupActivity, settings: AppSettings): String {
     val reference = settings.gemmaModelPath
     if (reference.isBlank()) return "モデル未設定"
-    val available = GemmaModelSource.isAvailable(activity, reference)
     val name = GemmaModelSource.displayName(activity, reference)
-    val source = if (GemmaModelSource.isExternal(reference)) "外部ファイル・コピーなし" else "アプリ内"
     val variant = settings.gemmaVariant.takeIf { it != GemmaVariant.UNKNOWN }?.name?.let { "Gemma $it / " }.orEmpty()
-    return if (available) "$variant$name / $source" else "$variant$name / ファイルを開けません"
+    if (GemmaModelSource.isExternal(reference)) {
+        return "$variant$name / 旧content URI・現在のLiteRT-LMでは直接利用できません"
+    }
+    val file = File(reference)
+    val source = if (GemmaModelStorage.isInSharedDirectory(activity, file)) {
+        "共有モデルフォルダ・直接参照"
+    } else {
+        "アプリ内・直接参照"
+    }
+    return if (GemmaModelSource.isAvailable(activity, reference)) {
+        "$variant$name / $source"
+    } else {
+        "$variant$name / ファイルを開けません"
+    }
 }
 
 private fun runProductionCorrectionProbe(
@@ -706,3 +818,4 @@ private fun formatProgress(progress: ModelInstallProgress): String {
 }
 
 private const val MAX_VISIBLE_MODELS = 80
+private const val MAX_VISIBLE_GEMMA_MODELS = 12
