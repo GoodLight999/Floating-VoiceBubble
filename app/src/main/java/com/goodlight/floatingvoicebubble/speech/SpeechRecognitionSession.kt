@@ -11,6 +11,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import com.goodlight.floatingvoicebubble.RecognitionMode
+import com.goodlight.floatingvoicebubble.SettingsStore
 import com.goodlight.floatingvoicebubble.model.StreamingAsrModel
 import java.io.File
 import java.util.Locale
@@ -35,7 +36,7 @@ class SpeechRecognitionSession(
     private val biasTerms: List<String>,
     private val traceAudioDir: File,
     private val streamingModel: StreamingAsrModel?,
-    private val geminiTranscribeApiKey: String = "",
+    private val geminiTranscribeApiKey: String? = null,
     private val onPartial: (String) -> Unit,
     private val onState: (String) -> Unit,
     private val onComplete: (RecognitionOutcome) -> Unit,
@@ -48,6 +49,12 @@ class SpeechRecognitionSession(
     private val closed = AtomicBoolean(false)
     private val completionPublished = AtomicBoolean(false)
     private val accumulator = TranscriptAccumulator()
+    private val resolvedGeminiApiKey: String = if (mode == RecognitionMode.GEMINI_TRANSCRIBE) {
+        geminiTranscribeApiKey?.trim()?.takeIf(String::isNotEmpty)
+            ?: SettingsStore(context).geminiTranscribeApiKey().trim()
+    } else {
+        ""
+    }
     private val backend: RecognitionBackend
     private val recognizer: SpeechRecognizer?
     private val sherpaEngine: SherpaStreamingEngine?
@@ -177,7 +184,7 @@ class SpeechRecognitionSession(
             offlineRequired = offlineRequired,
             androidOnDeviceAvailable = onDeviceAvailable,
             sherpaModelAvailable = streamingModel != null,
-            geminiTranscribeConfigured = geminiTranscribeApiKey.isNotBlank(),
+            geminiTranscribeConfigured = resolvedGeminiApiKey.isNotBlank(),
         )
 
         recognizer = when (backend) {
@@ -222,7 +229,7 @@ class SpeechRecognitionSession(
 
         geminiEngine = if (backend == RecognitionBackend.GEMINI_TRANSCRIBE) {
             GeminiTranscribeStreamingEngine(
-                apiKey = geminiTranscribeApiKey,
+                apiKey = resolvedGeminiApiKey,
                 biasTerms = biasTerms,
                 onState = { state -> mainHandler.post { if (!delivered.get() && !closed.get()) onState(state) } },
                 onPartial = { partial ->
@@ -306,17 +313,32 @@ class SpeechRecognitionSession(
             }
         }
 
-        val streamingBackend = backend == RecognitionBackend.SHERPA_STREAMING || backend == RecognitionBackend.GEMINI_TRANSCRIBE
-        val timeout = if (streamingBackend) STREAMING_FINAL_RESULT_TIMEOUT_MS else ANDROID_FINAL_RESULT_TIMEOUT_MS
+        val timeout = when (backend) {
+            RecognitionBackend.SHERPA_STREAMING,
+            RecognitionBackend.GEMINI_TRANSCRIBE -> STREAMING_FINAL_RESULT_TIMEOUT_MS
+            else -> ANDROID_FINAL_RESULT_TIMEOUT_MS
+        }
         mainHandler.postDelayed({
             if (!delivered.get() && !closed.get()) {
-                val fallback = if (streamingBackend) {
-                    latestAlternatives.ifEmpty { latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty() }
-                } else {
-                    accumulator.finalCandidates(latestAlternatives, latestPartial)
+                when (backend) {
+                    RecognitionBackend.GEMINI_TRANSCRIBE -> {
+                        // Gemini explicitly distinguishes speculative interim text from authoritative
+                        // inputTranscription. Never silently promote the interim hypothesis to final.
+                        fail("Gemini音声認識の確定結果が${timeout / 1000}秒以内に届きませんでした。途中表示は確定結果として入力していません。")
+                    }
+                    RecognitionBackend.SHERPA_STREAMING -> {
+                        val fallback = latestAlternatives.ifEmpty {
+                            latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty()
+                        }
+                        if (fallback.isNotEmpty()) deliver(fallback)
+                        else fail("音声認識の確定がタイムアウトしました。")
+                    }
+                    else -> {
+                        val fallback = accumulator.finalCandidates(latestAlternatives, latestPartial)
+                        if (fallback.isNotEmpty()) deliver(fallback)
+                        else fail("音声認識の確定がタイムアウトしました。")
+                    }
                 }
-                if (fallback.isNotEmpty()) deliver(fallback)
-                else fail("音声認識の確定がタイムアウトしました。")
             }
         }, timeout)
     }
