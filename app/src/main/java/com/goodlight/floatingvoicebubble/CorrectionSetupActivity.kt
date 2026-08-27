@@ -145,12 +145,30 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     fun saveByok(
         modelValue: String = model,
         reasoningValue: ReasoningEffort = reasoningEffort,
+        modelInfo: ByokModelInfo? = null,
     ): AppSettings {
+        val endpointValue = endpoint.trim()
+        val modelValueTrimmed = modelValue.trim()
+        val sameSavedPair = endpointValue == settings.byokEndpoint && modelValueTrimmed == settings.byokModel
+        val openRouter = ByokEndpointResolver.isOpenRouter(endpointValue)
+        val metadataKnown = when {
+            !openRouter -> false
+            modelInfo != null -> true
+            sameSavedPair -> settings.byokReasoningMetadataKnown
+            else -> false
+        }
+        val metadataEfforts = when {
+            !metadataKnown -> emptySet()
+            modelInfo != null -> modelInfo.reasoningEfforts.toSet()
+            else -> settings.byokReasoningEfforts
+        }
         val updated = store.update {
             it.copy(
-                byokEndpoint = endpoint.trim(),
-                byokModel = modelValue.trim(),
+                byokEndpoint = endpointValue,
+                byokModel = modelValueTrimmed,
                 reasoningEffort = reasoningValue,
+                byokReasoningMetadataKnown = metadataKnown,
+                byokReasoningEfforts = metadataEfforts,
             )
         }
         store.setApiKey(apiKey.trim())
@@ -160,15 +178,11 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
 
     val selectedModelInfo = models.firstOrNull { it.id == model }
     val baseCapability = ReasoningCapabilities.capability(endpoint, model)
-    val openRouterMetadataSaysNoReasoning = ByokEndpointResolver.isOpenRouter(endpoint) &&
-        selectedModelInfo?.supportedParameters?.isNotEmpty() == true &&
-        selectedModelInfo.supportsReasoning.not()
-    val reasoningChoices = if (openRouterMetadataSaysNoReasoning) {
-        listOf(ReasoningEffort.DEFAULT)
-    } else {
-        baseCapability.choices
-    }
+    val reasoningChoices = reasoningChoicesFor(endpoint, model, selectedModelInfo, settings)
     val normalizedReasoning = ReasoningCapabilities.normalize(endpoint, model, reasoningEffort)
+        .takeIf { it in reasoningChoices }
+        ?: ReasoningEffort.DEFAULT
+    val reasoningNote = reasoningNoteFor(endpoint, model, selectedModelInfo, settings, baseCapability.note)
 
     val filteredModels = models.asSequence()
         .filter { item ->
@@ -272,6 +286,14 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                         .onSuccess { fetched -> activity.runOnUiThread {
                             models = fetched
                             busyAction = null
+                            fetched.firstOrNull { it.id == model }?.let { info ->
+                                val choices = reasoningChoicesFor(endpoint, model, info, settings)
+                                val normalized = ReasoningCapabilities.normalize(endpoint, model, reasoningEffort)
+                                    .takeIf { it in choices }
+                                    ?: ReasoningEffort.DEFAULT
+                                reasoningEffort = normalized
+                                saveByok(modelValue = model, reasoningValue = normalized, modelInfo = info)
+                            }
                             message = if (fetched.isEmpty()) {
                                 "接続できましたが、選べるモデルが見つかりませんでした。モデルIDは直接入力できます。"
                             } else {
@@ -304,9 +326,12 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                 filteredModels.forEach { item ->
                     ModelRow(item = item, selected = model == item.id) {
                         model = item.id
+                        val choices = reasoningChoicesFor(endpoint, item.id, item, settings)
                         val normalized = ReasoningCapabilities.normalize(endpoint, item.id, reasoningEffort)
+                            .takeIf { it in choices }
+                            ?: ReasoningEffort.DEFAULT
                         reasoningEffort = normalized
-                        saveByok(modelValue = item.id, reasoningValue = normalized)
+                        saveByok(modelValue = item.id, reasoningValue = normalized, modelInfo = item)
                         message = "${item.displayName} を使用するモデルとして保存しました。"
                     }
                 }
@@ -330,7 +355,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                         selected = normalizedReasoning == effort,
                         onClick = {
                             reasoningEffort = effort
-                            saveByok(reasoningValue = effort)
+                            saveByok(reasoningValue = effort, modelInfo = selectedModelInfo)
                             message = "推論の深さを「${ReasoningCapabilities.label(endpoint, model, effort)}」に保存しました。"
                         },
                         label = { Text(ReasoningCapabilities.label(endpoint, model, effort)) },
@@ -338,11 +363,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
                 }
             }
             Text(
-                if (openRouterMetadataSaysNoReasoning) {
-                    "このモデルはOpenRouterのモデル情報上、推論深度の指定に対応していません。"
-                } else {
-                    baseCapability.note
-                },
+                reasoningNote,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -352,7 +373,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             OutlinedButton(
                 onClick = {
                     busyAction = "test"
-                    saveByok()
+                    saveByok(modelInfo = selectedModelInfo)
                     val persisted = SettingsStore(activity).load()
                     message = "本番と同じ補正経路で確認しています…"
                     Thread({
@@ -371,7 +392,7 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
             ) { Text(if (busyAction == "test") "実補正中…" else "本番と同じ経路で実補正テスト") }
             Button(
                 onClick = {
-                    saveByok()
+                    saveByok(modelInfo = selectedModelInfo)
                     message = "API設定を保存しました。"
                 },
                 enabled = busyAction == null && endpoint.trim().startsWith("https://") && model.isNotBlank(),
@@ -487,6 +508,45 @@ private fun CorrectionSetupScreen(activity: CorrectionSetupActivity) {
     }
 }
 
+private fun reasoningChoicesFor(
+    endpoint: String,
+    model: String,
+    info: ByokModelInfo?,
+    persisted: AppSettings,
+): List<ReasoningEffort> {
+    if (!ByokEndpointResolver.isOpenRouter(endpoint)) {
+        return ReasoningCapabilities.capability(endpoint, model).choices
+    }
+    val efforts = when {
+        info != null -> info.reasoningEfforts.toSet()
+        endpoint.trim() == persisted.byokEndpoint && model.trim() == persisted.byokModel &&
+            persisted.byokReasoningMetadataKnown -> persisted.byokReasoningEfforts
+        else -> return listOf(ReasoningEffort.DEFAULT)
+    }
+    return listOf(ReasoningEffort.DEFAULT) +
+        ReasoningEffort.entries.filter { it != ReasoningEffort.DEFAULT && it in efforts }
+}
+
+private fun reasoningNoteFor(
+    endpoint: String,
+    model: String,
+    info: ByokModelInfo?,
+    persisted: AppSettings,
+    baseNote: String,
+): String {
+    if (!ByokEndpointResolver.isOpenRouter(endpoint)) return baseNote
+    val known = info != null || (
+        endpoint.trim() == persisted.byokEndpoint && model.trim() == persisted.byokModel &&
+            persisted.byokReasoningMetadataKnown
+        )
+    val efforts = info?.reasoningEfforts?.toSet() ?: persisted.byokReasoningEfforts
+    return when {
+        !known -> "OpenRouterのモデル一覧を取得すると、このモデルが実際に対応する推論深度だけを表示します。"
+        efforts.isEmpty() -> "OpenRouterのモデル情報上、指定可能な推論深度は確認できません。モデル既定を使います。"
+        else -> "OpenRouterのモデル情報が返した対応値だけを表示しています。"
+    }
+}
+
 private fun gemmaStatus(activity: CorrectionSetupActivity, settings: AppSettings): String {
     val reference = settings.gemmaModelPath
     if (reference.isBlank()) return "モデル未設定"
@@ -571,7 +631,13 @@ private fun ModelRow(item: ByokModelInfo, selected: Boolean, onSelect: () -> Uni
         }
         val metadata = buildList {
             item.contextLength?.let { add("context ${formatTokenCount(it)}") }
-            if (item.supportsReasoning) add("推論設定対応")
+            when {
+                item.reasoningEfforts.isNotEmpty() -> add(
+                    "推論 ${item.reasoningEfforts.joinToString("/") { it.name.lowercase(Locale.ROOT) }}",
+                )
+                item.supportsReasoning -> add("推論設定対応")
+            }
+            if (item.reasoningMandatory == true) add("推論必須")
             if (item.promptPricePerMillion != null || item.completionPricePerMillion != null) {
                 val input = item.promptPricePerMillion?.let(::formatPrice) ?: "?"
                 val output = item.completionPricePerMillion?.let(::formatPrice) ?: "?"
