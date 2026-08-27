@@ -17,6 +17,7 @@ data class OpenAiProviderOptions(
     val zaiThinkingEnabled: Boolean? = null,
     val disableSampling: Boolean = false,
     val sendEnglishAcceptLanguage: Boolean = false,
+    val zaiProvider: Boolean = false,
     val zaiCodingPlanEndpoint: Boolean = false,
 )
 
@@ -39,6 +40,7 @@ object OpenAiProviderCompatibility {
             // sampling options away from generic OpenAI-compatible endpoints.
             disableSampling = isZai,
             sendEnglishAcceptLanguage = isZai,
+            zaiProvider = isZai,
             zaiCodingPlanEndpoint = isZai && path.contains("/api/coding/paas/v4"),
         )
     }
