@@ -220,6 +220,9 @@ internal fun HomeSettingsScreen(
             OutlinedButton(onClick = { activity.startActivity(Intent(activity, AdvancedToolsActivity::class.java)) }) {
                 Text("オフライン音声認識")
             }
+            OutlinedButton(onClick = { activity.startActivity(Intent(activity, RecognitionSetupActivity::class.java)) }) {
+                Text("Gemini音声認識")
+            }
             Button(
                 onClick = {
                     diagnosticBusy = true
@@ -307,6 +310,7 @@ private fun recognitionLabel(mode: RecognitionMode): String = when (mode) {
     RecognitionMode.SYSTEM -> "Android音声認識"
     RecognitionMode.ON_DEVICE -> "Android端末内"
     RecognitionMode.SHERPA_STREAMING -> "端末内ストリーミング"
+    RecognitionMode.GEMINI_TRANSCRIBE -> "Gemini 3.5 Transcribe"
 }
 
 private fun finalRecognitionLabel(mode: FinalAsrMode): String = when (mode) {
