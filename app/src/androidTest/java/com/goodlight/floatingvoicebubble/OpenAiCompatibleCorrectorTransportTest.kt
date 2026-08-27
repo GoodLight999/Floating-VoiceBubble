@@ -38,6 +38,46 @@ class OpenAiCompatibleCorrectorTransportTest {
         assertEquals("glm-4.7", body.getString("model"))
         assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
         assertFalse(body.getBoolean("do_sample"))
+        assertEquals(2048, body.getInt("max_tokens"))
+    }
+
+    @Test
+    fun zaiThinkingOffUsesSmallerButNonTruncatingCorrectionBudget() {
+        val connection = FakeConnection(URL(ENDPOINT), 200, success("今日は晴れ。"))
+        corrector(ReasoningEffort.NONE) { connection }.correctDetailed(request())
+
+        val body = JSONObject(connection.requestBody())
+        assertEquals("disabled", body.getJSONObject("thinking").getString("type"))
+        assertEquals(512, body.getInt("max_tokens"))
+    }
+
+    @Test
+    fun longZaiCorrectionBudgetScalesWithRawButNeverReturnsToProvider65536Default() {
+        val connection = FakeConnection(URL(ENDPOINT), 200, success("長文"))
+        val longRaw = "長".repeat(20_000)
+        corrector(ReasoningEffort.DEFAULT) { connection }.correctDetailed(request(raw = longRaw))
+
+        val body = JSONObject(connection.requestBody())
+        assertEquals(16_384, body.getInt("max_tokens"))
+        assertFalse(body.has("thinking"))
+    }
+
+    @Test
+    fun genericOpenAiCompatibleEndpointDoesNotReceiveZaiOnlyParameters() {
+        val genericEndpoint = "https://llm.example.com/v1/chat/completions"
+        val connection = FakeConnection(URL(genericEndpoint), 200, success("今日は晴れ。"))
+        OpenAiCompatibleCorrector(
+            endpoint = genericEndpoint,
+            model = "mystery-model",
+            apiKey = "test-key",
+            reasoningEffort = ReasoningEffort.DEFAULT,
+            connectionFactory = { connection },
+        ).correctDetailed(request())
+
+        val body = JSONObject(connection.requestBody())
+        assertFalse(body.has("max_tokens"))
+        assertFalse(body.has("thinking"))
+        assertFalse(body.has("do_sample"))
     }
 
     @Test
@@ -80,6 +120,7 @@ class OpenAiCompatibleCorrectorTransportTest {
         assertEquals(200, result.metadata.httpStatus)
         assertTrue(JSONObject(first.requestBody()).has("do_sample"))
         assertFalse(JSONObject(second.requestBody()).has("do_sample"))
+        assertTrue(JSONObject(second.requestBody()).has("max_tokens"))
     }
 
     @Test
@@ -97,6 +138,16 @@ class OpenAiCompatibleCorrectorTransportTest {
         assertEquals("http-unsupported-reasoning", failure.stage)
         assertEquals(400, failure.httpStatus)
         assertTrue(failure.responsePresent)
+    }
+
+    @Test
+    fun zaiReasoningOnlyResponseExplainsHowToRecover() {
+        val response = "{\"choices\":[{\"message\":{\"content\":null,\"reasoning_content\":\"長い思考\"}}]}"
+        val connection = FakeConnection(URL(ENDPOINT), 200, response)
+
+        val failure = expectFailure { corrector(ReasoningEffort.HIGH) { connection }.correctDetailed(request()) }
+        assertEquals("parse-response", failure.stage)
+        assertTrue(failure.message.orEmpty().contains("思考OFF"))
     }
 
     @Test
@@ -135,9 +186,9 @@ class OpenAiCompatibleCorrectorTransportTest {
         connectionFactory = factory,
     )
 
-    private fun request() = CorrectionRequest(
-        rawTranscript = "今日は晴れ",
-        alternatives = listOf("今日は晴れ"),
+    private fun request(raw: String = "今日は晴れ") = CorrectionRequest(
+        rawTranscript = raw,
+        alternatives = listOf(raw),
         surroundingContext = "",
         dictionaryTerms = emptyList(),
         preferences = CorrectionPreferences(
