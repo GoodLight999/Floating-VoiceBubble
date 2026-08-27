@@ -99,6 +99,24 @@ object GemmaModelSource {
         )
     }
 
+    /**
+     * Compatibility entry point for the existing SAF picker. Despite the historical name this now
+     * performs one explicit import copy into the direct-path model directory; it never returns a
+     * content:// reference to LiteRT-LM.
+     */
+    fun verifyExternal(
+        context: Context,
+        uri: Uri,
+        onProgress: ((readBytes: Long, totalBytes: Long?) -> Unit)? = null,
+    ): DirectSelection {
+        val imported = ModelImporter(context).importGemmaVerified(uri, onProgress)
+        return DirectSelection(
+            reference = imported.file.absolutePath,
+            displayName = imported.file.name,
+            fingerprint = imported.fingerprint,
+        )
+    }
+
     /** Compatibility cleanup for installs that persisted a legacy SAF grant. */
     fun releaseReadPermission(context: Context, reference: String) {
         if (!isExternal(reference)) return
