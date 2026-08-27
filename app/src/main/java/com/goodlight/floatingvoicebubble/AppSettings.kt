@@ -43,6 +43,9 @@ data class AppSettings(
     val byokEndpoint: String = "https://api.openai.com/v1/chat/completions",
     val byokModel: String = "",
     val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
+    /** Last provider-catalog capability for the exact saved endpoint/model pair. */
+    val byokReasoningMetadataKnown: Boolean = false,
+    val byokReasoningEfforts: Set<ReasoningEffort> = emptySet(),
     val recognitionRepairMode: RecognitionRepairMode = RecognitionRepairMode.NORMAL,
     val correctionAddCommas: Boolean = true,
     val correctionAddPeriods: Boolean = true,
@@ -74,6 +77,8 @@ class SettingsStore(context: Context) {
             ?: "https://api.openai.com/v1/chat/completions",
         byokModel = prefs.getString("byok_model", "").orEmpty(),
         reasoningEffort = enumValueOr(prefs.getString("reasoning_effort", null), ReasoningEffort.DEFAULT),
+        byokReasoningMetadataKnown = prefs.getBoolean("byok_reasoning_metadata_known", false),
+        byokReasoningEfforts = enumSetOrEmpty(prefs.getStringSet("byok_reasoning_efforts", null)),
         recognitionRepairMode = enumValueOr(
             prefs.getString("recognition_repair_mode", null),
             RecognitionRepairMode.NORMAL,
@@ -110,6 +115,8 @@ class SettingsStore(context: Context) {
             .putString("byok_endpoint", value.byokEndpoint)
             .putString("byok_model", value.byokModel)
             .putString("reasoning_effort", value.reasoningEffort.name)
+            .putBoolean("byok_reasoning_metadata_known", value.byokReasoningMetadataKnown)
+            .putStringSet("byok_reasoning_efforts", value.byokReasoningEfforts.map { it.name }.toSet())
             .putString("recognition_repair_mode", value.recognitionRepairMode.name)
             .putBoolean("correction_add_commas", value.correctionAddCommas)
             .putBoolean("correction_add_periods", value.correctionAddPeriods)
@@ -149,6 +156,9 @@ class SettingsStore(context: Context) {
 
     private inline fun <reified T : Enum<T>> enumValueOr(raw: String?, fallback: T): T =
         raw?.let { runCatching { enumValueOf<T>(it) }.getOrNull() } ?: fallback
+
+    private inline fun <reified T : Enum<T>> enumSetOrEmpty(raw: Set<String>?): Set<T> =
+        raw.orEmpty().mapNotNull { runCatching { enumValueOf<T>(it) }.getOrNull() }.toSet()
 
     companion object {
         private const val KEY_API_KEY = "byok_api_key"
