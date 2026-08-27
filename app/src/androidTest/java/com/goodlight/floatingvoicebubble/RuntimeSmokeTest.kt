@@ -65,6 +65,18 @@ class RuntimeSmokeTest {
     }
 
     @Test
+    fun recognitionSetupActivityStarts() {
+        val intent = Intent(context, RecognitionSetupActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val activity = instrumentation.startActivitySync(intent)
+        try {
+            assertTrue(activity is RecognitionSetupActivity)
+            assertFalse(activity.isFinishing)
+        } finally {
+            activity.finish()
+        }
+    }
+
+    @Test
     fun appProfilesActivityStarts() {
         val intent = Intent(context, AppProfilesActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val activity = instrumentation.startActivitySync(intent)
@@ -145,6 +157,19 @@ class RuntimeSmokeTest {
             assertEquals(secret, SettingsStore(context).apiKey())
         } finally {
             store.setApiKey(previous)
+        }
+    }
+
+    @Test
+    fun keystoreBackedGeminiTranscribeSecretRoundTrips() {
+        val store = SettingsStore(context)
+        val previous = store.geminiTranscribeApiKey()
+        val secret = "gemini-transcribe-${System.nanoTime()}"
+        store.setGeminiTranscribeApiKey(secret)
+        try {
+            assertEquals(secret, SettingsStore(context).geminiTranscribeApiKey())
+        } finally {
+            store.setGeminiTranscribeApiKey(previous)
         }
     }
 
