@@ -232,6 +232,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
                 biasTerms = dictionary.topBiasTerms(),
                 traceAudioDir = traces.audioDir,
                 streamingModel = model,
+                geminiTranscribeApiKey = settings.geminiTranscribeApiKey(),
                 onPartial = { text ->
                     if (token == generation && session != null) {
                         latest = text
