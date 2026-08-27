@@ -34,6 +34,7 @@ import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.model.GemmaModelSource
 import com.goodlight.floatingvoicebubble.model.GemmaModelVerifier
 import com.goodlight.floatingvoicebubble.speech.GeminiTranscribeProbe
+import com.goodlight.floatingvoicebubble.speech.GeminiTranscribeProtocol
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackend
 import com.goodlight.floatingvoicebubble.speech.RecognitionBackendResolver
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
@@ -44,6 +45,7 @@ import com.k2fsa.sherpa.onnx.VersionInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URI
 import java.util.concurrent.Executors
 
 enum class DiagnosticStatus { PASS, WARN, FAIL, SKIP }
@@ -68,7 +70,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 9)
+        .put("schema", 10)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -110,7 +112,7 @@ class SelfDiagnostics(
         val streamingModel = asrModelStore.resolve(settings.streamingAsrModelId)
         val finalAsrModelStore = FinalAsrModelStore(appContext)
         val finalAsrModel = finalAsrModelStore.resolve(settings.finalAsrModelId)
-        val geminiTranscribeKey = settingsStore.geminiTranscribeApiKey().trim()
+        val cloudRecognitionKey = settingsStore.recognitionApiKey().trim()
 
         results += probe("platform") {
             check(Build.VERSION.SDK_INT >= 33) { "Android 13 / API 33 以上が必要です。" }
@@ -167,17 +169,17 @@ class SelfDiagnostics(
                 )
             }.isFailure
             check(missingModelRejected) { "offline mode silently accepted a missing Sherpa model" }
-            val geminiBlocked = RecognitionBackendResolver.resolve(
+            val cloudBlocked = RecognitionBackendResolver.resolve(
                 mode = RecognitionMode.GEMINI_TRANSCRIBE,
                 offlineRequired = true,
                 androidOnDeviceAvailable = true,
                 sherpaModelAvailable = true,
                 geminiTranscribeConfigured = true,
             )
-            check(geminiBlocked == RecognitionBackend.SHERPA_STREAMING) {
-                "offline mode selected Gemini cloud recognition"
+            check(cloudBlocked == RecognitionBackend.SHERPA_STREAMING) {
+                "offline mode selected cloud recognition"
             }
-            "policy verified: offline always resolves to Sherpa, rejects missing model, and blocks Gemini"
+            "policy verified: offline always resolves to Sherpa, rejects missing model, and blocks cloud recognition"
         }
 
         results += if (settings.offlineMode && streamingModel == null) {
@@ -188,15 +190,18 @@ class SelfDiagnostics(
 
         results += when {
             settings.recognitionMode != RecognitionMode.GEMINI_TRANSCRIBE ->
-                skip("gemini-transcribe-readiness", "Gemini 3.5 Transcribe is not selected")
+                skip("cloud-recognition-readiness", "cloud recognition is not selected")
             settings.offlineMode ->
-                pass("gemini-transcribe-readiness", "selected but blocked by 通信しない; no cloud audio route is active")
-            geminiTranscribeKey.isBlank() ->
-                fail("gemini-transcribe-readiness", "Gemini 3.5 Transcribe is selected but its BYOK credential is missing")
-            else -> pass(
-                "gemini-transcribe-readiness",
-                "credential configured; model=gemini-3.5-transcribe-live; mode=VERBATIM; key=<redacted>",
-            )
+                pass("cloud-recognition-readiness", "selected but blocked by 通信しない; no cloud audio route is active")
+            cloudRecognitionKey.isBlank() ->
+                fail("cloud-recognition-readiness", "cloud recognition is selected but its BYOK credential is missing")
+            settings.recognitionApiModel.isBlank() ->
+                fail("cloud-recognition-readiness", "cloud recognition model ID is blank")
+            else -> probe("cloud-recognition-readiness") {
+                val endpoint = redactedRecognitionEndpoint(settings.recognitionApiEndpoint)
+                GeminiTranscribeProtocol.httpTransportEndpoint(settings.recognitionApiEndpoint)
+                "credential configured; endpoint=$endpoint; model=${settings.recognitionApiModel}; protocol=gemini-live-compatible; mode=VERBATIM; key=<redacted>"
+            }
         }
 
         results += when {
@@ -323,16 +328,20 @@ class SelfDiagnostics(
             } else results += skip("streaming-recognition-model-load", "model not configured")
 
             if (settings.recognitionMode == RecognitionMode.GEMINI_TRANSCRIBE && !settings.offlineMode) {
-                if (geminiTranscribeKey.isBlank()) {
-                    results += fail("gemini-transcribe-api", "credential missing; setup probe not attempted")
+                if (cloudRecognitionKey.isBlank()) {
+                    results += fail("cloud-recognition-api", "credential missing; setup probe not attempted")
                 } else {
-                    results += probe("gemini-transcribe-api") {
-                        val probe = GeminiTranscribeProbe.run(geminiTranscribeKey)
-                        "Live API setup accepted in ${probe.elapsedMs}ms; microphone audio was not sent"
+                    results += probe("cloud-recognition-api") {
+                        val probe = GeminiTranscribeProbe.run(
+                            apiKey = cloudRecognitionKey,
+                            endpoint = settings.recognitionApiEndpoint,
+                            model = settings.recognitionApiModel,
+                        )
+                        "Live API setup accepted in ${probe.elapsedMs}ms; endpoint=${redactedRecognitionEndpoint(settings.recognitionApiEndpoint)}; model=${settings.recognitionApiModel}; microphone audio was not sent"
                     }
                 }
             } else {
-                results += skip("gemini-transcribe-api", "Gemini cloud recognition inactive")
+                results += skip("cloud-recognition-api", "cloud recognition inactive")
             }
 
             if (finalAsrModel != null) {
@@ -358,7 +367,7 @@ class SelfDiagnostics(
             }
         } else {
             results += skip("streaming-recognition-model-load", "external probes disabled")
-            results += skip("gemini-transcribe-api", "external probes disabled")
+            results += skip("cloud-recognition-api", "external probes disabled")
             results += skip("final-recognition-model-load", "external probes disabled")
             results += skip("production-correction-short", "external probes disabled")
             results += skip("production-correction-long", "external probes disabled")
@@ -494,6 +503,17 @@ class SelfDiagnostics(
         check(!rejected.accepted && rejected.text == raw) { "catastrophic expansion was not rejected" }
         "ordinary correction accepted; catastrophic output rejected"
     }
+
+    private fun redactedRecognitionEndpoint(endpoint: String): String = runCatching {
+        val uri = URI(endpoint.trim())
+        buildString {
+            append(uri.scheme?.lowercase() ?: "wss")
+            append("://")
+            append(uri.host.orEmpty())
+            if (uri.port >= 0) append(":${uri.port}")
+            append(uri.path.orEmpty())
+        }
+    }.getOrElse { endpoint.substringBefore('?').substringBefore('#').take(220) }
 
     private fun persistLatest(report: DiagnosticReport) {
         runCatching {
