@@ -5,9 +5,9 @@ import java.net.URI
 import java.util.Locale
 
 /**
- * Normalizes the product-level "reasoning depth" choice onto controls that providers actually
- * document. DEFAULT always means provider/model default and therefore emits no optional reasoning
- * parameter. Unknown OpenAI-compatible endpoints never receive guessed proprietary parameters.
+ * Normalizes the product-level reasoning choice onto controls that providers actually document.
+ * DEFAULT always means provider/model default and therefore emits no optional reasoning parameter.
+ * Unknown OpenAI-compatible endpoints never receive guessed proprietary parameters.
  */
 data class ReasoningCapability(
     val choices: List<ReasoningEffort>,
@@ -28,8 +28,9 @@ object ReasoningCapabilities {
                     ReasoningEffort.MEDIUM,
                     ReasoningEffort.HIGH,
                     ReasoningEffort.XHIGH,
+                    ReasoningEffort.MAX,
                 ),
-                note = "OpenRouterのreasoning.effortへ送信します。モデル非対応時はAPIエラーを明示します。",
+                note = "OpenRouterのreasoning.effortへ送信します。モデル一覧を取得済みなら、そのモデルが返した対応値だけを表示します。",
             )
             host == "api.z.ai" -> ReasoningCapability(
                 choices = listOf(ReasoningEffort.DEFAULT, ReasoningEffort.NONE, ReasoningEffort.HIGH),
@@ -66,13 +67,31 @@ object ReasoningCapabilities {
 
     fun label(endpoint: String, model: String, value: ReasoningEffort): String {
         val normalized = normalize(endpoint, model, value)
-        if (host(endpoint) == "api.z.ai") {
+        val endpointHost = host(endpoint)
+        val cleanModel = model.lowercase(Locale.ROOT).removePrefix("models/")
+
+        if (endpointHost == "api.z.ai") {
             return when (normalized) {
                 ReasoningEffort.DEFAULT -> "モデル既定"
                 ReasoningEffort.NONE -> "思考OFF"
                 else -> "思考ON"
             }
         }
+
+        // Gemini 2.5 exposes a numeric thinkingBudget, not named thinking levels. Showing the exact
+        // budget avoids presenting Floating VoiceBubble's convenience presets as provider semantics.
+        if (endpointHost == "generativelanguage.googleapis.com" && cleanModel.startsWith("gemini-2.5")) {
+            return when (normalized) {
+                ReasoningEffort.DEFAULT -> "モデル既定"
+                ReasoningEffort.NONE -> "思考OFF（0）"
+                ReasoningEffort.MINIMAL -> "512トークン"
+                ReasoningEffort.LOW -> "1,024トークン"
+                ReasoningEffort.MEDIUM -> "4,096トークン"
+                ReasoningEffort.HIGH -> "8,192トークン"
+                ReasoningEffort.XHIGH, ReasoningEffort.MAX -> "16,384トークン"
+            }
+        }
+
         return when (normalized) {
             ReasoningEffort.DEFAULT -> "モデル既定"
             ReasoningEffort.NONE -> "なし"
@@ -225,12 +244,12 @@ object ReasoningCapabilities {
     private fun geminiCapability(model: String): ReasoningCapability = when {
         model.startsWith("gemini-2.5-pro") -> effortCapability(
             ReasoningEffort.MINIMAL, ReasoningEffort.LOW, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH,
-            note = "Gemini 2.5 Proは思考を完全にはOFFにできません。thinkingBudgetへ変換します。",
+            note = "Gemini 2.5 Proは思考を完全にはOFFにできません。表示値は実際に送るthinkingBudgetです。",
         )
         model.startsWith("gemini-2.5") -> effortCapability(
             ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW,
             ReasoningEffort.MEDIUM, ReasoningEffort.HIGH,
-            note = "Gemini 2.5のthinkingBudgetへ変換します。",
+            note = "Gemini 2.5は数値thinkingBudgetを使います。表示値は実際に送るトークン数です。",
         )
         model.startsWith("gemini-3.7-flash") -> effortCapability(
             ReasoningEffort.LOW, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH,
