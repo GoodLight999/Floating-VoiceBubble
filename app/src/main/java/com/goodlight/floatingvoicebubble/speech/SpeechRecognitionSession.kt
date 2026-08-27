@@ -35,6 +35,7 @@ class SpeechRecognitionSession(
     private val biasTerms: List<String>,
     private val traceAudioDir: File,
     private val streamingModel: StreamingAsrModel?,
+    private val geminiTranscribeApiKey: String = "",
     private val onPartial: (String) -> Unit,
     private val onState: (String) -> Unit,
     private val onComplete: (RecognitionOutcome) -> Unit,
@@ -50,6 +51,7 @@ class SpeechRecognitionSession(
     private val backend: RecognitionBackend
     private val recognizer: SpeechRecognizer?
     private val sherpaEngine: SherpaStreamingEngine?
+    private val geminiEngine: GeminiTranscribeStreamingEngine?
     private val recognizerKind: String
     private val capture: AudioCaptureSession
     private var latestAlternatives: List<String> = emptyList()
@@ -175,17 +177,20 @@ class SpeechRecognitionSession(
             offlineRequired = offlineRequired,
             androidOnDeviceAvailable = onDeviceAvailable,
             sherpaModelAvailable = streamingModel != null,
+            geminiTranscribeConfigured = geminiTranscribeApiKey.isNotBlank(),
         )
 
         recognizer = when (backend) {
             RecognitionBackend.ANDROID_ON_DEVICE -> SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
             RecognitionBackend.ANDROID_SYSTEM -> SpeechRecognizer.createSpeechRecognizer(context)
-            RecognitionBackend.SHERPA_STREAMING -> null
+            RecognitionBackend.SHERPA_STREAMING,
+            RecognitionBackend.GEMINI_TRANSCRIBE -> null
         }
         recognizerKind = when (backend) {
             RecognitionBackend.ANDROID_ON_DEVICE -> "android-on-device-segmented-audio-source"
             RecognitionBackend.ANDROID_SYSTEM -> "android-system-segmented-audio-source"
             RecognitionBackend.SHERPA_STREAMING -> "sherpa-nemotron35-${streamingModel!!.chunkMs}ms"
+            RecognitionBackend.GEMINI_TRANSCRIBE -> "gemini-3.5-transcribe-live-verbatim"
         }
 
         sherpaEngine = if (backend == RecognitionBackend.SHERPA_STREAMING) {
@@ -215,12 +220,45 @@ class SpeechRecognitionSession(
             null
         }
 
+        geminiEngine = if (backend == RecognitionBackend.GEMINI_TRANSCRIBE) {
+            GeminiTranscribeStreamingEngine(
+                apiKey = geminiTranscribeApiKey,
+                biasTerms = biasTerms,
+                onState = { state -> mainHandler.post { if (!delivered.get() && !closed.get()) onState(state) } },
+                onPartial = { partial ->
+                    mainHandler.post {
+                        if (delivered.get() || closed.get()) return@post
+                        latestPartial = partial
+                        latestAlternatives = listOf(partial)
+                        onPartial(partial)
+                    }
+                },
+                onFinal = { finalText ->
+                    mainHandler.post {
+                        if (closed.get()) return@post
+                        latestPartial = finalText
+                        latestAlternatives = listOf(finalText)
+                        deliver(listOf(finalText))
+                    }
+                },
+                onFailure = { message -> mainHandler.post { fail(message) } },
+            )
+        } else {
+            null
+        }
+
+        val pcmConsumer: ((ShortArray, Int) -> Unit)? = when (backend) {
+            RecognitionBackend.SHERPA_STREAMING -> sherpaEngine?.let { engine -> { samples, count -> engine.acceptPcm16(samples, count) } }
+            RecognitionBackend.GEMINI_TRANSCRIBE -> geminiEngine?.let { engine -> { samples, count -> engine.acceptPcm16(samples, count) } }
+            else -> null
+        }
+        val needsAndroidPipe = backend == RecognitionBackend.ANDROID_SYSTEM || backend == RecognitionBackend.ANDROID_ON_DEVICE
         capture = AudioCaptureSession(
             context = context,
             outputDir = traceAudioDir,
             autoEndpoint = autoEndpoint,
-            mirrorToRecognizerPipe = backend != RecognitionBackend.SHERPA_STREAMING,
-            onPcm16 = sherpaEngine?.let { engine -> { samples, count -> engine.acceptPcm16(samples, count) } },
+            mirrorToRecognizerPipe = needsAndroidPipe,
+            onPcm16 = pcmConsumer,
             onCaptureFailure = { message -> mainHandler.post { fail(message) } },
         ) {
             mainHandler.post { finishInput() }
@@ -231,10 +269,18 @@ class SpeechRecognitionSession(
     fun start() {
         check(!closed.get()) { "SpeechRecognitionSession is closed" }
         onState("準備しています")
-        if (backend == RecognitionBackend.SHERPA_STREAMING) {
-            requireNotNull(sherpaEngine).start()
-            capture.start(sessionId)
-            return
+        when (backend) {
+            RecognitionBackend.SHERPA_STREAMING -> {
+                requireNotNull(sherpaEngine).start()
+                capture.start(sessionId)
+                return
+            }
+            RecognitionBackend.GEMINI_TRANSCRIBE -> {
+                requireNotNull(geminiEngine).start()
+                capture.start(sessionId)
+                return
+            }
+            else -> Unit
         }
 
         val source = capture.detachRecognizerAudioSource().also { androidSource = it }
@@ -248,24 +294,23 @@ class SpeechRecognitionSession(
         mainHandler.removeCallbacks(restartRunnable)
         onState("認識を確定しています")
         capture.stop()
-        if (backend == RecognitionBackend.SHERPA_STREAMING) {
-            sherpaEngine?.finish()
-        } else {
-            mainHandler.postDelayed({
-                if (!delivered.get() && !closed.get() && inputClosed) {
-                    runCatching { recognizer?.stopListening() }
-                }
-            }, ANDROID_STOP_LISTENING_FALLBACK_DELAY_MS)
+        when (backend) {
+            RecognitionBackend.SHERPA_STREAMING -> sherpaEngine?.finish()
+            RecognitionBackend.GEMINI_TRANSCRIBE -> geminiEngine?.finish()
+            else -> {
+                mainHandler.postDelayed({
+                    if (!delivered.get() && !closed.get() && inputClosed) {
+                        runCatching { recognizer?.stopListening() }
+                    }
+                }, ANDROID_STOP_LISTENING_FALLBACK_DELAY_MS)
+            }
         }
 
-        val timeout = if (backend == RecognitionBackend.SHERPA_STREAMING) {
-            SHERPA_FINAL_RESULT_TIMEOUT_MS
-        } else {
-            ANDROID_FINAL_RESULT_TIMEOUT_MS
-        }
+        val streamingBackend = backend == RecognitionBackend.SHERPA_STREAMING || backend == RecognitionBackend.GEMINI_TRANSCRIBE
+        val timeout = if (streamingBackend) STREAMING_FINAL_RESULT_TIMEOUT_MS else ANDROID_FINAL_RESULT_TIMEOUT_MS
         mainHandler.postDelayed({
             if (!delivered.get() && !closed.get()) {
-                val fallback = if (backend == RecognitionBackend.SHERPA_STREAMING) {
+                val fallback = if (streamingBackend) {
                     latestAlternatives.ifEmpty { latestPartial.takeIf(String::isNotBlank)?.let(::listOf).orEmpty() }
                 } else {
                     accumulator.finalCandidates(latestAlternatives, latestPartial)
@@ -282,6 +327,7 @@ class SpeechRecognitionSession(
         if (!completionPublished.get()) capture.discardAudio()
         capture.close()
         sherpaEngine?.close()
+        geminiEngine?.close()
         androidSource?.let { source -> runCatching { source.close() } }
         androidSource = null
         recognizer?.let { speechRecognizer ->
@@ -410,7 +456,7 @@ class SpeechRecognitionSession(
 
     companion object {
         private const val ANDROID_FINAL_RESULT_TIMEOUT_MS = 8_000L
-        private const val SHERPA_FINAL_RESULT_TIMEOUT_MS = 20_000L
+        private const val STREAMING_FINAL_RESULT_TIMEOUT_MS = 20_000L
         private const val ANDROID_RESTART_BASE_DELAY_MS = 120L
         private const val ANDROID_STOP_LISTENING_FALLBACK_DELAY_MS = 1_000L
         private const val MAX_ANDROID_RESTART_ERRORS = 4
