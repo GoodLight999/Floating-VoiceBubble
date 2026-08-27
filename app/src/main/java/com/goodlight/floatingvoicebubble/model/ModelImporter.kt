@@ -15,6 +15,8 @@ data class ImportedGemmaModel(
     val fingerprint: GemmaModelFingerprint,
 )
 
+internal class ModelHashMismatchException(message: String) : IllegalStateException(message)
+
 class ModelImporter(private val context: Context) {
     private val modelDir = File(context.noBackupFilesDir, "models/correction").apply {
         mkdirs()
@@ -168,8 +170,10 @@ class ModelImporter(private val context: Context) {
             }
         }
         expectedSha256?.let { expected ->
-            check(sha256.equals(expected, ignoreCase = true)) {
-                "GemmaモデルのSHA-256が一致しません。期待 ${expected.lowercase()} / 実際 $sha256"
+            if (!sha256.equals(expected, ignoreCase = true)) {
+                throw ModelHashMismatchException(
+                    "GemmaモデルのSHA-256が一致しません。期待 ${expected.lowercase()} / 実際 $sha256",
+                )
             }
         }
         return GemmaModelVerifier.identify(bytes, sha256)
