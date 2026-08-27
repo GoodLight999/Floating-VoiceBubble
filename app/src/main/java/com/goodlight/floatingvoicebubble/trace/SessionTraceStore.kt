@@ -2,6 +2,7 @@ package com.goodlight.floatingvoicebubble.trace
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import com.goodlight.floatingvoicebubble.correction.CorrectionAttemptTiming
 import com.goodlight.floatingvoicebubble.speech.RecognitionOutcome
 import org.json.JSONArray
 import org.json.JSONObject
@@ -26,8 +27,10 @@ data class FinalizationTrace(
     val correctionProvider: String? = null,
     val correctionModel: String? = null,
     val correctionReasoning: String? = null,
+    val correctionReasoningWire: String? = null,
     val correctionLatencyMs: Long? = null,
     val correctionAttempts: Int = if (correctionAttempted) 1 else 0,
+    val correctionAttemptTimings: List<CorrectionAttemptTiming> = emptyList(),
     val correctionHttpStatus: Int? = null,
     val correctionFailureStage: String? = null,
     val correctionErrorClass: String? = null,
@@ -64,7 +67,7 @@ class SessionTraceStore(context: Context) {
         val appLineBreakChanged = lineBreakPositions(modelBasis) != lineBreakPositions(trace.finalText)
 
         val json = JSONObject()
-            .put("schema", 7)
+            .put("schema", 8)
             .put("sessionId", trace.outcome.sessionId)
             .put("liveRecognizer", trace.outcome.recognizerKind)
             .put("corrector", trace.correctorId)
@@ -86,9 +89,26 @@ class SessionTraceStore(context: Context) {
             .put("finalText", trace.finalText)
             .put("correctionAttempted", trace.correctionAttempted)
             .put("correctionAttempts", trace.correctionAttempts)
+            .put(
+                "correctionAttemptTimings",
+                JSONArray().apply {
+                    trace.correctionAttemptTimings.forEach { timing ->
+                        put(
+                            JSONObject()
+                                .put("attempt", timing.attempt)
+                                .put("connectMs", timing.connectMs ?: JSONObject.NULL)
+                                .put("requestWriteMs", timing.requestWriteMs ?: JSONObject.NULL)
+                                .put("responseHeadersMs", timing.responseHeadersMs ?: JSONObject.NULL)
+                                .put("responseBodyMs", timing.responseBodyMs ?: JSONObject.NULL)
+                                .put("totalMs", timing.totalMs),
+                        )
+                    }
+                },
+            )
             .put("correctionProvider", trace.correctionProvider ?: JSONObject.NULL)
             .put("correctionModel", trace.correctionModel ?: JSONObject.NULL)
             .put("correctionReasoning", trace.correctionReasoning ?: JSONObject.NULL)
+            .put("correctionReasoningWire", trace.correctionReasoningWire ?: JSONObject.NULL)
             .put("correctionLatencyMs", trace.correctionLatencyMs ?: JSONObject.NULL)
             .put("correctionHttpStatus", trace.correctionHttpStatus ?: JSONObject.NULL)
             .put("correctionFailureStage", trace.correctionFailureStage ?: JSONObject.NULL)
