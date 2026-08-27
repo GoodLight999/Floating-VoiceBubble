@@ -1,6 +1,6 @@
 # Floating VoiceBubble — Current blocking issues
 
-Updated: 2026-08-23
+Updated: 2026-08-27
 
 This file is the durable execution ledger for the current stabilization pass. It exists so no issue is lost if a chat context is compacted or restarted.
 
@@ -32,23 +32,19 @@ Acceptance:
 - Final APK contains expected current UI strings/features and does not contain removed legacy strings.
 
 ### P0-02 — Real correction times out across models
-Status: OPEN
+Status: FIXED
 
 Observed:
 - Actual voice correction can spend a long time and then fall back.
 - The user reports this happens regardless of selected model.
 - The short “real correction test” can finish immediately with reasoning at provider default while the real voice path times out.
 
-Known implementation mismatch:
-- Test path calls `TextCorrector.correct()` directly on a small fixed probe.
-- Runtime path uses `FinalizationEngine`, a larger prompt (RAW + N-best + context + dictionary), bounded retry, app-profile effective settings, and outer watchdog.
-- Therefore the current test is not production-equivalent.
-
-Required fix:
-- Make a production-equivalent correction probe that uses the same effective settings resolution, request construction, provider adapter, timeout/retry policy, post-processing, integrity checks, and finalization path as real dictation.
-- Keep a separate fast network/provider probe only if clearly labelled as such.
-- Measure and expose per-attempt latency and exact failure stage.
-- No silent timeout fallback.
+Implemented repair:
+- Production diagnostics now execute the real `FinalizationEngine` path with short and long vectors rather than a direct tiny `TextCorrector.correct()` call.
+- The provider HTTP read deadline is shorter than the outer finalization watchdog, preserving structured provider timeout metadata instead of losing it to an outer generic timeout.
+- `HttpConnectionDeadline` applies a wall-clock deadline to connect/write/header/body work and force-disconnects blocked calls.
+- OpenAI-compatible/OpenRouter/Z.AI, Anthropic, and Gemini correction adapters use the same deadline contract.
+- There is no hidden second LM retry for a valid no-op response.
 
 Acceptance:
 - Mock provider tests cover immediate success, slow success, read timeout, 4xx unsupported-parameter retry, empty response, and late response.
@@ -56,19 +52,19 @@ Acceptance:
 - Runtime timeout/fallback reason is visible and persisted in the redacted trace.
 
 ### P0-03 — Reasoning control is not capability-aware
-Status: OPEN
+Status: FIXED
 
 Observed:
-- UI offers a generic 8-level reasoning ladder for every provider/model.
+- UI previously offered a generic reasoning ladder even when provider/model semantics were different.
 - Provider/model APIs do not share one reasoning control vocabulary or capability set.
-- Current code maps Z.AI levels to a binary `thinking.enabled/disabled`, so multiple displayed levels can produce the same wire request.
 
-Required fix:
-- Introduce a provider/model capability layer.
-- UI must show only semantics the selected endpoint/model can actually express.
-- OpenAI, OpenRouter, Z.AI, Anthropic, Gemini, and generic OpenAI-compatible endpoints must each have an explicit adapter and tests.
-- Unsupported reasoning controls must be omitted rather than sprayed at generic compatible endpoints.
-- Generic/custom endpoints should default to “provider default” unless capability is known.
+Implemented repair:
+- Provider/model capability normalization covers OpenAI, OpenRouter, Z.AI, Anthropic, Gemini, and unknown compatible endpoints.
+- Z.AI exposes only provider default / thinking OFF / thinking ON; fake depth levels are not shown.
+- Unknown compatible endpoints expose provider default only.
+- OpenRouter can narrow choices from retrieved per-model metadata.
+- Exact wire bodies are regression-tested per provider family.
+- Diagnostics use `ReasoningWireDescriptor` to show the redacted effective wire field, e.g. `reasoning_effort=max`, `thinking.type=disabled`, or `thinkingConfig.thinkingBudget=0`.
 
 Acceptance:
 - Snapshot/body tests assert the exact JSON sent for every supported provider family and every exposed reasoning choice.
@@ -76,104 +72,94 @@ Acceptance:
 - Effective wire setting is shown in diagnostics without secrets.
 
 ### P0-04 — Model/reasoning selection test can use unsaved values while runtime uses old saved values
-Status: OPEN
+Status: FIXED
 
-Observed in current code:
-- `CorrectionSetupActivity` stores model/reasoning in Compose draft state.
-- “このモデルで実補正テスト” uses the draft values directly.
-- Actual voice input reloads persisted `SettingsStore` values.
-- The user can therefore successfully test one model/reasoning configuration and then unknowingly run another.
+Observed:
+- `CorrectionSetupActivity` previously held model/reasoning draft state that could diverge from runtime persisted settings.
 
-Required fix:
-- Selecting a model/reasoning option must either persist immediately or the test must explicitly save and then read back the exact effective configuration before executing.
-- Runtime and test must display the same effective model/provider/reasoning summary.
+Implemented repair:
+- The production-equivalent correction test saves the selected endpoint/model/reasoning first, then reloads `SettingsStore` and passes those persisted values into the real finalization path.
+- Model/reasoning selection persistence has instrumentation coverage.
 
 Acceptance:
 - Instrumentation test: select model/reasoning → run test → begin production-equivalent correction; both observe the same persisted values.
 
 ### P0-05 — Silent/insufficiently visible fallback
-Status: OPEN
+Status: FIXED
 
 Observed:
-- User sees long processing followed by apparent rollback/fallback with insufficient explanation.
-- A short-lived bubble status is not adequate evidence for a failure that may take tens of seconds.
+- User could see long processing followed by apparent rollback/fallback with insufficient explanation.
 
-Required fix:
-- Fallback must never be silent.
-- Keep a visible failure state long enough to read and make the last failure available from the main screen until the next successful correction.
-- Persist a redacted “last correction result” with provider, model, effective reasoning mode, elapsed time, attempt count, HTTP/error class, LM response/change status, integrity-check result, and fallback source.
+Implemented repair:
+- `CorrectionStatusStore` persists only redacted operational failure metadata: provider, model, effective reasoning, latency, attempts, HTTP/error class, response/change state, integrity result, endpoint, and fallback source.
+- RAW/context/dictionary/API keys are not stored there.
+- Main settings keeps a visible “前回の文章補正に失敗しました” card until a later successful correction clears it.
+- Activity-recreation instrumentation verifies the failure reason and RAW fallback remain readable.
 
 Acceptance:
 - Timeout/error instrumentation verifies the user receives an explicit failure message and RAW fallback is labelled as such.
-- Diagnostic screen can reproduce the last failure without exposing API keys or sensitive surrounding text by default.
+- Diagnostic/main status can reproduce the last failure without exposing API keys or sensitive surrounding text by default.
 
 ### P0-06 — Misleading “安全ガード” and normal-text rejection
-Status: OPEN
+Status: FIXED
 
 Observed:
-- “安全ガード” sounds like content-policy censorship, but `CorrectionGuard` is actually an output-integrity/user-preference check.
-- Ordinary text can be rejected for line-break/filler/punctuation invariants or coarse expansion/contraction bounds.
-- The user has seen the guard trigger on normal text.
+- “安全ガード” sounded like content-policy censorship although the feature is only output integrity/user preference enforcement.
+- Coarse edit-distance checks could reject ordinary correction.
 
-Required fix:
-- Remove the phrase “安全ガード” from all user-facing UI/messages.
-- There is no content-safety classifier in this feature and the UI must not imply one.
-- Reduce the internal checker to narrow output-integrity invariants: empty/invalid output, catastrophic runaway/truncation, and actions explicitly forbidden by user settings.
-- Do not reject an otherwise valid LM correction merely because allowed formatting or ASR repair changed the text substantially.
-- Map internal rejection reasons to concrete Japanese explanations.
+Implemented repair:
+- User-facing `安全ガード` wording is removed.
+- Edit distance is diagnostic only.
+- Whole-output rejection is limited to empty output, catastrophic runaway/truncation, and lexical changes explicitly forbidden by the user's selected repair mode.
+- Regression tests cover punctuation, filler handling, multiple line breaks, normal/strong ASR repair, register rewrites when explicitly requested, long corrections, runaway expansion, and catastrophic loss.
 
 Acceptance:
 - Regression corpus of ordinary Japanese dictation never receives a policy-like rejection.
 - Tests cover punctuation-only changes, filler removal, multiple line breaks, strong ASR repair, register preservation, long corrections, and actual runaway output.
 
 ### P0-07 — Line breaks still fail or feel context-blind
-Status: OPEN
+Status: FIXED
 
 Observed:
-- User reports requested line breaks are still not reliably produced.
-- Previous deterministic fallbacks produced semantically bad splits and were partially reworked, but real-device behavior is still unacceptable.
+- Requested line breaks were not reliably produced and earlier deterministic fallbacks could split text semantically badly.
 
-Required fix:
-- Re-evaluate line-break responsibility between LM and deterministic postprocessor.
-- Use a regression corpus containing the user’s reported sentences, Japanese with only `、`, no punctuation, multiple topics, short single sentences, lists, and conversational fragments.
-- Never insert a width-only arbitrary break.
-- When “適宜改行” is enabled, production-equivalent tests must demonstrate meaningful paragraph boundaries.
+Implemented repair:
+- Deterministic paragraphing may choose only linguistic candidates: sentence/clause punctuation, discourse/topic markers, and selected clause endings.
+- Target character widths only rank valid linguistic candidates; they never create a blind midpoint boundary.
+- A long string with no linguistic boundary is deliberately left unsplit.
+- Regression corpus includes the reported conversational sentence, comma-only Japanese, punctuation-free Japanese, short utterances, multiple paragraphs, and forbidden split positions.
+- Session trace schema records `modelLineBreakChanged` separately from `appLineBreakChanged`.
 
 Acceptance:
 - Corpus tests specify expected/forbidden boundaries rather than just “contains a newline”.
 - Real correction trace distinguishes model-inserted vs app-inserted line breaks.
 
 ### P0-08 — Correction prompt is ad hoc and lacks documented research basis
-Status: OPEN
+Status: FIXED
 
 Observed:
-- Current `CorrectionPrompt` was hand-authored and cannot honestly be described as being derived from a documented literature review.
+- The former `CorrectionPrompt` was hand-authored without a documented evidence trail.
 
-Required fix:
-- Research ASR error correction / generative error correction, N-best rescoring/post-editing, contextual biasing, punctuation restoration, disfluency/filler handling, and constrained/minimal-edit LLM post-editing.
-- Record primary sources and the specific design principle taken from each.
-- Rebuild the prompt from those principles; do not cargo-cult wording from papers.
-- Keep “preserve register / do not invent facts / use N-best+context+dictionary / perform explicit formatting requests” as tested behavioral contracts.
-- Benchmark candidate prompts on a fixed Japanese corpus rather than selecting by intuition.
+Implemented repair:
+- `docs/CORRECTION_PROMPT_RESEARCH.md` records ASR post-editing/N-best/contextual biasing/punctuation/disfluency/minimal-edit research and maps sources to design principles.
+- Prompt v2 treats the task as ASR post-editing, anchors on RAW, limits N-best/dictionary/context evidence, preserves register, forbids fact invention, and separates explicit formatting preferences from lexical repair.
+- Prompt/regression tests cover repair and hallucination-sensitive behavior.
 
 Acceptance:
 - `docs/CORRECTION_PROMPT_RESEARCH.md` contains sources → design principles → prompt decisions → evaluation corpus/results.
 - Prompt regression/benchmark covers ASR repair, hallucination resistance, register preservation, punctuation, fillers, line breaks, and no-op cases.
 
 ### P0-09 — Settings UX is duplicated and structurally confusing
-Status: OPEN
+Status: FIXED
 
 Observed:
-- Current product has a main/normal settings surface, a “詳細” surface, model setup, and “管理・検証”; settings and concepts overlap.
-- User describes this as a maze and cannot tell which control actually affects runtime.
-- The current “詳細” button has no clear user value.
+- The former main/normal/detail/management surfaces overlapped and made it unclear which control affected runtime.
 
-Required fix:
-- One canonical user settings surface for everyday behavior.
-- Remove the generic “詳細” mode and duplicated controls.
-- Separate only task-specific subpages: correction model/API, personal dictionary, per-app overrides, offline model management, diagnostics.
-- Internal benchmarks/developer verification must not be mixed into ordinary user settings.
-- No nested tiny scrollable control region; settings must use the full usable screen.
+Implemented repair:
+- Everyday behavior is consolidated on the main settings screen.
+- Generic `詳細` is removed.
+- Task-specific pages remain for model/API, dictionary, per-app settings, offline models, and diagnostics.
+- UI tests assert legacy/ambiguous controls are absent and the primary correction/reasoning/repair controls are present.
 
 Acceptance:
 - There is exactly one editable instance for each everyday setting.
@@ -181,35 +167,29 @@ Acceptance:
 - First viewport makes current correction model, correction on/off, reasoning capability/value, ASR-repair strength, and formatting behavior understandable.
 
 ### P0-10 — User-facing terminology is developer jargon or ambiguous
-Status: OPEN
+Status: FIXED
 
 Observed:
-- `ASR` is exposed to users without explanation.
-- Chips labelled `、`, `。`, and `フィラー` are ambiguous; `フィラー` especially does not state whether checking it removes or inserts them.
-- Developer phrases such as “真のストリーミングASR”, benchmarking rationale, implementation choices, and development-policy prose are present in user-facing settings.
+- `ASR`, punctuation-only chips, and `フィラー` exposed implementation jargon or ambiguous actions.
 
-Required fix:
-- Replace `ASR` in normal UX with `音声認識`; technical names only where needed for model management.
-- Replace punctuation/filler shorthand with action labels, e.g. `読点「、」を追加`, `句点「。」を追加`, `「えー」「あのー」などを削除`.
-- Explain outcomes, not implementation ideology.
-- Remove development-policy/architecture prose from the app. Keep it in docs/Notion only.
+Implemented repair:
+- Normal UX uses `音声認識`.
+- Formatting actions use explicit labels such as `読点「、」を追加`, `句点「。」を追加`, and `「えー」「あのー」等を削除`.
+- User-facing string audit currently finds no `安全ガード`, unexplained `ASR`, or ambiguous `フィラー` in `app/src/main`.
 
 Acceptance:
 - User-facing string audit finds no unexplained `ASR`, “安全ガード”, MVP/development-policy language, or ambiguous `フィラー` toggle.
 - UI screenshots are reviewed for clarity, not merely presence of controls.
 
 ### P0-11 — App-specific overrides can make effective runtime behavior differ from global UI
-Status: OPEN
+Status: FIXED
 
 Observed:
-- Runtime applies `AppCorrectionProfile` after loading global settings.
-- Main UI currently shows global values, not necessarily the effective values for the app where dictation is used.
-- This can make a setting appear ignored.
+- Runtime applies `AppCorrectionProfile` after global settings, so a main screen showing only globals can make a setting appear ignored.
 
-Required fix:
-- Make per-app overrides explicit and sparse.
-- When a recent/current target app has overrides, show that the app overrides global behavior and summarize the effective differences.
-- Diagnostics and production-equivalent tests must report effective settings after profile application.
+Implemented repair:
+- Main settings shows an explicit recent-app override indicator and summarizes effective differences when an override is active.
+- Self-diagnostics resolves the most recent package through `effectiveSettings(...)` before reporting the correction route or running production probes.
 
 Acceptance:
 - Tests prove global vs per-app effective settings and visible override indication agree.
@@ -218,26 +198,26 @@ Acceptance:
 Status: FIXED
 
 Observed:
-- Official E2B/E4B downloads used a one-shot multi-gigabyte HTTP stream with a 60-second read timeout and no Range resume.
-- A transient stall could discard gigabytes of progress and force a complete restart.
-- The older local-import route copied an already-owned `.litertlm` into app-private storage, needlessly consuming another 2–4 GB.
+- Official E2B/E4B downloads used a one-shot multi-gigabyte HTTP stream with no reliable resume.
+- An older import path duplicated already-owned multi-gigabyte models in app-private storage.
+- A later attempt to pass a persisted SAF descriptor as `/proc/self/fd/<n>` was reproduced as `EACCES` on Android 16 when the native library reopened the path. LiteRT-LM's current Kotlin API accepts a filesystem model path, not a generic `content://` stream/descriptor.
 
-Required fix:
-- Official Gemma downloads must keep a stable partial file, resume with HTTP Range, tolerate transient I/O/408/429/5xx failures, and never discard valid completed bytes merely because one connection stalls.
-- Retry must be bounded and visible; it must never become an infinite loop.
-- Validate exact expected byte length and SHA-256 before promoting a partial download.
-- Promotion must be an atomic rename on the same filesystem, not a second model-sized copy.
-- Existing seekable `.litertlm` files selected through Android's document picker must be usable in place with a persisted read grant; no app-private duplicate is created.
-- Runtime, diagnostics, and settings must understand both app-private file paths and persisted external document references.
-- Releasing an external model must not delete the user's source file.
+Implemented repair:
+- Official Gemma downloads keep a stable partial file, resume with HTTP Range, retain valid bytes across transient failures, verify exact length/SHA-256, and atomically rename on the same filesystem.
+- Final official/imported models live in the supported real-file model directory so LiteRT-LM receives an ordinary absolute path.
+- A `.litertlm` already placed in the supported shared model directory is verified and used directly without a second model-sized copy.
+- Android document-picker `content://` input is **not** falsely advertised as no-copy. The picker imports it once into the supported real-file directory and the UI says that a copy is being made.
+- Persisted legacy `content://` references are explicitly reported as unrunnable/migration-required rather than silently falling back.
+- Diagnostics distinguish `shared-real-file-no-copy`, `real-file-path`, and `legacy-content-uri-unrunnable`.
 
 Acceptance:
 - JVM regression: an injected mid-stream I/O failure leaves the partial bytes intact, the next request resumes from that exact offset, and the reconstructed file matches the source byte-for-byte.
 - JVM regression: a server that ignores Range and returns HTTP 200 is reused as a clean restart without an extra request.
 - JVM regression: malformed Content-Range is rejected without corrupting the existing partial and repeated early EOF stops after bounded retries.
-- Device/instrumentation: select a seekable external `.litertlm`, restart the app, and verify the same source is still accessible without an app-private model copy.
-- Device/instrumentation: deleting/moving the selected external source produces an explicit unavailable-model state rather than a silent fallback.
-- Full production-equivalent Gemma correction succeeds from the external reference on at least one supported device/backend.
+- Device/instrumentation: a real `.litertlm` in the supported model directory is opened by the same absolute path and creates no app-private duplicate.
+- Device/instrumentation: a `content://` reference is never reported as directly runnable; picker import produces a byte-identical real file that is runnable by path.
+- Device/instrumentation: a legacy/missing source produces an explicit unavailable/migration state rather than silent fallback.
+- Full production-equivalent Gemma correction succeeds on at least one supported device/backend before P0-12 becomes `VERIFIED`.
 
 ## P1 — Required stabilization work
 
@@ -258,13 +238,17 @@ Required:
 - Surrounding text/raw transcript should only be included in explicit trace mode and remain in no-backup storage.
 
 ### P1-03 — Retry/timeout policy must be latency-aware
-Status: OPEN
+Status: FIXED
 
-Required:
-- Review the fixed 30 s first attempt + 10 s retry + 45 s outer watchdog.
-- Do not automatically retry a no-op if the first response is already valid for the requested operations.
-- Provider/model capability and task type should determine whether reasoning is worth enabling.
-- Avoid non-streaming long-thinking defaults for a latency-sensitive voice-editing task unless the user explicitly asks for them.
+Implemented:
+- Provider network deadlines now complete before the outer finalization watchdog.
+- `HttpConnectionDeadline` bounds the complete non-streaming HTTP call and force-disconnects a blocked socket at deadline.
+- Valid no-op responses do not trigger a hidden second model call.
+- Reasoning defaults remain provider/model defaults unless the user explicitly selects a supported setting.
+
+Required verification:
+- Exact provider timeout/failure metadata remains correct across API 33/36 and production-equivalent probes.
+- Per-phase/per-attempt latency observability is still tracked under P1-02.
 
 ### P1-04 — Provider/model capability research and adapters
 Status: OPEN
@@ -330,4 +314,6 @@ Baseline before this stabilization pass:
 - source head: `599f97a2e205c233114af0d908928eb462563992`
 - prior CI: Actions #271
 
-**That prior “complete/software-side exhausted” conclusion is explicitly revoked by this ledger.**
+Current stabilization work continues on the same branch; the exact candidate head is the head that must satisfy the release gate above.
+
+**The prior “complete/software-side exhausted” conclusion is explicitly revoked by this ledger.**
