@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble
 
+import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -89,7 +90,7 @@ class HomeSettingsUiTest {
     }
 
     @Test
-    fun persistedCorrectionFailureRemainsVisibleWithReasonAndFallback() {
+    fun persistedCorrectionFailureRemainsVisibleWithReasonFallbackAndTransportEvidence() {
         val status = CorrectionStatusStore(composeRule.activity)
         try {
             status.saveFailure(
@@ -107,6 +108,8 @@ class HomeSettingsUiTest {
                     responsePresent = false,
                     integrityResult = "not-run",
                     endpoint = "https://api.z.ai/api/coding/paas/v4/chat/completions",
+                    reasoningWire = "thinking.type=enabled",
+                    attemptTimingSummary = "attempt=1 connect=18ms write=2ms headers=11001ms total=12000ms",
                 ),
             )
             composeRule.activityRule.scenario.recreate()
@@ -115,7 +118,11 @@ class HomeSettingsUiTest {
             composeRule.onNodeWithTag("last-correction-failure").assertIsDisplayed()
             composeRule.onNodeWithText("前回の文章補正に失敗しました", substring = false).assertIsDisplayed()
             composeRule.onNodeWithText("Read timed out", substring = false).assertIsDisplayed()
+            composeRule.onNodeWithText("送信設定: thinking.type=enabled", substring = false).assertIsDisplayed()
+            composeRule.onNodeWithText("通信計測:", substring = true).assertIsDisplayed()
+            composeRule.onNodeWithText("応答開始=11001ms", substring = true).assertIsDisplayed()
             composeRule.onNodeWithText("結果: 音声認識結果", substring = false).assertIsDisplayed()
+            composeRule.onNodeWithText("instrumentation-only-key", substring = true).assertDoesNotExist()
         } finally {
             status.clearFailure()
         }
