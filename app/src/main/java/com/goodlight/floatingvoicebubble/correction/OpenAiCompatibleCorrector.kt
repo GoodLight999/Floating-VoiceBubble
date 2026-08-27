@@ -37,7 +37,6 @@ class OpenAiCompatibleCorrector(
         if (options.zaiProvider) {
             // Z.AI defaults GLM-4.7/4.5-family max_tokens to 65,536. That ceiling is inappropriate
             // for an interactive ASR post-editor whose valid output should stay close to RAW.
-            // Bound the generation while retaining headroom for reasoning when it is enabled/default.
             body.put("max_tokens", zaiCorrectionMaxTokens(request, options.zaiThinkingEnabled))
         }
         applyProviderOptions(body, options)
@@ -153,24 +152,23 @@ class OpenAiCompatibleCorrector(
     }
 
     private fun execute(body: JSONObject, options: OpenAiProviderOptions): HttpResult {
+        val deadlineMs = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
         val connection = connectionFactory(URL(endpoint)).apply {
             requestMethod = "POST"
             connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
+            readTimeout = deadlineMs
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
             if (options.sendEnglishAcceptLanguage) setRequestProperty("Accept-Language", "en-US,en")
             if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
         }
-        return try {
+        return HttpConnectionDeadline.run(connection, deadlineMs.toLong()) {
             connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
             val status = connection.responseCode
             val text = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             HttpResult(status, text)
-        } finally {
-            connection.disconnect()
         }
     }
 
