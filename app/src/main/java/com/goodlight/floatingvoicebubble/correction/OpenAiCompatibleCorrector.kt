@@ -35,14 +35,13 @@ class OpenAiCompatibleCorrector(
                     .put(JSONObject().put("role", "user").put("content", CorrectionPrompt.user(request))),
             )
         if (options.zaiProvider) {
-            // Z.AI defaults GLM-4.7/4.5-family max_tokens to 65,536. That ceiling is inappropriate
-            // for an interactive ASR post-editor whose valid output should stay close to RAW.
             body.put("max_tokens", zaiCorrectionMaxTokens(request, options.zaiThinkingEnabled))
         }
         applyProviderOptions(body, options)
 
+        val timings = mutableListOf<CorrectionAttemptTiming>()
         var attempts = 1
-        var result = executeAttempt(body, options, attempts)
+        var result = executeAttempt(body, options, attempts, timings)
         if (result.status in listOf(400, 422) && optionalParameterRejected(result.text)) {
             val explicitReasoning = reasoningEffort != ReasoningEffort.DEFAULT &&
                 (body.has("reasoning_effort") || body.has("reasoning") || body.has("thinking"))
@@ -53,13 +52,14 @@ class OpenAiCompatibleCorrector(
                     attempts = attempts,
                     status = result.status,
                     responsePresent = result.text.isNotBlank(),
+                    timings = timings,
                 )
             }
 
             // Provider-specific non-reasoning conveniences must not break the portable request.
             body.remove("do_sample")
             attempts += 1
-            result = executeAttempt(body, options.copy(sendEnglishAcceptLanguage = false), attempts)
+            result = executeAttempt(body, options.copy(sendEnglishAcceptLanguage = false), attempts, timings)
         }
         if (result.status !in 200..299) {
             throw callFailure(
@@ -68,6 +68,7 @@ class OpenAiCompatibleCorrector(
                 attempts = attempts,
                 status = result.status,
                 responsePresent = result.text.isNotBlank(),
+                timings = timings,
             )
         }
         if (result.text.isBlank()) {
@@ -77,6 +78,7 @@ class OpenAiCompatibleCorrector(
                 attempts = attempts,
                 status = result.status,
                 responsePresent = false,
+                timings = timings,
             )
         }
 
@@ -120,6 +122,7 @@ class OpenAiCompatibleCorrector(
                 httpStatus = result.status,
                 responsePresent = true,
                 errorClass = failure.javaClass.simpleName,
+                attemptTimings = timings.toList(),
                 cause = failure,
             )
         }
@@ -130,6 +133,7 @@ class OpenAiCompatibleCorrector(
                 attempts = attempts,
                 httpStatus = result.status,
                 responsePresent = true,
+                attemptTimings = timings.toList(),
             ),
         )
     }
@@ -145,34 +149,43 @@ class OpenAiCompatibleCorrector(
         if (options.disableSampling) body.put("do_sample", false)
     }
 
-    private fun executeAttempt(body: JSONObject, options: OpenAiProviderOptions, attempt: Int): HttpResult = try {
-        execute(body, options)
-    } catch (failure: Throwable) {
-        throw transportFailure(failure, attempt)
-    }
-
-    private fun execute(body: JSONObject, options: OpenAiProviderOptions): HttpResult {
+    private fun executeAttempt(
+        body: JSONObject,
+        options: OpenAiProviderOptions,
+        attempt: Int,
+        timings: MutableList<CorrectionAttemptTiming>,
+    ): TimedHttpResponse {
         val deadlineMs = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
-        val connection = connectionFactory(URL(endpoint)).apply {
-            requestMethod = "POST"
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = deadlineMs
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("Accept", "application/json")
-            if (options.sendEnglishAcceptLanguage) setRequestProperty("Accept-Language", "en-US,en")
-            if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
+        val connection = try {
+            connectionFactory(URL(endpoint)).apply {
+                requestMethod = "POST"
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = deadlineMs
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+                if (options.sendEnglishAcceptLanguage) setRequestProperty("Accept-Language", "en-US,en")
+                if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
+            }
+        } catch (failure: Throwable) {
+            throw transportFailure(failure, attempt, timings)
         }
-        return HttpConnectionDeadline.run(connection, deadlineMs.toLong()) {
-            connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
-            val status = connection.responseCode
-            val text = (if (status in 200..299) connection.inputStream else connection.errorStream)
-                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            HttpResult(status, text)
+
+        return try {
+            TimedHttpTransport.execute(connection, body.toString(), attempt, deadlineMs.toLong()).also {
+                timings += it.timing
+            }
+        } catch (failure: TimedHttpTransportFailure) {
+            timings += failure.timing
+            throw transportFailure(failure.transportCause, attempt, timings)
         }
     }
 
-    private fun transportFailure(failure: Throwable, attempt: Int): CorrectionCallException {
+    private fun transportFailure(
+        failure: Throwable,
+        attempt: Int,
+        timings: List<CorrectionAttemptTiming>,
+    ): CorrectionCallException {
         val stage = when (failure) {
             is UnknownHostException -> "dns"
             is ConnectException -> "connect"
@@ -185,6 +198,7 @@ class OpenAiCompatibleCorrector(
             attempts = attempt,
             responsePresent = false,
             errorClass = failure.javaClass.simpleName,
+            attemptTimings = timings.toList(),
             cause = failure,
         )
     }
@@ -195,6 +209,7 @@ class OpenAiCompatibleCorrector(
         attempts: Int,
         status: Int?,
         responsePresent: Boolean,
+        timings: List<CorrectionAttemptTiming>,
     ) = CorrectionCallException(
         message = message,
         stage = stage,
@@ -202,6 +217,7 @@ class OpenAiCompatibleCorrector(
         httpStatus = status,
         responsePresent = responsePresent,
         errorClass = "HttpResponseError",
+        attemptTimings = timings.toList(),
     )
 
     private fun optionalParameterRejected(value: String): Boolean {
@@ -220,8 +236,6 @@ class OpenAiCompatibleCorrector(
     }
 
     private fun compact(value: String): String = value.take(500).replace(Regex("\\s+"), " ").trim()
-
-    private data class HttpResult(val status: Int, val text: String)
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 8_000
