@@ -28,10 +28,12 @@ import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
 import com.goodlight.floatingvoicebubble.correction.CorrectionPostProcessor
 import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
 import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
+import com.goodlight.floatingvoicebubble.correction.ReasoningWireDescriptor
 import com.goodlight.floatingvoicebubble.dictionary.PersonalDictionary
 import com.goodlight.floatingvoicebubble.model.AsrModelStore
 import com.goodlight.floatingvoicebubble.model.FinalAsrModelStore
 import com.goodlight.floatingvoicebubble.model.GemmaModelSource
+import com.goodlight.floatingvoicebubble.model.GemmaModelStorage
 import com.goodlight.floatingvoicebubble.model.GemmaModelVerifier
 import com.goodlight.floatingvoicebubble.speech.GeminiTranscribeProbe
 import com.goodlight.floatingvoicebubble.speech.GeminiTranscribeProtocol
@@ -70,7 +72,7 @@ data class DiagnosticReport(
     }
 
     fun toRedactedJson(): String = JSONObject()
-        .put("schema", 10)
+        .put("schema", 11)
         .put("appVersion", BuildConfig.VERSION_NAME)
         .put("debugBuild", BuildConfig.DEBUG)
         .put("sdkInt", Build.VERSION.SDK_INT)
@@ -245,24 +247,23 @@ class SelfDiagnostics(
         }
 
         val gemmaReference = settings.gemmaModelPath
-        val gemmaExternal = GemmaModelSource.isExternal(gemmaReference)
+        val legacyContentReference = GemmaModelSource.isExternal(gemmaReference)
         val gemmaAvailable = GemmaModelSource.isAvailable(appContext, gemmaReference)
-        val modelFile = gemmaReference.takeIf { it.isNotBlank() && !gemmaExternal }?.let(::File)
+        val modelFile = gemmaReference.takeIf { it.isNotBlank() && !legacyContentReference }?.let(::File)
         val gemmaFingerprint = if (modelFile?.isFile == true && modelFile.length() >= MIN_GEMMA_BYTES) {
             runCatching { GemmaModelVerifier.inspect(modelFile) }
         } else null
 
         results += when {
             gemmaReference.isBlank() -> skip("gemma-model", "not configured")
-            gemmaExternal && !gemmaAvailable -> fail(
+            legacyContentReference -> fail(
                 "gemma-model",
-                "external .litertlm is unavailable, permission was lost, or the provider is not seekable",
+                "legacy content:// model reference is not runnable by LiteRT-LM; import it once into the supported model folder",
             )
-            gemmaExternal -> pass(
+            modelFile == null || !modelFile.isFile -> fail(
                 "gemma-model",
-                "external .litertlm accessible without app-private copy; name=${GemmaModelSource.displayName(appContext, gemmaReference)}; variant=${settings.gemmaVariant}",
+                "configured model file is missing; path=${gemmaReference.take(220)}",
             )
-            modelFile == null || !modelFile.isFile -> fail("gemma-model", "configured app-private model is missing")
             modelFile.length() < MIN_GEMMA_BYTES -> fail("gemma-model", "model file is unexpectedly small")
             gemmaFingerprint?.isFailure == true -> warn(
                 "gemma-model",
@@ -270,20 +271,25 @@ class SelfDiagnostics(
             )
             else -> {
                 val fingerprint = requireNotNull(gemmaFingerprint).getOrThrow()
+                val source = if (GemmaModelStorage.isInSharedDirectory(appContext, modelFile)) {
+                    "shared-real-file-no-copy"
+                } else {
+                    "real-file-path"
+                }
                 when {
                     fingerprint.knownOfficialArtifact &&
                         settings.gemmaVariant != GemmaVariant.UNKNOWN &&
                         settings.gemmaVariant != fingerprint.detectedVariant -> fail(
                             "gemma-model",
-                            "declared=${settings.gemmaVariant} but verified artifact=${fingerprint.detectedVariant}; sha256=${fingerprint.sha256.take(12)}",
+                            "declared=${settings.gemmaVariant} but verified artifact=${fingerprint.detectedVariant}; source=$source; sha256=${fingerprint.sha256.take(12)}",
                         )
                     fingerprint.knownOfficialArtifact -> pass(
                         "gemma-model",
-                        "official artifact verified; variant=${fingerprint.detectedVariant}; size=${fingerprint.bytes}; sha256=${fingerprint.sha256.take(12)}",
+                        "official artifact verified; variant=${fingerprint.detectedVariant}; source=$source; size=${fingerprint.bytes}; sha256=${fingerprint.sha256.take(12)}",
                     )
                     else -> warn(
                         "gemma-model",
-                        "unrecognized artifact; declared=${settings.gemmaVariant}; sizeHint=${fingerprint.detectedVariant}; size=${fingerprint.bytes}; sha256=${fingerprint.sha256.take(12)}",
+                        "unrecognized artifact; declared=${settings.gemmaVariant}; source=$source; sizeHint=${fingerprint.detectedVariant}; size=${fingerprint.bytes}; sha256=${fingerprint.sha256.take(12)}",
                     )
                 }
             }
@@ -381,14 +387,20 @@ class SelfDiagnostics(
         val detail = when (backend) {
             CorrectionBackend.NONE -> "backend=none"
             CorrectionBackend.GEMMA -> {
-                val source = if (GemmaModelSource.isExternal(settings.gemmaModelPath)) "external-no-copy" else "app-private"
+                val file = settings.gemmaModelPath.takeUnless(GemmaModelSource::isExternal)?.let(::File)
+                val source = when {
+                    GemmaModelSource.isExternal(settings.gemmaModelPath) -> "legacy-content-uri-unrunnable"
+                    file != null && GemmaModelStorage.isInSharedDirectory(appContext, file) -> "shared-real-file-no-copy"
+                    else -> "real-file-path"
+                }
                 val name = GemmaModelSource.displayName(appContext, settings.gemmaModelPath)
                 "backend=on-device; model=Gemma ${settings.gemmaVariant}; source=$source; name=$name"
             }
             CorrectionBackend.BYOK -> {
                 val endpoint = ByokEndpointResolver.resolve(settings.byokEndpoint)
                 val reasoning = ReasoningCapabilities.label(settings.byokEndpoint, settings.byokModel, settings.reasoningEffort)
-                "backend=${CloudCorrectorFactory.protocolFor(settings.byokEndpoint)}; endpoint=${endpoint.generationUrl.substringBefore('?')}; model=${settings.byokModel}; reasoning=$reasoning"
+                val wire = ReasoningWireDescriptor.describe(settings.byokEndpoint, settings.byokModel, settings.reasoningEffort)
+                "backend=${CloudCorrectorFactory.protocolFor(settings.byokEndpoint)}; endpoint=${endpoint.generationUrl.substringBefore('?')}; model=${settings.byokModel}; reasoning=$reasoning; wire=$wire"
             }
         }
         return pass("effective-correction-route", detail)
@@ -440,12 +452,22 @@ class SelfDiagnostics(
                     check(result.finalText.length >= raw.length / 2) { "長文補正で発言が大量に欠落しました" }
                     check(!result.finalText.contains("来週の予算は100万円")) { "周辺文脈だけの事実が出力へ混入しました" }
                 }
-                "provider=${result.correctionProvider}; model=${result.correctionModel}; reasoning=${result.correctionReasoning}; latency=${result.correctionLatencyMs ?: -1}ms; changed=${result.correctionModelChanged}"
+                val wire = if (result.correctionProvider?.contains("byok", ignoreCase = true) == true ||
+                    selectedCloud(settings)
+                ) {
+                    ReasoningWireDescriptor.describe(settings.byokEndpoint, settings.byokModel, settings.reasoningEffort)
+                } else {
+                    "n/a"
+                }
+                "provider=${result.correctionProvider}; model=${result.correctionModel}; reasoning=${result.correctionReasoning}; wire=$wire; latency=${result.correctionLatencyMs ?: -1}ms; changed=${result.correctionModelChanged}"
             }
         } finally {
             worker.shutdownNow()
         }
     }
+
+    private fun selectedCloud(settings: AppSettings): Boolean =
+        settings.correctionMode == CorrectionMode.BYOK && !settings.offlineMode
 
     private fun probeAudioRecord(): DiagnosticItem {
         if (appContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
