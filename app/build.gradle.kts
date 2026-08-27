@@ -100,7 +100,10 @@ dependencies {
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.14.0")
     implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.5")
     implementation("org.apache.commons:commons-compress:1.28.0")
-    implementation("com.squareup.okhttp3:okhttp:5.5.0")
+    // 5.5.0 raises its Android AAR minCompileSdk to 37. Floating VoiceBubble's
+    // validated release matrix is API 33..36, so keep the newest line known to
+    // remain consumable from compileSdk 36 until that matrix is deliberately revised.
+    implementation("com.squareup.okhttp3:okhttp:5.3.2")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.3.21")
