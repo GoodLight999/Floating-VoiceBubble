@@ -105,11 +105,12 @@ class AnthropicCorrector(
     }
 
     private fun executeAttempt(body: JSONObject): HttpResult {
+        val deadlineMs = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
         val connection = try {
             connectionFactory(URL(endpoint)).apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
+                readTimeout = deadlineMs
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
@@ -120,17 +121,15 @@ class AnthropicCorrector(
             throw transportFailure(failure)
         }
         return try {
-            try {
+            HttpConnectionDeadline.run(connection, deadlineMs.toLong()) {
                 connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
                 val status = connection.responseCode
                 val text = (if (status in 200..299) connection.inputStream else connection.errorStream)
                     ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
                 HttpResult(status, text)
-            } catch (failure: Throwable) {
-                throw transportFailure(failure)
             }
-        } finally {
-            connection.disconnect()
+        } catch (failure: Throwable) {
+            throw transportFailure(failure)
         }
     }
 
