@@ -14,6 +14,7 @@ class AnthropicCorrector(
     private val model: String,
     private val apiKey: String,
     private val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
+    private val connectionFactory: (URL) -> HttpURLConnection = { url -> url.openConnection() as HttpURLConnection },
 ) : TextCorrector {
     override val id: String = "byok:anthropic:$model"
 
@@ -105,7 +106,7 @@ class AnthropicCorrector(
 
     private fun executeAttempt(body: JSONObject): HttpResult {
         val connection = try {
-            (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            connectionFactory(URL(endpoint)).apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
