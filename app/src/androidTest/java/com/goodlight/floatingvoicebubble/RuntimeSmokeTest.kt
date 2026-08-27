@@ -176,25 +176,32 @@ class RuntimeSmokeTest {
     @Test
     fun automaticDiagnosticsRunsAndRedactsSecrets() {
         val store = SettingsStore(context)
-        val previous = store.apiKey()
-        val sentinel = "SUPER_SECRET_DIAGNOSTIC_${System.nanoTime()}"
-        store.setApiKey(sentinel)
+        val previousByok = store.apiKey()
+        val previousGemini = store.geminiTranscribeApiKey()
+        val byokSentinel = "SUPER_SECRET_DIAGNOSTIC_${System.nanoTime()}"
+        val geminiSentinel = "SUPER_SECRET_GEMINI_${System.nanoTime()}"
+        store.setApiKey(byokSentinel)
+        store.setGeminiTranscribeApiKey(geminiSentinel)
         try {
             val report = SelfDiagnostics(context, store).run(includeExternalProbes = false)
             val ids = report.items.map { it.id }.toSet()
             assertTrue("offline-cloud-block" in ids)
             assertTrue("offline-recognition-policy" in ids)
+            assertTrue("gemini-transcribe-readiness" in ids)
             assertTrue("sherpa-jni" in ids)
-            assertTrue("final-asr-readiness" in ids)
-            assertTrue("correction-guard" in ids)
+            assertTrue("final-recognition-readiness" in ids)
+            assertTrue("correction-output-integrity" in ids)
             assertTrue("dictionary-db" in ids)
             assertTrue("trace-storage" in ids)
             val json = report.toRedactedJson()
-            assertFalse(json.contains(sentinel))
+            assertFalse(json.contains(byokSentinel))
+            assertFalse(json.contains(geminiSentinel))
             assertTrue(json.contains("offline-recognition-policy"))
-            assertTrue(json.contains("final-asr-readiness"))
+            assertTrue(json.contains("gemini-transcribe-readiness"))
+            assertTrue(json.contains("final-recognition-readiness"))
         } finally {
-            store.setApiKey(previous)
+            store.setApiKey(previousByok)
+            store.setGeminiTranscribeApiKey(previousGemini)
         }
     }
 
