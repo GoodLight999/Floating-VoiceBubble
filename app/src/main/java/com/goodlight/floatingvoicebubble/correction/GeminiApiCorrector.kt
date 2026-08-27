@@ -15,6 +15,7 @@ class GeminiApiCorrector(
     private val model: String,
     private val apiKey: String,
     private val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
+    private val connectionFactory: (URL) -> HttpURLConnection = { url -> url.openConnection() as HttpURLConnection },
 ) : TextCorrector {
     override val id: String = "byok:gemini:$model"
 
@@ -115,7 +116,7 @@ class GeminiApiCorrector(
 
     private fun executeAttempt(target: String, body: JSONObject): HttpResult {
         val connection = try {
-            (URL(target).openConnection() as HttpURLConnection).apply {
+            connectionFactory(URL(target)).apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
