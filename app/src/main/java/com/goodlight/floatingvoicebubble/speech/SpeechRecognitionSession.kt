@@ -35,7 +35,9 @@ class SpeechRecognitionSession(
     private val biasTerms: List<String>,
     private val traceAudioDir: File,
     private val streamingModel: StreamingAsrModel?,
-    private val geminiTranscribeApiKey: String,
+    private val cloudRecognitionEndpoint: String,
+    private val cloudRecognitionModel: String,
+    private val cloudRecognitionApiKey: String,
     private val onPartial: (String) -> Unit,
     private val onState: (String) -> Unit,
     private val onComplete: (RecognitionOutcome) -> Unit,
@@ -48,8 +50,8 @@ class SpeechRecognitionSession(
     private val closed = AtomicBoolean(false)
     private val completionPublished = AtomicBoolean(false)
     private val accumulator = TranscriptAccumulator()
-    private val resolvedGeminiApiKey: String = if (mode == RecognitionMode.GEMINI_TRANSCRIBE) {
-        geminiTranscribeApiKey.trim()
+    private val resolvedCloudApiKey: String = if (mode == RecognitionMode.GEMINI_TRANSCRIBE) {
+        cloudRecognitionApiKey.trim()
     } else {
         ""
     }
@@ -182,7 +184,7 @@ class SpeechRecognitionSession(
             offlineRequired = offlineRequired,
             androidOnDeviceAvailable = onDeviceAvailable,
             sherpaModelAvailable = streamingModel != null,
-            geminiTranscribeConfigured = resolvedGeminiApiKey.isNotBlank(),
+            geminiTranscribeConfigured = resolvedCloudApiKey.isNotBlank(),
         )
 
         recognizer = when (backend) {
@@ -195,7 +197,7 @@ class SpeechRecognitionSession(
             RecognitionBackend.ANDROID_ON_DEVICE -> "android-on-device-segmented-audio-source"
             RecognitionBackend.ANDROID_SYSTEM -> "android-system-segmented-audio-source"
             RecognitionBackend.SHERPA_STREAMING -> "sherpa-nemotron35-${streamingModel!!.chunkMs}ms"
-            RecognitionBackend.GEMINI_TRANSCRIBE -> "gemini-3.5-transcribe-live-verbatim"
+            RecognitionBackend.GEMINI_TRANSCRIBE -> "cloud-gemini-live-${cloudRecognitionModel.trim()}-verbatim"
         }
 
         sherpaEngine = if (backend == RecognitionBackend.SHERPA_STREAMING) {
@@ -227,7 +229,9 @@ class SpeechRecognitionSession(
 
         geminiEngine = if (backend == RecognitionBackend.GEMINI_TRANSCRIBE) {
             GeminiTranscribeStreamingEngine(
-                apiKey = resolvedGeminiApiKey,
+                endpoint = cloudRecognitionEndpoint,
+                model = cloudRecognitionModel,
+                apiKey = resolvedCloudApiKey,
                 biasTerms = biasTerms,
                 onState = { state -> mainHandler.post { if (!delivered.get() && !closed.get()) onState(state) } },
                 onPartial = { partial ->
@@ -320,9 +324,9 @@ class SpeechRecognitionSession(
             if (!delivered.get() && !closed.get()) {
                 when (backend) {
                     RecognitionBackend.GEMINI_TRANSCRIBE -> {
-                        // Gemini explicitly distinguishes speculative interim text from authoritative
-                        // inputTranscription. Never silently promote the interim hypothesis to final.
-                        fail("Gemini音声認識の確定結果が${timeout / 1000}秒以内に届きませんでした。途中表示は確定結果として入力していません。")
+                        // The Gemini Live wire protocol distinguishes speculative interim text from
+                        // authoritative inputTranscription. Never promote interim text to final.
+                        fail("クラウド音声認識の確定結果が${timeout / 1000}秒以内に届きませんでした。途中表示は確定結果として入力していません。")
                     }
                     RecognitionBackend.SHERPA_STREAMING -> {
                         val fallback = latestAlternatives.ifEmpty {
