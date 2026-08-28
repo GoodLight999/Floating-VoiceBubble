@@ -56,7 +56,7 @@ class OpenAiWireBodyTest {
     }
 
     @Test
-    fun zaiUsesBinaryThinkingAndProviderSpecificDeterminism() {
+    fun zai47UsesBinaryThinkingAndProviderSpecificDeterminism() {
         val capture = CaptureConnection()
         OpenAiCompatibleCorrector(
             endpoint = "https://api.z.ai/api/paas/v4/chat/completions",
@@ -71,6 +71,42 @@ class OpenAiWireBodyTest {
         assertEquals("disabled", body.getJSONObject("thinking").getString("type"))
         assertEquals(false, body.getBoolean("do_sample"))
         assertTrue(body.getInt("max_tokens") >= 512)
+        assertFalse(body.has("reasoning_effort"))
+        assertFalse(body.has("reasoning"))
+    }
+
+    @Test
+    fun zai53UsesRequiredThinkingPlusReasoningEffortAndNeverSendsDisabled() {
+        val capture = CaptureConnection()
+        OpenAiCompatibleCorrector(
+            endpoint = "https://api.z.ai/api/paas/v4/chat/completions",
+            model = "GLM-5.3",
+            apiKey = "secret",
+            reasoningEffort = ReasoningEffort.MAX,
+            connectionFactory = { capture },
+        ).correctDetailed(request)
+
+        val body = capture.body()
+        assertEquals("glm-5.3", body.getString("model"))
+        assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
+        assertEquals("max", body.getString("reasoning_effort"))
+        assertEquals(false, body.getBoolean("do_sample"))
+        assertFalse(body.has("reasoning"))
+    }
+
+    @Test
+    fun unknownZaiModelDoesNotSprayReasoningControls() {
+        val capture = CaptureConnection()
+        OpenAiCompatibleCorrector(
+            endpoint = "https://api.z.ai/api/paas/v4/chat/completions",
+            model = "GLM-Future-Unknown",
+            apiKey = "secret",
+            reasoningEffort = ReasoningEffort.HIGH,
+            connectionFactory = { capture },
+        ).correctDetailed(request)
+
+        val body = capture.body()
+        assertFalse(body.has("thinking"))
         assertFalse(body.has("reasoning_effort"))
         assertFalse(body.has("reasoning"))
     }
