@@ -102,7 +102,7 @@ jobs:
           DEBUG_BADGING="$("$BUILD_TOOLS/aapt" dump badging "$DEBUG")"
           printf '%s\n' "$DEBUG_BADGING" | tee apk-badging.txt
           printf '%s\n' "$DEBUG_BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
-          printf '%s\n' "$DEBUG_BADGING" | grep -F "versionCode='2026082801'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "versionCode='26082801'"
           printf '%s\n' "$DEBUG_BADGING" | grep -F "versionName='0.1.0-rc.1'"
           printf '%s\n' "$DEBUG_BADGING" | grep -F "sdkVersion:'33'"
           printf '%s\n' "$DEBUG_BADGING" | grep -F "targetSdkVersion:'36'"
@@ -138,7 +138,7 @@ jobs:
           RELEASE_BADGING="$("$BUILD_TOOLS/aapt" dump badging "$RELEASE")"
           printf '%s\n' "$RELEASE_BADGING" | tee release-apk-badging.txt
           printf '%s\n' "$RELEASE_BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
-          printf '%s\n' "$RELEASE_BADGING" | grep -F "versionCode='2026082801'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "versionCode='26082801'"
           printf '%s\n' "$RELEASE_BADGING" | grep -F "versionName='0.1.0-rc.1'"
           printf '%s\n' "$RELEASE_BADGING" | grep -F "sdkVersion:'33'"
           printf '%s\n' "$RELEASE_BADGING" | grep -F "targetSdkVersion:'36'"
