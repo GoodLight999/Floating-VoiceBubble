@@ -57,50 +57,74 @@ jobs:
             keytool -list -keystore "$FVB_SIGNING_STORE_FILE" -storepass "$FVB_SIGNING_STORE_PASSWORD" -alias "$FVB_SIGNING_KEY_ALIAS" >/dev/null
             echo "Stable APK signer loaded from GitHub Actions secrets."
           else
-            echo "::warning::Stable signing secrets are not configured; this run will use Android's runner-local debug signer and is not a stable-install APK."
+            echo "::warning::Stable signing secrets are not configured; debug uses the runner-local signer and release remains unsigned for later stable signing."
           fi
       - name: Lint, JVM tests, debug and release/R8
         shell: bash
         run: |
           set -o pipefail
           gradle --no-daemon --stacktrace :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease 2>&1 | tee gradle-verify.log
-      - name: Verify APK archive, native ABI/alignment, signature and manifest
+      - name: Verify debug and R8 release candidate
         shell: bash
         run: |
           set -euo pipefail
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          test -s "$APK"
-          unzip -t "$APK" >/dev/null
-          unzip -l "$APK" > apk-contents.txt
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+
+          DEBUG=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$DEBUG"
+          unzip -t "$DEBUG" >/dev/null
+          unzip -l "$DEBUG" > apk-contents.txt
           grep -F "lib/x86_64/libsherpa-onnx-jni.so" apk-contents.txt
           grep -F "lib/arm64-v8a/libsherpa-onnx-jni.so" apk-contents.txt
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$APK" | tee zipalign-16k.log
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK" | tee apksigner.log
-          BADGING="$("$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK")"
-          printf '%s\n' "$BADGING" | tee apk-badging.txt
-          printf '%s\n' "$BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
-          printf '%s\n' "$BADGING" | grep -F "sdkVersion:'33'"
-          printf '%s\n' "$BADGING" | grep -F "targetSdkVersion:'36'"
-          printf '%s\n' "$BADGING" | grep -F "application-label:'Floating VoiceBubble'"
-          printf '%s\n' "$BADGING" | grep -F "application-icon"
-          printf '%s\n' "$BADGING" | grep -F "launchable-activity: name='com.goodlight.floatingvoicebubble.MainActivity'"
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$DEBUG" | tee zipalign-16k.log
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$DEBUG" | tee apksigner.log
+          DEBUG_BADGING="$("$BUILD_TOOLS/aapt" dump badging "$DEBUG")"
+          printf '%s\n' "$DEBUG_BADGING" | tee apk-badging.txt
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "sdkVersion:'33'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "targetSdkVersion:'36'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "application-label:'Floating VoiceBubble'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "application-icon"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "launchable-activity: name='com.goodlight.floatingvoicebubble.MainActivity'"
 
-          ACTUAL_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner.log | head -n1 | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
-          test -n "$ACTUAL_CERT"
-          printf '%s\n' "$ACTUAL_CERT" | tee apk-signing-cert-sha256.txt
+          DEBUG_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner.log | head -n1 | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
+          test -n "$DEBUG_CERT"
+          printf '%s\n' "$DEBUG_CERT" | tee apk-signing-cert-sha256.txt
           if [[ -n "${FVB_SIGNING_CERT_SHA256:-}" ]]; then
             EXPECTED_CERT="$(printf '%s' "$FVB_SIGNING_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
-            test "$ACTUAL_CERT" = "$EXPECTED_CERT"
+            test "$DEBUG_CERT" = "$EXPECTED_CERT"
           fi
 
+          mapfile -t RELEASES < <(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | sort)
+          test "${#RELEASES[@]}" -eq 1
+          RELEASE="${RELEASES[0]}"
+          test -s "$RELEASE"
+          printf '%s\n' "$RELEASE" | tee release-candidate-path.txt
+          unzip -t "$RELEASE" >/dev/null
+          unzip -l "$RELEASE" > release-apk-contents.txt
+          grep -F "lib/x86_64/libsherpa-onnx-jni.so" release-apk-contents.txt
+          grep -F "lib/arm64-v8a/libsherpa-onnx-jni.so" release-apk-contents.txt
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$RELEASE" | tee release-zipalign-16k.log
+          RELEASE_BADGING="$("$BUILD_TOOLS/aapt" dump badging "$RELEASE")"
+          printf '%s\n' "$RELEASE_BADGING" | tee release-apk-badging.txt
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "sdkVersion:'33'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "targetSdkVersion:'36'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "application-label:'Floating VoiceBubble'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "application-icon"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "launchable-activity: name='com.goodlight.floatingvoicebubble.MainActivity'"
+          sha256sum "$RELEASE" | tee release-candidate-sha256.txt
+
           if [[ -f "$FVB_SIGNING_STORE_FILE" ]]; then
-            RELEASE=app/build/outputs/apk/release/app-release.apk
-            test -s "$RELEASE"
-            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$RELEASE" | tee apksigner-release.log
+            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$RELEASE" | tee apksigner-release.log
             RELEASE_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner-release.log | head -n1 | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
-            test "$RELEASE_CERT" = "$ACTUAL_CERT"
+            test "$RELEASE_CERT" = "$DEBUG_CERT"
           else
-            echo "Stable signer absent; release signing identity check skipped." | tee apksigner-release.log
+            if "$BUILD_TOOLS/apksigner" verify "$RELEASE" >/dev/null 2>&1; then
+              echo "Unsigned release candidate unexpectedly verifies as signed" >&2
+              exit 1
+            fi
+            echo "Stable signer absent; R8 release candidate verified structurally and intentionally remains unsigned." | tee apksigner-release.log
           fi
       - name: Bundle official Android APK signing tool for reproducible verification
         shell: bash
@@ -124,6 +148,11 @@ jobs:
             apksigner-release.log
             apk-signing-cert-sha256.txt
             apk-badging.txt
+            release-candidate-path.txt
+            release-candidate-sha256.txt
+            release-apk-contents.txt
+            release-zipalign-16k.log
+            release-apk-badging.txt
             ci-tools/**
             app/build/reports/**
             app/build/test-results/**
@@ -136,12 +165,11 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
-      - name: Upload signed release APK when stable signer is configured
-        if: ${{ hashFiles('.ci/fvb-signing.jks') != '' }}
+      - name: Upload R8 release candidate
         uses: actions/upload-artifact@v4
         with:
-          name: FloatingVoiceBubble-release-${{ github.sha }}
-          path: app/build/outputs/apk/release/app-release.apk
+          name: FloatingVoiceBubble-release-candidate-${{ github.sha }}
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 14
 
