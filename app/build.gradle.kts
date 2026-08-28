@@ -16,7 +16,7 @@ android {
         applicationId = "com.goodlight.floatingvoicebubble"
         minSdk = 33
         targetSdk = 36
-        versionCode = 2026082801
+        versionCode = 26082801
         versionName = "0.1.0-rc.1"
         buildConfigField("String", "SOURCE_SHA", "\"$sourceSha\"")
         manifestPlaceholders["sourceSha"] = sourceSha
