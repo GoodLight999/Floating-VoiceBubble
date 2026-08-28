@@ -259,8 +259,12 @@ class OpenAiCompatibleCorrector(
 
     private fun zaiCorrectionMaxTokens(request: CorrectionRequest, thinkingEnabled: Boolean?): Int {
         val rawChars = request.rawTranscript.length.coerceAtLeast(1)
-        val reasoningHeadroom = if (thinkingEnabled == false) 256 else 1_024
-        val minimum = if (thinkingEnabled == false) 512 else 2_048
+        val thinking = thinkingEnabled != false
+        // Z.AI's own GLM-4.7 thinking example uses a 4096-token output cap. Keeping only 2048 here
+        // made a short correction vulnerable to consuming the whole cap in reasoning_content before
+        // a final content field was produced. This remains a cap, not a requested output length.
+        val reasoningHeadroom = if (thinking) 2_048 else 256
+        val minimum = if (thinking) 4_096 else 512
         return (rawChars * 2L + reasoningHeadroom)
             .coerceIn(minimum.toLong(), MAX_ZAI_CORRECTION_TOKENS.toLong())
             .toInt()
