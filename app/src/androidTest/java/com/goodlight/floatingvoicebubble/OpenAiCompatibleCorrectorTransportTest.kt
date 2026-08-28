@@ -38,7 +38,10 @@ class OpenAiCompatibleCorrectorTransportTest {
         assertEquals("glm-4.7", body.getString("model"))
         assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
         assertFalse(body.getBoolean("do_sample"))
-        assertEquals(2048, body.getInt("max_tokens"))
+        // Thinking-enabled Z.AI requests deliberately reserve enough output budget for
+        // reasoning_content plus the final transcript; 2048 previously allowed reasoning to
+        // consume the whole cap and return no final content.
+        assertEquals(4096, body.getInt("max_tokens"))
     }
 
     @Test
