@@ -76,6 +76,23 @@ class OpenAiWireBodyTest {
     }
 
     @Test
+    fun zai47ProviderDefaultLeavesThinkingOmittedButReservesThinkingHeadroom() {
+        val capture = CaptureConnection()
+        OpenAiCompatibleCorrector(
+            endpoint = "https://api.z.ai/api/paas/v4/chat/completions",
+            model = "GLM-4.7",
+            apiKey = "secret",
+            reasoningEffort = ReasoningEffort.DEFAULT,
+            connectionFactory = { capture },
+        ).correctDetailed(request)
+
+        val body = capture.body()
+        assertFalse(body.has("thinking"))
+        assertFalse(body.has("reasoning_effort"))
+        assertTrue(body.getInt("max_tokens") >= 4096)
+    }
+
+    @Test
     fun zai53UsesRequiredThinkingPlusReasoningEffortAndNeverSendsDisabled() {
         val capture = CaptureConnection()
         OpenAiCompatibleCorrector(
@@ -91,6 +108,7 @@ class OpenAiWireBodyTest {
         assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
         assertEquals("max", body.getString("reasoning_effort"))
         assertEquals(false, body.getBoolean("do_sample"))
+        assertTrue(body.getInt("max_tokens") >= 4096)
         assertFalse(body.has("reasoning"))
     }
 
