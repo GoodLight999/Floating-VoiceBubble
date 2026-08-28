@@ -42,10 +42,10 @@ class OpenAiCompatibleCorrector(
         val timings = mutableListOf<CorrectionAttemptTiming>()
         var attempts = 1
         var result = executeAttempt(body, options, attempts, timings)
+        val explicitReasoning = reasoningEffort != ReasoningEffort.DEFAULT && hasReasoningField(body)
+
         if (result.status in listOf(400, 422) && optionalParameterRejected(result.text)) {
-            val explicitReasoning = reasoningEffort != ReasoningEffort.DEFAULT &&
-                (body.has("reasoning_effort") || body.has("reasoning") || body.has("thinking"))
-            if (explicitReasoning) {
+            if (explicitReasoning && reasoningParameterRejected(result.text)) {
                 throw callFailure(
                     message = "選択した推論設定はこのモデル/APIで受け付けられません: HTTP ${result.status} ${compact(result.text)}",
                     stage = "http-unsupported-reasoning",
@@ -56,10 +56,29 @@ class OpenAiCompatibleCorrector(
                 )
             }
 
-            // Provider-specific non-reasoning conveniences must not break the portable request.
-            body.remove("do_sample")
-            attempts += 1
-            result = executeAttempt(body, options.copy(sendEnglishAcceptLanguage = false), attempts, timings)
+            // Drop only provider conveniences whose removal does not change the user's requested
+            // reasoning semantics. The second request retains reasoning_effort/reasoning/thinking.
+            val canRetryPortableConveniences = body.has("do_sample") || options.sendEnglishAcceptLanguage
+            if (canRetryPortableConveniences) {
+                body.remove("do_sample")
+                attempts += 1
+                result = executeAttempt(body, options.copy(sendEnglishAcceptLanguage = false), attempts, timings)
+            }
+        }
+
+        if (
+            result.status in listOf(400, 422) &&
+            explicitReasoning &&
+            reasoningParameterRejected(result.text)
+        ) {
+            throw callFailure(
+                message = "選択した推論設定はこのモデル/APIで受け付けられません: HTTP ${result.status} ${compact(result.text)}",
+                stage = "http-unsupported-reasoning",
+                attempts = attempts,
+                status = result.status,
+                responsePresent = result.text.isNotBlank(),
+                timings = timings,
+            )
         }
         if (result.status !in 200..299) {
             throw callFailure(
@@ -216,10 +235,26 @@ class OpenAiCompatibleCorrector(
         attemptTimings = timings.toList(),
     )
 
+    private fun hasReasoningField(body: JSONObject): Boolean =
+        body.has("reasoning_effort") || body.has("reasoning") || body.has("thinking")
+
+    private fun reasoningParameterRejected(value: String): Boolean {
+        val lower = value.lowercase()
+        return listOf("reasoning_effort", "reasoning.effort", "thinking.type", "thinking")
+            .any(lower::contains)
+    }
+
     private fun optionalParameterRejected(value: String): Boolean {
         val lower = value.lowercase()
-        return listOf("reasoning_effort", "reasoning", "thinking", "do_sample", "unknown field", "unsupported parameter")
-            .any(lower::contains)
+        return listOf(
+            "reasoning_effort",
+            "reasoning",
+            "thinking",
+            "do_sample",
+            "unknown field",
+            "unsupported parameter",
+            "unrecognized field",
+        ).any(lower::contains)
     }
 
     private fun zaiCorrectionMaxTokens(request: CorrectionRequest, thinkingEnabled: Boolean?): Int {
