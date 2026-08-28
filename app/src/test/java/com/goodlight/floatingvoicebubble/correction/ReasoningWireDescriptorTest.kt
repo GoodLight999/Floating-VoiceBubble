@@ -32,6 +32,14 @@ class ReasoningWireDescriptorTest {
             ),
         )
         assertEquals(
+            "thinking.type=enabled,reasoning_effort=max",
+            ReasoningWireDescriptor.describe(
+                "https://api.z.ai/api/paas/v4/chat/completions",
+                "glm-5.3",
+                ReasoningEffort.MAX,
+            ),
+        )
+        assertEquals(
             "thinking.type=adaptive,output_config.effort=xhigh",
             ReasoningWireDescriptor.describe(
                 "https://api.anthropic.com/v1/messages",
@@ -65,6 +73,14 @@ class ReasoningWireDescriptorTest {
                 "https://api.z.ai/api/paas/v4/chat/completions",
                 "glm-4.7",
                 ReasoningEffort.DEFAULT,
+            ),
+        )
+        assertEquals(
+            "optional-reasoning=<omitted:model-default>",
+            ReasoningWireDescriptor.describe(
+                "https://api.z.ai/api/paas/v4/chat/completions",
+                "glm-future-unknown",
+                ReasoningEffort.HIGH,
             ),
         )
         assertEquals(
