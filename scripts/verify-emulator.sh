@@ -4,13 +4,17 @@ set -euo pipefail
 APP_ID="com.goodlight.floatingvoicebubble"
 ACTIVITY="$APP_ID/.MainActivity"
 ACCESSIBILITY="$APP_ID/.accessibility.VoiceBubbleAccessibilityService"
-APK="app/build/outputs/apk/debug/app-debug.apk"
+DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+RELEASE_DIR="app/build/outputs/apk/release"
 GRADLE_CMD="${GRADLE_CMD:-gradle}"
 API_LEVEL="unknown"
 REPORT_ROOT="app/build/reports/androidTests/emulator-diagnostics"
+EVIDENCE_DIR="app/build/reports/androidTests/ui-evidence"
 LOG_FILE="$REPORT_ROOT/emulator-verification.log"
+BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+R8_TEST_APK="${RUNNER_TEMP:-/tmp}/fvb-r8-release-test-signed.apk"
 
-mkdir -p "$REPORT_ROOT"
+mkdir -p "$REPORT_ROOT" "$EVIDENCE_DIR"
 : > "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -27,49 +31,39 @@ stage() {
   printf '\n===== %s =====\n' "$1"
 }
 
-stage "build debug + androidTest"
-$GRADLE_CMD --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
+launch_main() {
+  local output
+  output="$(adb shell am start -W -n "$ACTIVITY")"
+  printf '%s\n' "$output"
+  printf '%s\n' "$output" | grep -q "Status: ok"
+  local pid
+  pid="$(adb shell pidof "$APP_ID" | tr -d '\r')"
+  test -n "$pid"
+  echo "PID=$pid"
+}
 
-test -s "$APK"
-unzip -t "$APK" >/dev/null
+bind_accessibility() {
+  adb shell settings put secure enabled_accessibility_services "$ACCESSIBILITY"
+  adb shell settings put secure accessibility_enabled 1
+  sleep 2
+  adb shell dumpsys accessibility | tee "$REPORT_ROOT/accessibility-bound-api${API_LEVEL}.txt" | grep -F "$APP_ID" >/dev/null
+}
 
-stage "boot + install"
-adb wait-for-device
-API_LEVEL="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
-echo "API_LEVEL=$API_LEVEL"
-adb install -r -t "$APK" >/dev/null
-adb shell pm grant "$APP_ID" android.permission.RECORD_AUDIO || true
+capture_ui() {
+  local stem="$1"
+  local remote_xml="/sdcard/${stem}.xml"
+  local screenshot="$EVIDENCE_DIR/${stem}.png"
+  local ui_xml="$EVIDENCE_DIR/${stem}.xml"
+  adb exec-out screencap -p > "$screenshot"
+  test -s "$screenshot"
+  adb shell uiautomator dump "$remote_xml" >/dev/null
+  adb pull "$remote_xml" "$ui_xml" >/dev/null
+  test -s "$ui_xml"
+}
 
-stage "launch main activity"
-START_OUTPUT="$(adb shell am start -W -n "$ACTIVITY")"
-printf '%s\n' "$START_OUTPUT"
-printf '%s\n' "$START_OUTPUT" | grep -q "Status: ok"
-
-PID="$(adb shell pidof "$APP_ID" | tr -d '\r')"
-test -n "$PID"
-echo "PID=$PID"
-
-stage "bind accessibility service"
-adb shell settings put secure enabled_accessibility_services "$ACCESSIBILITY"
-adb shell settings put secure accessibility_enabled 1
-sleep 2
-adb shell dumpsys accessibility | tee "$REPORT_ROOT/accessibility-bound-api${API_LEVEL}.txt" | grep -F "$APP_ID" >/dev/null
-
-stage "capture launcher UI contract"
-EVIDENCE_TMP="${RUNNER_TEMP:-/tmp}/fvb-ui-evidence-api${API_LEVEL}"
-EVIDENCE_DIR="app/build/reports/androidTests/ui-evidence"
-mkdir -p "$EVIDENCE_TMP" "$EVIDENCE_DIR"
-SCREENSHOT="$EVIDENCE_TMP/home-api${API_LEVEL}.png"
-UI_XML="$EVIDENCE_TMP/home-api${API_LEVEL}.xml"
-
-adb exec-out screencap -p > "$SCREENSHOT"
-test -s "$SCREENSHOT"
-adb shell uiautomator dump /sdcard/fvb-home.xml >/dev/null
-adb pull /sdcard/fvb-home.xml "$UI_XML" >/dev/null
-test -s "$UI_XML"
-cp -f "$SCREENSHOT" "$UI_XML" "$EVIDENCE_DIR/"
-
-python3 - "$UI_XML" <<'PY'
+verify_home_contract() {
+  local ui_xml="$1"
+  python3 - "$ui_xml" <<'PY'
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -83,7 +77,7 @@ required = {
     "聞き取り間違いを直す強さ": False,
     "音声認識": False,
 }
-forbidden = ["安全ガード", "フィラー", "簡単設定"]
+forbidden = ["安全ガード", "フィラー", "簡単設定", "ASR"]
 
 reasoning_bounds = []
 all_bounds = []
@@ -95,9 +89,9 @@ for node in root.iter():
         if label in text:
             required[label] = True
     bounds = node.attrib.get("bounds", "")
-    m = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-    if m:
-        parsed = tuple(map(int, m.groups()))
+    match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+    if match:
+        parsed = tuple(map(int, match.groups()))
         all_bounds.append(parsed)
         if "推論の深さ" in text:
             reasoning_bounds.append(parsed)
@@ -122,6 +116,66 @@ if reasoning_top >= height * 0.50:
     )
 print(f"launcher UI contract PASS: reasoning y={reasoning_top}, screenHeight={height}")
 PY
+}
+
+stage "build debug + androidTest + R8 release"
+$GRADLE_CMD --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease
+
+test -s "$DEBUG_APK"
+unzip -t "$DEBUG_APK" >/dev/null
+mapfile -t RELEASE_APKS < <(find "$RELEASE_DIR" -maxdepth 1 -type f -name '*.apk' | sort)
+test "${#RELEASE_APKS[@]}" -eq 1
+RELEASE_APK="${RELEASE_APKS[0]}"
+test -s "$RELEASE_APK"
+unzip -t "$RELEASE_APK" >/dev/null
+sha256sum "$RELEASE_APK" | tee "$REPORT_ROOT/r8-release-unsigned-sha256.txt"
+
+stage "test-sign R8 release with runner debug identity"
+DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
+test -s "$DEBUG_KEYSTORE"
+"$BUILD_TOOLS/apksigner" sign \
+  --ks "$DEBUG_KEYSTORE" \
+  --ks-key-alias androiddebugkey \
+  --ks-pass pass:android \
+  --key-pass pass:android \
+  --out "$R8_TEST_APK" \
+  "$RELEASE_APK"
+"$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$R8_TEST_APK" | tee "$REPORT_ROOT/r8-release-test-signature.txt"
+"$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$R8_TEST_APK" > "$REPORT_ROOT/r8-release-test-zipalign.txt"
+sha256sum "$R8_TEST_APK" | tee "$REPORT_ROOT/r8-release-test-signed-sha256.txt"
+
+stage "boot"
+adb wait-for-device
+API_LEVEL="$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
+echo "API_LEVEL=$API_LEVEL"
+
+stage "install and launch R8 release"
+adb install -r "$R8_TEST_APK" >/dev/null
+adb shell pm grant "$APP_ID" android.permission.RECORD_AUDIO || true
+adb shell cmd uimode night no >/dev/null 2>&1 || true
+adb shell am force-stop "$APP_ID" || true
+launch_main
+bind_accessibility
+capture_ui "release-home-light-api${API_LEVEL}"
+verify_home_contract "$EVIDENCE_DIR/release-home-light-api${API_LEVEL}.xml"
+
+stage "capture R8 release dark mode"
+adb shell cmd uimode night yes >/dev/null 2>&1 || true
+adb shell am force-stop "$APP_ID" || true
+launch_main
+sleep 1
+capture_ui "release-home-dark-api${API_LEVEL}"
+verify_home_contract "$EVIDENCE_DIR/release-home-dark-api${API_LEVEL}.xml"
+
+stage "install debug for instrumentation"
+adb shell cmd uimode night no >/dev/null 2>&1 || true
+adb shell am force-stop "$APP_ID" || true
+adb install -r -t "$DEBUG_APK" >/dev/null
+adb shell pm grant "$APP_ID" android.permission.RECORD_AUDIO || true
+launch_main
+bind_accessibility
+capture_ui "home-api${API_LEVEL}"
+verify_home_contract "$EVIDENCE_DIR/home-api${API_LEVEL}.xml"
 
 stage "connected instrumentation"
 set +e
