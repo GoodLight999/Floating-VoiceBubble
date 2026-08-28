@@ -32,10 +32,7 @@ object ReasoningCapabilities {
                 ),
                 note = "OpenRouterのreasoning.effortへ送信します。モデル一覧を取得済みなら、そのモデルが返した対応値だけを表示します。",
             )
-            host == "api.z.ai" -> ReasoningCapability(
-                choices = listOf(ReasoningEffort.DEFAULT, ReasoningEffort.NONE, ReasoningEffort.HIGH),
-                note = "Z.AIの公開APIは思考のON/OFFです。段階的な深さは表示しません。",
-            )
+            host == "api.z.ai" -> zaiCapability(normalizedModel)
             host == "api.openai.com" || host.endsWith(".openai.azure.com") -> openAiCapability(normalizedModel)
             host == "api.anthropic.com" || host.endsWith(".anthropic.com") -> anthropicCapability(normalizedModel)
             host == "generativelanguage.googleapis.com" -> geminiCapability(normalizedModel)
@@ -71,11 +68,23 @@ object ReasoningCapabilities {
         val cleanModel = model.lowercase(Locale.ROOT).removePrefix("models/")
 
         if (endpointHost == "api.z.ai") {
-            return when (normalized) {
-                ReasoningEffort.DEFAULT -> "モデル既定"
-                ReasoningEffort.NONE -> "思考OFF"
-                else -> "思考ON"
+            if (isZaiEffortModel(cleanModel)) {
+                return when (normalized) {
+                    ReasoningEffort.DEFAULT -> "モデル既定"
+                    ReasoningEffort.LOW -> "低"
+                    ReasoningEffort.HIGH -> "高"
+                    ReasoningEffort.MAX -> "max"
+                    else -> "モデル既定"
+                }
             }
+            if (isZaiBinaryThinkingModel(cleanModel)) {
+                return when (normalized) {
+                    ReasoningEffort.DEFAULT -> "モデル既定"
+                    ReasoningEffort.NONE -> "思考OFF"
+                    else -> "思考ON"
+                }
+            }
+            return "モデル既定"
         }
 
         // Gemini 2.5 exposes a numeric thinkingBudget, not named thinking levels. Showing the exact
@@ -120,13 +129,40 @@ object ReasoningCapabilities {
         }
     }
 
-    /** Z.AI documents thinking.type as binary. DEFAULT intentionally omits it. */
+    /**
+     * Z.AI thinking.type. GLM-4.5/4.6/4.7 and GLM-5/5.1 expose binary ON/OFF.
+     * GLM-5.3 requires thinking when an explicit effort is selected, so it can never emit disabled.
+     * Unknown Z.AI models receive no guessed thinking control.
+     */
     fun zaiThinking(endpoint: String, model: String, requested: ReasoningEffort): Boolean? {
         if (host(endpoint) != "api.z.ai") return null
+        val cleanModel = model.lowercase(Locale.ROOT).removePrefix("models/")
+        val normalized = normalize(endpoint, model, requested)
+        return when {
+            isZaiEffortModel(cleanModel) -> when (normalized) {
+                ReasoningEffort.LOW, ReasoningEffort.HIGH, ReasoningEffort.MAX -> true
+                else -> null
+            }
+            isZaiBinaryThinkingModel(cleanModel) -> when (normalized) {
+                ReasoningEffort.DEFAULT -> null
+                ReasoningEffort.NONE -> false
+                ReasoningEffort.HIGH -> true
+                else -> null
+            }
+            else -> null
+        }
+    }
+
+    /** Z.AI GLM-5.3 reasoning_effort. Other Z.AI generations do not receive this field. */
+    fun zaiReasoningEffort(endpoint: String, model: String, requested: ReasoningEffort): String? {
+        if (host(endpoint) != "api.z.ai") return null
+        val cleanModel = model.lowercase(Locale.ROOT).removePrefix("models/")
+        if (!isZaiEffortModel(cleanModel)) return null
         return when (normalize(endpoint, model, requested)) {
-            ReasoningEffort.DEFAULT -> null
-            ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> false
-            ReasoningEffort.MEDIUM, ReasoningEffort.HIGH, ReasoningEffort.XHIGH, ReasoningEffort.MAX -> true
+            ReasoningEffort.LOW -> "low"
+            ReasoningEffort.HIGH -> "high"
+            ReasoningEffort.MAX -> "max"
+            else -> null
         }
     }
 
@@ -214,6 +250,27 @@ object ReasoningCapabilities {
             "このOpenAIモデルの推論深度対応を確定できないため、モデル既定だけを使います。",
         )
     }
+
+    private fun zaiCapability(model: String): ReasoningCapability = when {
+        isZaiEffortModel(model) -> ReasoningCapability(
+            choices = listOf(ReasoningEffort.DEFAULT, ReasoningEffort.LOW, ReasoningEffort.HIGH, ReasoningEffort.MAX),
+            note = "GLM-5.3はthinkingを無効化できません。公開APIのreasoning_effort（low/high/max）だけを表示します。",
+        )
+        isZaiBinaryThinkingModel(model) -> ReasoningCapability(
+            choices = listOf(ReasoningEffort.DEFAULT, ReasoningEffort.NONE, ReasoningEffort.HIGH),
+            note = "このZ.AIモデルは公開APIのthinking ON/OFFだけを表示します。段階的な深さは作りません。",
+        )
+        else -> ReasoningCapability(
+            choices = listOf(ReasoningEffort.DEFAULT),
+            note = "このZ.AIモデルのthinking仕様を確定できないため、モデル既定だけを使います。",
+        )
+    }
+
+    private fun isZaiEffortModel(model: String): Boolean = model.startsWith("glm-5.3")
+
+    private fun isZaiBinaryThinkingModel(model: String): Boolean =
+        model == "glm-5" || model.startsWith("glm-5-") || model.startsWith("glm-5.1") ||
+            model.startsWith("glm-4.7") || model.startsWith("glm-4.6") || model.startsWith("glm-4.5")
 
     private fun anthropicCapability(model: String): ReasoningCapability = when {
         supportsAnthropicAdaptive(model) -> {
