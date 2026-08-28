@@ -19,6 +19,7 @@ android {
         versionCode = 2026082801
         versionName = "0.1.0-rc.1"
         buildConfigField("String", "SOURCE_SHA", "\"$sourceSha\"")
+        manifestPlaceholders["sourceSha"] = sourceSha
 
         // LiteRT-LM 0.14.0 provides the Android runtime used by Gemma on these two
         // modern ABIs. Shipping sherpa-only 32-bit ABIs would advertise devices on
