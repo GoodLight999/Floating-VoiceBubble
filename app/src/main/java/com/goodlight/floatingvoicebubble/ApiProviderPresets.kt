@@ -21,6 +21,10 @@ object ApiProviderPresets {
     /**
      * Built-in text-correction shortcuts. Endpoint values are deliberately full generation/base
      * URLs accepted by ByokEndpointResolver; selecting one does not lock or hide the URL field.
+     *
+     * Z.AI documents Coding Plan quota as restricted to its supported coding tools/products. The
+     * preset remains available for accurate endpoint entry and diagnostics, but its label must not
+     * imply that an arbitrary Android app is entitled to Coding Plan quota.
      */
     val correction: List<CorrectionApiPreset> = listOf(
         CorrectionApiPreset("openai", "OpenAI", "https://api.openai.com/v1/chat/completions"),
@@ -29,7 +33,11 @@ object ApiProviderPresets {
         CorrectionApiPreset("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta"),
         CorrectionApiPreset("deepseek", "DeepSeek", "https://api.deepseek.com/chat/completions"),
         CorrectionApiPreset("zai", "Z.AI", "https://api.z.ai/api/paas/v4/chat/completions"),
-        CorrectionApiPreset("zai-coding", "Z.AI Coding Plan", "https://api.z.ai/api/coding/paas/v4/chat/completions"),
+        CorrectionApiPreset(
+            "zai-coding",
+            "Z.AI Coding Plan（対応ツール向け）",
+            "https://api.z.ai/api/coding/paas/v4/chat/completions",
+        ),
         CorrectionApiPreset("groq", "Groq", "https://api.groq.com/openai/v1/chat/completions"),
         CorrectionApiPreset("mistral", "Mistral", "https://api.mistral.ai/v1/chat/completions"),
         CorrectionApiPreset("xai", "xAI", "https://api.x.ai/v1/chat/completions"),
