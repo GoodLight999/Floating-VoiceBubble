@@ -12,7 +12,12 @@ REPORT_ROOT="app/build/reports/androidTests/emulator-diagnostics"
 EVIDENCE_DIR="app/build/reports/androidTests/ui-evidence"
 LOG_FILE="$REPORT_ROOT/emulator-verification.log"
 BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
-R8_TEST_APK="${RUNNER_TEMP:-/tmp}/fvb-r8-release-test-signed.apk"
+TEMP_ROOT="${RUNNER_TEMP:-/tmp}"
+R8_ALIGNED_APK="$TEMP_ROOT/fvb-r8-release-aligned.apk"
+R8_TEST_APK="$TEMP_ROOT/fvb-r8-release-test-signed.apk"
+R8_TEST_KEYSTORE="$TEMP_ROOT/fvb-r8-runtime-test.jks"
+R8_TEST_ALIAS="fvb-runtime-test"
+R8_TEST_PASSWORD="fvb-runtime-test"
 
 mkdir -p "$REPORT_ROOT" "$EVIDENCE_DIR"
 : > "$LOG_FILE"
@@ -130,16 +135,28 @@ test -s "$RELEASE_APK"
 unzip -t "$RELEASE_APK" >/dev/null
 sha256sum "$RELEASE_APK" | tee "$REPORT_ROOT/r8-release-unsigned-sha256.txt"
 
-stage "test-sign R8 release with runner debug identity"
-DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
-test -s "$DEBUG_KEYSTORE"
+stage "align and test-sign R8 release with ephemeral CI identity"
+rm -f "$R8_ALIGNED_APK" "$R8_TEST_APK" "$R8_TEST_KEYSTORE"
+"$BUILD_TOOLS/zipalign" -P 16 -f -v 4 "$RELEASE_APK" "$R8_ALIGNED_APK" > "$REPORT_ROOT/r8-release-pre-sign-zipalign.txt"
+"$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$R8_ALIGNED_APK" >> "$REPORT_ROOT/r8-release-pre-sign-zipalign.txt"
+keytool -genkeypair \
+  -keystore "$R8_TEST_KEYSTORE" \
+  -storepass "$R8_TEST_PASSWORD" \
+  -keypass "$R8_TEST_PASSWORD" \
+  -alias "$R8_TEST_ALIAS" \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 2 \
+  -dname "CN=Floating VoiceBubble CI Runtime Test,O=GoodLight999,C=JP" \
+  -noprompt >/dev/null 2>&1
+chmod 600 "$R8_TEST_KEYSTORE"
 "$BUILD_TOOLS/apksigner" sign \
-  --ks "$DEBUG_KEYSTORE" \
-  --ks-key-alias androiddebugkey \
-  --ks-pass pass:android \
-  --key-pass pass:android \
+  --ks "$R8_TEST_KEYSTORE" \
+  --ks-key-alias "$R8_TEST_ALIAS" \
+  --ks-pass "pass:$R8_TEST_PASSWORD" \
+  --key-pass "pass:$R8_TEST_PASSWORD" \
   --out "$R8_TEST_APK" \
-  "$RELEASE_APK"
+  "$R8_ALIGNED_APK"
 "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$R8_TEST_APK" | tee "$REPORT_ROOT/r8-release-test-signature.txt"
 "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$R8_TEST_APK" > "$REPORT_ROOT/r8-release-test-zipalign.txt"
 sha256sum "$R8_TEST_APK" | tee "$REPORT_ROOT/r8-release-test-signed-sha256.txt"
