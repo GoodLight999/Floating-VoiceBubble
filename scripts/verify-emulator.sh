@@ -187,7 +187,8 @@ verify_home_contract "$EVIDENCE_DIR/release-home-dark-api${API_LEVEL}.xml"
 stage "install debug for instrumentation"
 adb shell cmd uimode night no >/dev/null 2>&1 || true
 adb shell am force-stop "$APP_ID" || true
-adb install -r -t "$DEBUG_APK" >/dev/null
+adb uninstall "$APP_ID" >/dev/null 2>&1 || true
+adb install -t "$DEBUG_APK" >/dev/null
 adb shell pm grant "$APP_ID" android.permission.RECORD_AUDIO || true
 launch_main
 bind_accessibility
