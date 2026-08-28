@@ -108,7 +108,7 @@ class CorrectionQualityContractTest {
         assertTrue(trapSystem.contains("文脈にだけ存在する事実・主張を出力へ追加してはいけない"))
         assertTrue(trapUser.contains("来週の予算は100万円"))
         assertTrue(trapUser.contains("<SURROUNDING_CONTEXT_FOR_DISAMBIGUATION_ONLY>"))
-        assertFalse(trap.request.rawTranscript.contains("100万円"))
+        assertFalse(trap.rawTranscript.contains("100万円"))
     }
 
     @Test
