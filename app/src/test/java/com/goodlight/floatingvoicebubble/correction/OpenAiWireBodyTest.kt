@@ -93,6 +93,33 @@ class OpenAiWireBodyTest {
     }
 
     @Test
+    fun zaiCodingPlan45AirUsesDedicatedEndpointSemanticsAndBinaryThinking() {
+        val capture = CaptureConnection()
+        val endpoint = ByokEndpointResolver.resolve("https://api.z.ai/api/coding/paas/v4")
+        assertEquals(
+            "https://api.z.ai/api/coding/paas/v4/chat/completions",
+            endpoint.generationUrl,
+        )
+        assertEquals("https://api.z.ai/api/coding/paas/v4/models", endpoint.modelsUrl)
+
+        OpenAiCompatibleCorrector(
+            endpoint = endpoint.generationUrl,
+            model = "GLM-4.5-air",
+            apiKey = "secret",
+            reasoningEffort = ReasoningEffort.HIGH,
+            connectionFactory = { capture },
+        ).correctDetailed(request)
+
+        val body = capture.body()
+        assertEquals("glm-4.5-air", body.getString("model"))
+        assertEquals("enabled", body.getJSONObject("thinking").getString("type"))
+        assertEquals(false, body.getBoolean("do_sample"))
+        assertTrue(body.getInt("max_tokens") >= 4096)
+        assertFalse(body.has("reasoning_effort"))
+        assertFalse(body.has("reasoning"))
+    }
+
+    @Test
     fun zai53UsesRequiredThinkingPlusReasoningEffortAndNeverSendsDisabled() {
         val capture = CaptureConnection()
         OpenAiCompatibleCorrector(
