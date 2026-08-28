@@ -75,11 +75,16 @@ jobs:
           else
             echo "::warning::Stable signing secrets are not configured; debug uses the runner-local signer and release remains unsigned for later stable signing."
           fi
-      - name: Lint, JVM tests, debug and release/R8
+      - name: Lint, JVM tests, androidTest compile, debug and release/R8
         shell: bash
         run: |
           set -o pipefail
-          gradle --no-daemon --stacktrace :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease 2>&1 | tee gradle-verify.log
+          gradle --no-daemon --stacktrace \
+            :app:lintDebug \
+            :app:testDebugUnitTest \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest \
+            :app:assembleRelease 2>&1 | tee gradle-verify.log
       - name: Verify debug and R8 release candidate
         shell: bash
         run: |
@@ -97,6 +102,8 @@ jobs:
           DEBUG_BADGING="$("$BUILD_TOOLS/aapt" dump badging "$DEBUG")"
           printf '%s\n' "$DEBUG_BADGING" | tee apk-badging.txt
           printf '%s\n' "$DEBUG_BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "versionCode='2026082801'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "versionName='0.1.0-rc.1'"
           printf '%s\n' "$DEBUG_BADGING" | grep -F "sdkVersion:'33'"
           printf '%s\n' "$DEBUG_BADGING" | grep -F "targetSdkVersion:'36'"
           printf '%s\n' "$DEBUG_BADGING" | grep -F "application-label:'Floating VoiceBubble'"
@@ -120,15 +127,28 @@ jobs:
           unzip -l "$RELEASE" > release-apk-contents.txt
           grep -F "lib/x86_64/libsherpa-onnx-jni.so" release-apk-contents.txt
           grep -F "lib/arm64-v8a/libsherpa-onnx-jni.so" release-apk-contents.txt
+
+          COROUTINES_ANDROID="$(unzip -p "$RELEASE" META-INF/kotlinx_coroutines_android.version | tr -d '\r\n')"
+          COROUTINES_CORE="$(unzip -p "$RELEASE" META-INF/kotlinx_coroutines_core.version | tr -d '\r\n')"
+          printf 'android=%s\ncore=%s\n' "$COROUTINES_ANDROID" "$COROUTINES_CORE" | tee release-coroutines-versions.txt
+          test "$COROUTINES_ANDROID" = "1.11.0"
+          test "$COROUTINES_CORE" = "1.11.0"
+
           "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$RELEASE" | tee release-zipalign-16k.log
           RELEASE_BADGING="$("$BUILD_TOOLS/aapt" dump badging "$RELEASE")"
           printf '%s\n' "$RELEASE_BADGING" | tee release-apk-badging.txt
           printf '%s\n' "$RELEASE_BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "versionCode='2026082801'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "versionName='0.1.0-rc.1'"
           printf '%s\n' "$RELEASE_BADGING" | grep -F "sdkVersion:'33'"
           printf '%s\n' "$RELEASE_BADGING" | grep -F "targetSdkVersion:'36'"
           printf '%s\n' "$RELEASE_BADGING" | grep -F "application-label:'Floating VoiceBubble'"
           printf '%s\n' "$RELEASE_BADGING" | grep -F "application-icon"
           printf '%s\n' "$RELEASE_BADGING" | grep -F "launchable-activity: name='com.goodlight.floatingvoicebubble.MainActivity'"
+
+          "$BUILD_TOOLS/aapt" dump xmltree "$RELEASE" AndroidManifest.xml | tee release-manifest.xmltree.txt
+          grep -F "com.goodlight.floatingvoicebubble.SOURCE_SHA" release-manifest.xmltree.txt
+          grep -F "$FVB_CANDIDATE_SHA" release-manifest.xmltree.txt
           sha256sum "$RELEASE" | tee release-candidate-sha256.txt
 
           if [[ -f "$FVB_SIGNING_STORE_FILE" ]]; then
@@ -168,6 +188,8 @@ jobs:
             release-candidate-path.txt
             release-candidate-sha256.txt
             release-apk-contents.txt
+            release-coroutines-versions.txt
+            release-manifest.xmltree.txt
             release-zipalign-16k.log
             release-apk-badging.txt
             ci-tools/**
@@ -229,7 +251,7 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -no-metrics
           disable-animations: true
           script: GRADLE_CMD=gradle bash scripts/verify-emulator.sh
       - name: Upload emulator reports
