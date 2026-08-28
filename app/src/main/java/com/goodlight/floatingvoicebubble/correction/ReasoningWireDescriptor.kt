@@ -25,11 +25,14 @@ object ReasoningWireDescriptor {
                     ?.let { "reasoning_effort=$it" }
                     ?: "optional-reasoning=<omitted>"
 
-            host == "api.z.ai" -> when (ReasoningCapabilities.zaiThinking(endpoint, model, normalized)) {
-                true -> "thinking.type=enabled"
-                false -> "thinking.type=disabled"
-                null -> "optional-reasoning=<omitted>"
-            }
+            host == "api.z.ai" -> buildList {
+                ReasoningCapabilities.zaiThinking(endpoint, model, normalized)?.let { enabled ->
+                    add("thinking.type=${if (enabled) "enabled" else "disabled"}")
+                }
+                ReasoningCapabilities.zaiReasoningEffort(endpoint, model, normalized)?.let { effort ->
+                    add("reasoning_effort=$effort")
+                }
+            }.joinToString(",").ifBlank { "optional-reasoning=<omitted>" }
 
             host == "api.anthropic.com" || host.endsWith(".anthropic.com") -> {
                 val type = ReasoningCapabilities.anthropicThinkingType(endpoint, model, normalized)
