@@ -53,12 +53,16 @@ Primary sources:
 
 - https://docs.z.ai/guides/capabilities/thinking-mode
 - https://z.ai/blog/glm-5.3
+- https://docs.z.ai/devpack/faq
+- https://docs.z.ai/devpack/overview
 
 Findings used by Floating VoiceBubble:
 
 - GLM-4.7 supports turn-level thinking control through `thinking.type=enabled|disabled`; the general Z.AI thinking documentation also describes disabling thinking for GLM-5.2/5.1/5 and the GLM-4.7 series.
 - **GLM-5.3 changes this contract:** thinking cannot be disabled. Its API accepts `thinking.type=enabled` and `reasoning_effort=low|high|max`, with `max` as the documented default.
 - A client that carries `thinking.type=disabled` forward to GLM-5.3 will fail; Z.AI explicitly documents migration to enabled thinking plus a lower effort when latency is desired.
+- The GLM Coding Plan uses a dedicated base URL, `https://api.z.ai/api/coding/paas/v4`, rather than the general API URL. Its current FAQ lists GLM-5.1, GLM-5-Turbo, GLM-4.7, and GLM-4.5-Air as Coding Plan models.
+- Z.AI also states that Coding Plan quota is restricted to officially supported tools/products. A request from an arbitrary Android application can therefore be rejected or billed outside Coding Plan even when the endpoint, key, and model are syntactically valid. Floating VoiceBubble must not diagnose that provider-side entitlement restriction as an ASR/correction bug or promise that Coding Plan quota is available to this app.
 
 Implementation contract:
 
@@ -66,6 +70,7 @@ Implementation contract:
 - GLM-5.3 family: provider default / low / high / max; explicit low/high/max sends `thinking.type=enabled` plus the matching `reasoning_effort`.
 - GLM-5.3 never exposes an OFF choice.
 - Unknown future Z.AI model IDs use provider/model default only rather than inheriting either historical contract by guess.
+- The Coding Plan preset is labelled as tool-restricted. The app may still normalize and diagnose the documented endpoint, but a Coding Plan entitlement failure remains a provider/account restriction rather than something the client should bypass.
 
 ## Anthropic native Messages API
 
