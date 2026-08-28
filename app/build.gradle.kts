@@ -3,6 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val sourceSha = providers.environmentVariable("FVB_CANDIDATE_SHA").orNull
+    ?.trim()
+    ?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
+    ?: "local-dev"
+
 android {
     namespace = "com.goodlight.floatingvoicebubble"
     compileSdk = 36
@@ -11,8 +16,9 @@ android {
         applicationId = "com.goodlight.floatingvoicebubble"
         minSdk = 33
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-dev"
+        versionCode = 2026082801
+        versionName = "0.1.0-rc.1"
+        buildConfigField("String", "SOURCE_SHA", "\"$sourceSha\"")
 
         // LiteRT-LM 0.14.0 provides the Android runtime used by Gemma on these two
         // modern ABIs. Shipping sherpa-only 32-bit ABIs would advertise devices on
@@ -98,6 +104,11 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.1.0")
 
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.14.0")
+    // LiteRT-LM 0.14.0's published dependency metadata can resolve coroutines 1.9.0 even though
+    // its Android binary was built against the 1.11.0 ABI. Pin both artifacts explicitly to avoid
+    // the resulting NoSuchMethodError on the mandatory on-device Gemma correction path.
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("com.github.k2-fsa.sherpa-onnx:sherpa-onnx:v1.13.5")
     implementation("org.apache.commons:commons-compress:1.28.0")
     // 5.5.0 raises its Android AAR minCompileSdk to 37. Floating VoiceBubble's
