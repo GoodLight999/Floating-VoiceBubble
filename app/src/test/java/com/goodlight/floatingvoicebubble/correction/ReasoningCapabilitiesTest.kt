@@ -32,6 +32,13 @@ class ReasoningCapabilitiesTest {
             ),
         )
         assertNull(
+            ReasoningCapabilities.zaiReasoningEffort(
+                "https://api.z.ai/api/paas/v4/chat/completions",
+                "glm-5.3",
+                ReasoningEffort.DEFAULT,
+            ),
+        )
+        assertNull(
             ReasoningCapabilities.anthropicThinkingType(
                 "https://api.anthropic.com/v1/messages",
                 "claude-sonnet-4-6",
@@ -52,6 +59,45 @@ class ReasoningCapabilitiesTest {
                 ReasoningEffort.DEFAULT,
             ),
         )
+    }
+
+    @Test
+    fun zai47KeepsBinaryThinkingContract() {
+        val endpoint = "https://api.z.ai/api/paas/v4/chat/completions"
+        val capability = ReasoningCapabilities.capability(endpoint, "glm-4.7")
+        assertEquals(
+            listOf(ReasoningEffort.DEFAULT, ReasoningEffort.NONE, ReasoningEffort.HIGH),
+            capability.choices,
+        )
+        assertEquals(false, ReasoningCapabilities.zaiThinking(endpoint, "glm-4.7", ReasoningEffort.NONE))
+        assertEquals(true, ReasoningCapabilities.zaiThinking(endpoint, "glm-4.7", ReasoningEffort.HIGH))
+        assertNull(ReasoningCapabilities.zaiReasoningEffort(endpoint, "glm-4.7", ReasoningEffort.HIGH))
+    }
+
+    @Test
+    fun zai53CannotDisableThinkingAndUsesDocumentedEffortLevels() {
+        val endpoint = "https://api.z.ai/api/paas/v4/chat/completions"
+        val capability = ReasoningCapabilities.capability(endpoint, "glm-5.3")
+        assertEquals(
+            listOf(ReasoningEffort.DEFAULT, ReasoningEffort.LOW, ReasoningEffort.HIGH, ReasoningEffort.MAX),
+            capability.choices,
+        )
+        assertFalse(ReasoningEffort.NONE in capability.choices)
+        assertEquals(true, ReasoningCapabilities.zaiThinking(endpoint, "glm-5.3", ReasoningEffort.LOW))
+        assertEquals(true, ReasoningCapabilities.zaiThinking(endpoint, "glm-5.3", ReasoningEffort.MAX))
+        assertEquals("low", ReasoningCapabilities.zaiReasoningEffort(endpoint, "glm-5.3", ReasoningEffort.LOW))
+        assertEquals("high", ReasoningCapabilities.zaiReasoningEffort(endpoint, "glm-5.3", ReasoningEffort.HIGH))
+        assertEquals("max", ReasoningCapabilities.zaiReasoningEffort(endpoint, "glm-5.3", ReasoningEffort.MAX))
+        assertEquals(ReasoningEffort.DEFAULT, ReasoningCapabilities.normalize(endpoint, "glm-5.3", ReasoningEffort.NONE))
+    }
+
+    @Test
+    fun unknownZaiModelDoesNotReceiveGuessedReasoningControls() {
+        val endpoint = "https://api.z.ai/api/paas/v4/chat/completions"
+        val capability = ReasoningCapabilities.capability(endpoint, "glm-future-unknown")
+        assertEquals(listOf(ReasoningEffort.DEFAULT), capability.choices)
+        assertNull(ReasoningCapabilities.zaiThinking(endpoint, "glm-future-unknown", ReasoningEffort.HIGH))
+        assertNull(ReasoningCapabilities.zaiReasoningEffort(endpoint, "glm-future-unknown", ReasoningEffort.HIGH))
     }
 
     @Test
@@ -77,9 +123,6 @@ class ReasoningCapabilitiesTest {
         val endpoint = "https://api.anthropic.com/v1/messages"
         val capability = ReasoningCapabilities.capability(endpoint, "claude-sonnet-4-5")
 
-        // Sonnet 4.5 uses manual extended-thinking budgets rather than the adaptive
-        // output_config.effort ladder. Floating VoiceBubble deliberately does not invent a
-        // fake depth mapping for that API generation, so only provider/model default is exposed.
         assertEquals(listOf(ReasoningEffort.DEFAULT), capability.choices)
         assertNull(
             ReasoningCapabilities.anthropicEffort(
