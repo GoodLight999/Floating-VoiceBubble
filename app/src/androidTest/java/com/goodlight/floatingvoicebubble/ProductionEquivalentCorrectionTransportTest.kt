@@ -72,6 +72,32 @@ class ProductionEquivalentCorrectionTransportTest {
     }
 
     @Test
+    fun slowProviderSuccessInsideDeadlineIsAcceptedAndMeasured() {
+        val raw = longRaw()
+        val corrected = raw.replace("音声入力の取り合い", "音声入力の聞き取りAI")
+        val connection = FakeConnection(
+            URL(ENDPOINT),
+            200,
+            success(corrected),
+            responseDelayMs = 180L,
+        )
+        val result = engine(connection).finalize(
+            outcome = outcome(raw, listOf(corrected)),
+            surrounding = "音声認識AIについて話している",
+            settings = settings(),
+            bypassCorrection = false,
+        )
+
+        assertEquals(corrected, result.finalText)
+        assertTrue(result.correctionModelResponded)
+        assertTrue(result.correctionAccepted)
+        val timing = result.correctionAttemptTimings.single()
+        assertEquals(1, timing.attempt)
+        assertTrue("slow header phase was not measured", (timing.responseHeadersMs ?: 0L) >= 150L)
+        assertTrue("total latency should include delayed response", timing.totalMs >= 150L)
+    }
+
+    @Test
     fun providerReadTimeoutFallsBackToRawWithStructuredStage() {
         val raw = longRaw()
         val connection = FakeConnection(
@@ -195,11 +221,13 @@ class ProductionEquivalentCorrectionTransportTest {
         private val body: String,
         private val responseFailure: Throwable? = null,
         private val inputFailure: Throwable? = null,
+        private val responseDelayMs: Long = 0L,
     ) : HttpURLConnection(url) {
         private val request = ByteArrayOutputStream()
 
         override fun getOutputStream(): OutputStream = request
         override fun getResponseCode(): Int {
+            if (responseDelayMs > 0L) Thread.sleep(responseDelayMs)
             responseFailure?.let { throw it }
             return status
         }
