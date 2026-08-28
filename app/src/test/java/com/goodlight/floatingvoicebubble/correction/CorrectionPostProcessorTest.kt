@@ -102,6 +102,23 @@ class CorrectionPostProcessorTest {
     }
 
     @Test
+    fun rawEchoStillGetsExplicitTerminalPeriod() {
+        val raw = "今日は晴れだから散歩する"
+        val output = CorrectionPostProcessor.apply(
+            raw,
+            raw,
+            CorrectionPreferences(
+                addCommas = false,
+                addPeriods = true,
+                removeFillers = false,
+                lineBreakMode = LineBreakMode.NONE,
+            ),
+        )
+
+        assertEquals("今日は晴れだから散歩する。", output)
+    }
+
+    @Test
     fun disabledLineBreakModePreservesLongText() {
         val raw = "長い文章だけれど、ユーザーが改行しないを選んでいるので、どれだけ長くてもアプリ側で勝手に改行を追加してはいけないという契約を守る"
         val output = CorrectionPostProcessor.apply(
