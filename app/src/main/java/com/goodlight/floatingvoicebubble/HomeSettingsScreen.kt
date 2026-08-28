@@ -235,23 +235,25 @@ internal fun HomeSettingsScreen(
             Button(
                 onClick = {
                     diagnosticBusy = true
-                    diagnosticMessage = "診断しています…"
+                    diagnosticMessage = "API疎通 → 本番相当補正の順に診断しています…"
                     Thread({
-                        runCatching { SelfDiagnostics(activity).run(includeExternalProbes = true) }
-                            .onSuccess { report -> activity.runOnUiThread {
-                                diagnosticReport = report
-                                diagnosticBusy = false
-                                val failure = report.items.firstOrNull { it.status == DiagnosticStatus.FAIL }
-                                diagnosticMessage = if (failure == null) {
-                                    report.summary()
-                                } else {
-                                    "${report.summary()}\n${failure.id}: ${failure.detail}"
-                                }
-                            } }
-                            .onFailure { failure -> activity.runOnUiThread {
-                                diagnosticBusy = false
-                                diagnosticMessage = "診断失敗: ${failure.message ?: failure.javaClass.simpleName}"
-                            } }
+                        runCatching {
+                            val reachability = CorrectionApiReachabilityProbe.run(activity)
+                            val production = SelfDiagnostics(activity).run(includeExternalProbes = true)
+                            production.copy(items = listOf(reachability) + production.items)
+                        }.onSuccess { report -> activity.runOnUiThread {
+                            diagnosticReport = report
+                            diagnosticBusy = false
+                            val failure = report.items.firstOrNull { it.status == DiagnosticStatus.FAIL }
+                            diagnosticMessage = if (failure == null) {
+                                report.summary()
+                            } else {
+                                "${report.summary()}\n${failure.id}: ${failure.detail}"
+                            }
+                        } }.onFailure { failure -> activity.runOnUiThread {
+                            diagnosticBusy = false
+                            diagnosticMessage = "診断失敗: ${failure.message ?: failure.javaClass.simpleName}"
+                        } }
                     }, "VoiceBubble-OneClickDiagnostics").start()
                 },
                 enabled = !diagnosticBusy,
