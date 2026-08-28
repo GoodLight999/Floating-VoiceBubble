@@ -98,18 +98,13 @@ class OpenAiCompatibleCorrector(
                 }
                 else -> throw IllegalStateException(
                     message.optString("reasoning_content").takeIf(String::isNotBlank)?.let {
-                        if (options.zaiProvider) {
-                            "Z.AIは思考内容だけを返し、確定本文を返しませんでした。音声補正では『思考OFF』を試してください。"
-                        } else {
-                            "BYOK response contained reasoning but no final text"
-                        }
+                        if (options.zaiProvider) zaiReasoningOnlyMessage(options)
+                        else "BYOK response contained reasoning but no final text"
                     } ?: "BYOK response content is unsupported",
                 )
             }.trim().ifBlank {
                 if (options.zaiProvider && message.optString("reasoning_content").isNotBlank()) {
-                    throw IllegalStateException(
-                        "Z.AIは思考内容だけを返し、確定本文を返しませんでした。音声補正では『思考OFF』を試してください。",
-                    )
+                    throw IllegalStateException(zaiReasoningOnlyMessage(options))
                 }
                 throw IllegalStateException("BYOK response has no text")
             }
@@ -146,6 +141,7 @@ class OpenAiCompatibleCorrector(
         options.zaiThinkingEnabled?.let { enabled ->
             body.put("thinking", JSONObject().put("type", if (enabled) "enabled" else "disabled"))
         }
+        options.zaiReasoningEffort?.let { body.put("reasoning_effort", it) }
         if (options.disableSampling) body.put("do_sample", false)
     }
 
@@ -234,6 +230,13 @@ class OpenAiCompatibleCorrector(
             .coerceIn(minimum.toLong(), MAX_ZAI_CORRECTION_TOKENS.toLong())
             .toInt()
     }
+
+    private fun zaiReasoningOnlyMessage(options: OpenAiProviderOptions): String =
+        if (options.zaiReasoningEffort != null) {
+            "Z.AIは思考内容だけを返し、確定本文を返しませんでした。音声補正では推論深度を『低』またはモデル既定へ下げてください。"
+        } else {
+            "Z.AIは思考内容だけを返し、確定本文を返しませんでした。音声補正では『思考OFF』またはモデル既定を試してください。"
+        }
 
     private fun compact(value: String): String = value.take(500).replace(Regex("\\s+"), " ").trim()
 
