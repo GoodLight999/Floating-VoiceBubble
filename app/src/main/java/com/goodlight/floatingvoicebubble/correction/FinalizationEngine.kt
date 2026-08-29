@@ -171,11 +171,18 @@ class FinalizationEngine(
         var correctionLatencyMs: Long? = null
         if (corrector != null) {
             val started = System.nanoTime()
+            val cloudCorrection = route.provider != null && route.provider != "none" && route.provider != "on-device"
             val detailed = runCatching {
-                bounded(
-                    CorrectionTimeoutPolicy.correctionTimeoutMs(settings.reasoningEffort),
-                    "補正モデル",
-                ) { corrector.correctDetailed(request) }
+                if (cloudCorrection) {
+                    // Cloud adapters own an idle-between-bytes timeout. Do not wrap them in a short
+                    // total wall-clock Future timeout: active SSE/reasoning traffic is valid progress.
+                    corrector.correctDetailed(request)
+                } else {
+                    bounded(
+                        CorrectionTimeoutPolicy.localCorrectionTimeoutMs(settings.reasoningEffort),
+                        "端末内補正モデル",
+                    ) { corrector.correctDetailed(request) }
+                }
             }.onFailure { failure ->
                 correctionError = failure.message ?: failure.javaClass.simpleName
                 val structured = failure as? CorrectionCallException
@@ -202,15 +209,22 @@ class FinalizationEngine(
 
         val rawModelOutput = modelOutput
         val modelResponded = rawModelOutput != null
-        val semanticCandidate = rawModelOutput?.let(CorrectionGuard::sanitize) ?: correctionInput
-        val modelChanged = modelResponded && semanticCandidate != correctionInput.trim()
-        val allowDeterministicFormatting = settings.correctionMode != CorrectionMode.NONE
-        val candidate = if (allowDeterministicFormatting) {
-            CorrectionPostProcessor.apply(correctionInput, semanticCandidate, preferences)
+        val modelSucceeded = correctionError == null && modelResponded
+        val semanticCandidate = if (modelSucceeded) {
+            CorrectionGuard.sanitize(rawModelOutput.orEmpty())
         } else {
             correctionInput
         }
-        val deterministicFormattingChanged = candidate != semanticCandidate
+        val modelChanged = modelSucceeded && semanticCandidate != correctionInput.trim()
+        val allowDeterministicFormatting = modelSucceeded && settings.correctionMode != CorrectionMode.NONE
+        val candidate = if (allowDeterministicFormatting) {
+            CorrectionPostProcessor.apply(correctionInput, semanticCandidate, preferences)
+        } else {
+            // A failed/timeout model must never leave behind punctuation, filler deletion or an
+            // arbitrary line break. The fallback contract is exact RAW recognition text.
+            correctionInput
+        }
+        val deterministicFormattingChanged = modelSucceeded && candidate != semanticCandidate
         val decision = CorrectionGuard.choose(correctionInput, candidate, preferences)
         val finalText = decision.text
         val changed = finalText != correctionInput
@@ -220,7 +234,6 @@ class FinalizationEngine(
         }
         val integrityResult = if (decision.accepted) "accepted" else "rejected:${decision.reason ?: "unknown"}"
         val fallbackSource = when {
-            correctionError != null && deterministicFormattingChanged -> "音声認識結果＋指定整形"
             correctionError != null -> "音声認識結果"
             !decision.accepted -> "音声認識結果"
             else -> null
