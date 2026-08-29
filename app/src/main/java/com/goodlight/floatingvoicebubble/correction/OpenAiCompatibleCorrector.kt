@@ -27,7 +27,9 @@ class OpenAiCompatibleCorrector(
         val options = OpenAiProviderCompatibility.resolve(endpoint, model, reasoningEffort)
         val body = JSONObject()
             .put("model", options.requestModel)
-            .put("stream", false)
+            // Streaming is operationally important, not cosmetic: reasoning/content chunks keep the
+            // idle timeout alive so an actively responding model is never killed by a short total deadline.
+            .put("stream", true)
             .put(
                 "messages",
                 JSONArray()
@@ -44,6 +46,15 @@ class OpenAiCompatibleCorrector(
         var result = executeAttempt(body, options, attempts, timings)
         val explicitReasoning = reasoningEffort != ReasoningEffort.DEFAULT && hasReasoningField(body)
 
+        // A few nominally OpenAI-compatible gateways do not implement SSE. Prefer streaming, but
+        // fall back once to the same semantic request without streaming when the server explicitly
+        // rejects only the stream parameter.
+        if (result.status in listOf(400, 422) && streamParameterRejected(result.text)) {
+            body.put("stream", false)
+            attempts += 1
+            result = executeAttempt(body, options, attempts, timings)
+        }
+
         if (result.status in listOf(400, 422) && optionalParameterRejected(result.text)) {
             if (explicitReasoning && reasoningParameterRejected(result.text)) {
                 throw callFailure(
@@ -57,7 +68,7 @@ class OpenAiCompatibleCorrector(
             }
 
             // Drop only provider conveniences whose removal does not change the user's requested
-            // reasoning semantics. The second request retains reasoning_effort/reasoning/thinking.
+            // reasoning semantics. The next request retains reasoning_effort/reasoning/thinking.
             val canRetryPortableConveniences = body.has("do_sample") || options.sendEnglishAcceptLanguage
             if (canRetryPortableConveniences) {
                 body.remove("do_sample")
@@ -102,31 +113,7 @@ class OpenAiCompatibleCorrector(
         }
 
         val text = try {
-            val response = JSONObject(result.text)
-            val choice = response.optJSONArray("choices")?.optJSONObject(0)
-                ?: throw IllegalStateException("BYOK response has no choices")
-            val message = choice.optJSONObject("message") ?: throw IllegalStateException("BYOK response has no message")
-            val content = message.opt("content")
-            when (content) {
-                is String -> content
-                is JSONArray -> buildString {
-                    for (i in 0 until content.length()) {
-                        val part = content.optJSONObject(i) ?: continue
-                        if (part.optString("type") == "text") append(part.optString("text"))
-                    }
-                }
-                else -> throw IllegalStateException(
-                    message.optString("reasoning_content").takeIf(String::isNotBlank)?.let {
-                        if (options.zaiProvider) zaiReasoningOnlyMessage(options)
-                        else "BYOK response contained reasoning but no final text"
-                    } ?: "BYOK response content is unsupported",
-                )
-            }.trim().ifBlank {
-                if (options.zaiProvider && message.optString("reasoning_content").isNotBlank()) {
-                    throw IllegalStateException(zaiReasoningOnlyMessage(options))
-                }
-                throw IllegalStateException("BYOK response has no text")
-            }
+            parseCompletion(result.text, options)
         } catch (failure: Throwable) {
             if (failure is CorrectionCallException) throw failure
             throw CorrectionCallException(
@@ -152,6 +139,82 @@ class OpenAiCompatibleCorrector(
         )
     }
 
+    private fun parseCompletion(value: String, options: OpenAiProviderOptions): String {
+        val trimmed = value.trim()
+        val looksLikeSse = trimmed.startsWith("data:") || trimmed.contains("\ndata:")
+        return if (looksLikeSse) parseSseCompletion(trimmed, options) else parseJsonCompletion(trimmed, options)
+    }
+
+    private fun parseSseCompletion(value: String, options: OpenAiProviderOptions): String {
+        val finalText = StringBuilder()
+        var reasoningSeen = false
+        var eventSeen = false
+        value.lineSequence().forEach { rawLine ->
+            val line = rawLine.trim()
+            if (!line.startsWith("data:")) return@forEach
+            val payload = line.removePrefix("data:").trim()
+            if (payload.isBlank() || payload == "[DONE]") return@forEach
+            eventSeen = true
+            val root = runCatching { JSONObject(payload) }.getOrNull() ?: return@forEach
+            val choices = root.optJSONArray("choices") ?: return@forEach
+            for (i in 0 until choices.length()) {
+                val choice = choices.optJSONObject(i) ?: continue
+                val delta = choice.optJSONObject("delta") ?: choice.optJSONObject("message") ?: continue
+                appendContent(finalText, delta.opt("content"))
+                if (delta.optString("reasoning_content").isNotBlank() ||
+                    delta.optString("reasoning").isNotBlank() ||
+                    delta.opt("reasoning_details") != null
+                ) {
+                    reasoningSeen = true
+                }
+            }
+        }
+        val text = finalText.toString().trim()
+        if (text.isNotBlank()) return text
+        if (reasoningSeen) {
+            throw IllegalStateException(
+                if (options.zaiProvider) zaiReasoningOnlyMessage(options)
+                else "BYOK response contained reasoning but no final text",
+            )
+        }
+        if (!eventSeen) throw IllegalStateException("BYOK streaming response contained no data events")
+        throw IllegalStateException("BYOK streaming response has no text")
+    }
+
+    private fun parseJsonCompletion(value: String, options: OpenAiProviderOptions): String {
+        val response = JSONObject(value)
+        val choice = response.optJSONArray("choices")?.optJSONObject(0)
+            ?: throw IllegalStateException("BYOK response has no choices")
+        val message = choice.optJSONObject("message") ?: choice.optJSONObject("delta")
+            ?: throw IllegalStateException("BYOK response has no message")
+        val content = StringBuilder().also { appendContent(it, message.opt("content")) }.toString().trim()
+        if (content.isNotBlank()) return content
+        val reasoningSeen = message.optString("reasoning_content").isNotBlank() ||
+            message.optString("reasoning").isNotBlank() ||
+            message.opt("reasoning_details") != null
+        if (reasoningSeen) {
+            throw IllegalStateException(
+                if (options.zaiProvider) zaiReasoningOnlyMessage(options)
+                else "BYOK response contained reasoning but no final text",
+            )
+        }
+        throw IllegalStateException("BYOK response has no text")
+    }
+
+    private fun appendContent(target: StringBuilder, content: Any?) {
+        when (content) {
+            is String -> target.append(content)
+            is JSONArray -> {
+                for (i in 0 until content.length()) {
+                    val part = content.optJSONObject(i) ?: continue
+                    when (part.optString("type")) {
+                        "text", "output_text" -> target.append(part.optString("text"))
+                    }
+                }
+            }
+        }
+    }
+
     private fun applyProviderOptions(body: JSONObject, options: OpenAiProviderOptions) {
         options.openAiReasoningEffort?.let { body.put("reasoning_effort", it) }
         options.openRouterReasoningEffort?.let { effort ->
@@ -170,15 +233,15 @@ class OpenAiCompatibleCorrector(
         attempt: Int,
         timings: MutableList<CorrectionAttemptTiming>,
     ): TimedHttpResponse {
-        val deadlineMs = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
+        val idleTimeoutMs = CorrectionTimeoutPolicy.networkIdleTimeoutMs(reasoningEffort)
         val connection = try {
             connectionFactory(URL(endpoint)).apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = deadlineMs
+                readTimeout = idleTimeoutMs
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Accept", "text/event-stream, application/json")
                 if (options.sendEnglishAcceptLanguage) setRequestProperty("Accept-Language", "en-US,en")
                 if (apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer $apiKey")
             }
@@ -187,7 +250,7 @@ class OpenAiCompatibleCorrector(
         }
 
         return try {
-            TimedHttpTransport.execute(connection, body.toString(), attempt, deadlineMs.toLong()).also {
+            TimedHttpTransport.execute(connection, body.toString(), attempt, idleTimeoutMs.toLong()).also {
                 timings += it.timing
             }
         } catch (failure: TimedHttpTransportFailure) {
@@ -242,6 +305,13 @@ class OpenAiCompatibleCorrector(
         val lower = value.lowercase()
         return listOf("reasoning_effort", "reasoning.effort", "thinking.type", "thinking")
             .any(lower::contains)
+    }
+
+    private fun streamParameterRejected(value: String): Boolean {
+        val lower = value.lowercase()
+        return lower.contains("stream") && listOf(
+            "unsupported", "unknown", "unrecognized", "invalid", "not support",
+        ).any(lower::contains)
     }
 
     private fun optionalParameterRejected(value: String): Boolean {
