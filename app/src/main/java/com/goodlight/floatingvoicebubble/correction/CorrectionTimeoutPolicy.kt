@@ -3,29 +3,34 @@ package com.goodlight.floatingvoicebubble.correction
 import com.goodlight.floatingvoicebubble.ReasoningEffort
 
 /**
- * One latency budget shared by runtime finalization, provider HTTP adapters and model verification.
- * Voice correction is interactive: a request must either finish within its selected reasoning budget
- * or fail visibly. There is intentionally no hidden second LM attempt.
+ * Timeout policy for interactive correction.
  *
- * Provider read deadlines are deliberately shorter than the FinalizationEngine deadline. This lets
- * the transport report a structured network-timeout (provider/model/attempt preserved) before the
- * outer Future watchdog has to cancel the worker and potentially leave blocking I/O alive briefly.
+ * Cloud calls use an *idle* read timeout: every received byte/chunk proves the provider is alive and
+ * resets the socket read timer. We intentionally do not impose a short wall-clock deadline on a
+ * reasoning model that is actively streaming progress. On-device inference still has a bounded
+ * total runtime so a wedged local backend cannot occupy the inference worker forever.
  */
 object CorrectionTimeoutPolicy {
-    fun correctionTimeoutMs(effort: ReasoningEffort): Long = when (effort) {
-        ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> 12_000L
-        ReasoningEffort.DEFAULT -> 18_000L
-        ReasoningEffort.MEDIUM -> 22_000L
-        ReasoningEffort.HIGH -> 32_000L
-        ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 40_000L
+    fun localCorrectionTimeoutMs(effort: ReasoningEffort): Long = when (effort) {
+        ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> 45_000L
+        ReasoningEffort.DEFAULT -> 60_000L
+        ReasoningEffort.MEDIUM -> 75_000L
+        ReasoningEffort.HIGH -> 90_000L
+        ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 120_000L
     }
 
-    fun networkReadTimeoutMs(effort: ReasoningEffort): Int =
-        (correctionTimeoutMs(effort) - TRANSPORT_BEFORE_ENGINE_MARGIN_MS)
-            .coerceAtLeast(MIN_NETWORK_READ_TIMEOUT_MS)
-            .coerceAtMost(Int.MAX_VALUE.toLong())
-            .toInt()
+    /** Maximum period with no response progress at all. This is not a total request deadline. */
+    fun networkIdleTimeoutMs(effort: ReasoningEffort): Int = when (effort) {
+        ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> 20_000
+        ReasoningEffort.DEFAULT -> 30_000
+        ReasoningEffort.MEDIUM -> 35_000
+        ReasoningEffort.HIGH -> 45_000
+        ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 60_000
+    }
 
-    private const val TRANSPORT_BEFORE_ENGINE_MARGIN_MS = 1_000L
-    private const val MIN_NETWORK_READ_TIMEOUT_MS = 4_000L
+    /** Compatibility alias for older diagnostics/tests; total cloud calls must not use this. */
+    fun correctionTimeoutMs(effort: ReasoningEffort): Long = localCorrectionTimeoutMs(effort)
+
+    /** Compatibility alias. Semantics are now idle-between-bytes, not total response time. */
+    fun networkReadTimeoutMs(effort: ReasoningEffort): Int = networkIdleTimeoutMs(effort)
 }
