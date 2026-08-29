@@ -15,7 +15,11 @@ data class CorrectionPreferences(
 ) {
     val registerRewriteRequested: Boolean get() = polite || businessPolite
     val lineBreakRewriteRequested: Boolean get() = lineBreakMode != LineBreakMode.NONE
-    val strongRecognitionRepairRequested: Boolean get() = recognitionRepairMode == RecognitionRepairMode.STRONG
+    val strongRecognitionRepairRequested: Boolean get() = recognitionRepairMode in setOf(
+        RecognitionRepairMode.STRONG,
+        RecognitionRepairMode.AGGRESSIVE,
+        RecognitionRepairMode.MAXIMUM,
+    )
 }
 
 data class CorrectionRequest(
@@ -107,15 +111,25 @@ object CorrectionPrompt {
         appendLine("語句訂正の規則:")
         when (request.preferences.recognitionRepairMode) {
             RecognitionRepairMode.OFF -> appendLine("- 語句そのものは変更しない。句読点・フィラー・改行・明示された口調変換だけを行う。")
+            RecognitionRepairMode.CONSERVATIVE -> appendLine(
+                "- 語句を変えるのは、N-best・個人辞書・発音の一致など強い直接根拠がある明白な誤認識だけ。少しでも迷うならRAWを残す。",
+            )
             RecognitionRepairMode.NORMAL -> appendLine(
-                "- 語句を変えるのは、N-best・個人辞書・発音上妥当な周辺文脈が訂正候補を十分に支持するときだけ。根拠が弱ければRAWを残す。",
+                "- 語句を変えるのは、N-best・個人辞書・発音上妥当な周辺文脈が訂正候補を十分に支持するとき。一般的な同音異義語・助詞・分かち誤りも自然に直す。根拠が弱ければRAWを残す。",
             )
             RecognitionRepairMode.STRONG -> appendLine(
-                "- 複数文字・複数語にまたがる誤認識も、N-best・個人辞書・文脈が同じ候補を強く支持するなら修復する。根拠のない推測はしない。",
+                "- 複数文字・複数語にまたがる誤認識も、N-best・個人辞書・発音・文脈が候補を支持するなら強めに修復する。RAWの表面形より話された可能性が高い語列を優先するが、根拠のない事実は作らない。",
+            )
+            RecognitionRepairMode.AGGRESSIVE -> appendLine(
+                "- 積極修復。RAWの意味が不自然・破綻している箇所は、音の近さ、N-best、個人辞書、文法、同一入力欄の文脈を総合して、語句・助詞・区切り・複数語を大胆に復元してよい。誤認識を残すより妥当な発話復元を優先する。",
+            )
+            RecognitionRepairMode.MAXIMUM -> appendLine(
+                "- 最大修復。ASR誤認識が疑われる箇所はかなり大胆に再構成してよい。RAWが意味的に壊れている場合、発音と会話文脈から最もありそうな発言を大きな範囲で復元する。やりすぎ気味でも聞き取りミスの除去を優先する。ただし話者が言っていない新事実・要約・意見は絶対に追加しない。",
             )
         }
         appendLine("- 周辺文脈は曖昧な候補の判定材料であり、文脈にだけ存在する事実・主張を出力へ追加してはいけない。")
         appendLine("- 話者のタメ語、荒い表現、俗語、断片文、口癖、敬語レベルを欠点として直さない。")
+        appendLine("- 補正強度が高くても、要約、言い換えによる美文化、婉曲化、内容の追加、口調変更はしない。")
         appendLine("- 説明、引用符、Markdown、JSON、前置きは出力しない。")
         appendLine()
         appendLine("ユーザー指定の整形:")
@@ -130,8 +144,8 @@ object CorrectionPrompt {
         )
         when (request.preferences.lineBreakMode) {
             LineBreakMode.NONE -> appendLine("- 新しい改行を入れない。")
-            LineBreakMode.SMART -> appendLine("- 複数文・話題・列挙の明確な境界で適宜改行する。短い単一文は分割しない。")
-            LineBreakMode.SMART_SPACED -> appendLine("- 複数文・話題・列挙の明確な境界で段落を分け、段落間は1行空ける。短い単一文は分割しない。")
+            LineBreakMode.SMART -> appendLine("- 複数文・話題・列挙の明確な境界で適宜改行する。文字数だけを理由に改行しない。短い単一文は分割しない。")
+            LineBreakMode.SMART_SPACED -> appendLine("- 複数文・話題・列挙の明確な境界で段落を分け、段落間は1行空ける。文字数だけを理由に改行しない。短い単一文は分割しない。")
         }
         when {
             request.preferences.businessPolite -> appendLine("- 内容を増減せず、自然なビジネス敬語へ変換する。定型挨拶は足さない。")
