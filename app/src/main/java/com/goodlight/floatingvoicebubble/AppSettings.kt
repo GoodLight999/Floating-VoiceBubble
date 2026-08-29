@@ -15,7 +15,11 @@ enum class FinalAsrMode { LIVE_RESULT, REAZON_SPEECH }
 enum class CorrectionMode { AUTO, BYOK, GEMMA, NONE }
 enum class GemmaBackend { AUTO, GPU, CPU }
 enum class GemmaVariant { UNKNOWN, E2B, E4B }
-enum class RecognitionRepairMode { OFF, NORMAL, STRONG }
+/**
+ * Strength of lexical ASR repair. Existing enum names are retained for preference compatibility.
+ * Formatting/register controls remain independent from this setting.
+ */
+enum class RecognitionRepairMode { OFF, CONSERVATIVE, NORMAL, STRONG, AGGRESSIVE, MAXIMUM }
 
 enum class ReasoningEffort {
     DEFAULT,
