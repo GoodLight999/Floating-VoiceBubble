@@ -58,6 +58,35 @@ class HomeSettingsUiTest {
     }
 
     @Test
+    fun repairStrengthExposesAllSixLevelsAndPersistsMaximum() {
+        val store = SettingsStore(composeRule.activity)
+        val previous = store.load()
+        try {
+            store.update { it.copy(recognitionRepairMode = RecognitionRepairMode.NORMAL) }
+            composeRule.activityRule.scenario.recreate()
+            composeRule.waitForIdle()
+
+            composeRule.onNodeWithTag("repair-strength-control").assertIsDisplayed().performClick()
+            composeRule.onNodeWithText("語句は直さない", useUnmergedTree = true).assertIsDisplayed()
+            composeRule.onNodeWithText("確信できる誤認だけ", useUnmergedTree = true).assertIsDisplayed()
+            composeRule.onNodeWithText("明らかな誤認を修復", useUnmergedTree = true).assertIsDisplayed()
+            composeRule.onNodeWithText("文脈・候補から積極修復", useUnmergedTree = true).assertIsDisplayed()
+            composeRule.onNodeWithText("音と文脈から大胆に置換", useUnmergedTree = true).assertIsDisplayed()
+            composeRule.onNodeWithText("誤認と判断した語句を最大限修復", useUnmergedTree = true).performClick()
+
+            composeRule.waitUntil(timeoutMillis = 5_000) {
+                SettingsStore(composeRule.activity).load().recognitionRepairMode == RecognitionRepairMode.MAXIMUM
+            }
+            assertEquals(RecognitionRepairMode.MAXIMUM, SettingsStore(composeRule.activity).load().recognitionRepairMode)
+            composeRule.onNodeWithTag("repair-strength-control")
+                .assertIsDisplayed()
+                .assertTextContains("誤認と判断した語句を最大限修復")
+        } finally {
+            store.update { previous }
+        }
+    }
+
+    @Test
     fun manualOpenRouterModelDoesNotInventUnverifiedReasoningDepths() {
         val store = SettingsStore(composeRule.activity)
         val previous = store.load()
