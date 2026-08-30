@@ -26,7 +26,7 @@ class GeminiApiCorrector(
         require(model.isNotBlank()) { "BYOK model is not configured" }
         require(apiKey.isNotBlank()) { "Gemini API key is not configured" }
 
-        val target = targetUrl(endpoint, model)
+        val target = streamingTargetUrl(endpoint, model)
         val generationConfig = JSONObject().put("maxOutputTokens", 2048)
         ReasoningCapabilities.geminiThinking(endpoint, model, reasoningEffort)?.let { control ->
             val thinking = JSONObject()
@@ -86,18 +86,7 @@ class GeminiApiCorrector(
         }
 
         val text = try {
-            val candidates = JSONObject(response.text).optJSONArray("candidates")
-                ?: throw IllegalStateException("Gemini response has no candidates")
-            val parts = candidates.optJSONObject(0)
-                ?.optJSONObject("content")
-                ?.optJSONArray("parts")
-                ?: throw IllegalStateException("Gemini response has no content")
-            buildString {
-                for (i in 0 until parts.length()) {
-                    val part = parts.optJSONObject(i)?.optString("text").orEmpty()
-                    if (part.isNotBlank()) append(part)
-                }
-            }.trim().ifBlank { throw IllegalStateException("Gemini response has no text") }
+            parseCompletion(response.text)
         } catch (failure: Throwable) {
             if (failure is CorrectionCallException) throw failure
             throw CorrectionCallException(
@@ -123,27 +112,73 @@ class GeminiApiCorrector(
         )
     }
 
+    private fun parseCompletion(value: String): String {
+        val trimmed = value.trim()
+        val looksLikeSse = trimmed.startsWith("data:") || trimmed.contains("\ndata:")
+        return if (looksLikeSse) parseSseCompletion(trimmed) else parseJsonCompletion(trimmed)
+    }
+
+    private fun parseSseCompletion(value: String): String {
+        val finalText = StringBuilder()
+        var eventSeen = false
+        value.lineSequence().forEach { rawLine ->
+            val line = rawLine.trim()
+            if (!line.startsWith("data:")) return@forEach
+            val payload = line.removePrefix("data:").trim()
+            if (payload.isBlank() || payload == "[DONE]") return@forEach
+            eventSeen = true
+            val root = runCatching { JSONObject(payload) }.getOrNull() ?: return@forEach
+            appendCandidateText(finalText, root)
+        }
+        val text = finalText.toString().trim()
+        if (text.isNotBlank()) return text
+        if (!eventSeen) throw IllegalStateException("Gemini streaming response contained no data events")
+        throw IllegalStateException("Gemini streaming response has no text")
+    }
+
+    private fun parseJsonCompletion(value: String): String {
+        val finalText = StringBuilder()
+        appendCandidateText(finalText, JSONObject(value))
+        return finalText.toString().trim().ifBlank { throw IllegalStateException("Gemini response has no text") }
+    }
+
+    private fun appendCandidateText(target: StringBuilder, root: JSONObject) {
+        val candidates = root.optJSONArray("candidates") ?: return
+        for (candidateIndex in 0 until candidates.length()) {
+            val parts = candidates.optJSONObject(candidateIndex)
+                ?.optJSONObject("content")
+                ?.optJSONArray("parts")
+                ?: continue
+            for (partIndex in 0 until parts.length()) {
+                val part = parts.optJSONObject(partIndex) ?: continue
+                if (part.optBoolean("thought", false)) continue
+                val text = part.optString("text")
+                if (text.isNotBlank()) target.append(text)
+            }
+        }
+    }
+
     private fun executeAttempt(
         target: String,
         body: JSONObject,
         timings: MutableList<CorrectionAttemptTiming>,
     ): TimedHttpResponse {
-        val deadlineMs = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
+        val idleTimeoutMs = CorrectionTimeoutPolicy.networkIdleTimeoutMs(reasoningEffort)
         val connection = try {
             connectionFactory(URL(target)).apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = deadlineMs
+                readTimeout = idleTimeoutMs
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Accept", "text/event-stream, application/json")
                 setRequestProperty("x-goog-api-key", apiKey)
             }
         } catch (failure: Throwable) {
             throw transportFailure(failure, timings)
         }
         return try {
-            TimedHttpTransport.execute(connection, body.toString(), 1, deadlineMs.toLong()).also {
+            TimedHttpTransport.execute(connection, body.toString(), 1, idleTimeoutMs.toLong()).also {
                 timings += it.timing
             }
         } catch (failure: TimedHttpTransportFailure) {
@@ -182,6 +217,21 @@ class GeminiApiCorrector(
             val modelName = model.removePrefix("models/")
             val encoded = URLEncoder.encode(modelName, Charsets.UTF_8.name()).replace("+", "%20")
             return "$normalized/models/$encoded:generateContent"
+        }
+
+        fun streamingTargetUrl(endpoint: String, model: String): String {
+            val normalized = endpoint.trimEnd('/')
+            val streamTarget = when {
+                normalized.contains(":streamGenerateContent") -> normalized
+                normalized.contains(":generateContent") -> normalized.replace(":generateContent", ":streamGenerateContent")
+                else -> {
+                    val modelName = model.removePrefix("models/")
+                    val encoded = URLEncoder.encode(modelName, Charsets.UTF_8.name()).replace("+", "%20")
+                    "$normalized/models/$encoded:streamGenerateContent"
+                }
+            }
+            if (Regex("(?:\\?|&)alt=sse(?:&|$)").containsMatchIn(streamTarget)) return streamTarget
+            return streamTarget + if (streamTarget.contains('?')) "&alt=sse" else "?alt=sse"
         }
 
         private const val CONNECT_TIMEOUT_MS = 8_000

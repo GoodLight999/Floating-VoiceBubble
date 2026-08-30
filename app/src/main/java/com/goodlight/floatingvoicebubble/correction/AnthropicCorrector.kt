@@ -28,6 +28,7 @@ class AnthropicCorrector(
         val body = JSONObject()
             .put("model", model)
             .put("max_tokens", outputTokenBudget())
+            .put("stream", true)
             .put("system", CorrectionPrompt.system(request))
             .put(
                 "messages",
@@ -80,14 +81,7 @@ class AnthropicCorrector(
         }
 
         val text = try {
-            val content = JSONObject(response.text).optJSONArray("content")
-                ?: throw IllegalStateException("Anthropic response has no content")
-            buildString {
-                for (i in 0 until content.length()) {
-                    val part = content.optJSONObject(i) ?: continue
-                    if (part.optString("type") == "text") append(part.optString("text"))
-                }
-            }.trim().ifBlank { throw IllegalStateException("Anthropic response has no text") }
+            parseCompletion(response.text)
         } catch (failure: Throwable) {
             if (failure is CorrectionCallException) throw failure
             throw CorrectionCallException(
@@ -113,19 +107,64 @@ class AnthropicCorrector(
         )
     }
 
+    private fun parseCompletion(value: String): String {
+        val trimmed = value.trim()
+        val looksLikeSse = trimmed.startsWith("data:") || trimmed.contains("\ndata:")
+        return if (looksLikeSse) parseSseCompletion(trimmed) else parseJsonCompletion(trimmed)
+    }
+
+    private fun parseSseCompletion(value: String): String {
+        val finalText = StringBuilder()
+        var eventSeen = false
+        value.lineSequence().forEach { rawLine ->
+            val line = rawLine.trim()
+            if (!line.startsWith("data:")) return@forEach
+            val payload = line.removePrefix("data:").trim()
+            if (payload.isBlank() || payload == "[DONE]") return@forEach
+            eventSeen = true
+            val root = runCatching { JSONObject(payload) }.getOrNull() ?: return@forEach
+            if (root.optString("type") == "error") {
+                val error = root.optJSONObject("error")
+                throw IllegalStateException(
+                    error?.optString("message").orEmpty().ifBlank { "Anthropic streaming error" },
+                )
+            }
+            if (root.optString("type") != "content_block_delta") return@forEach
+            val delta = root.optJSONObject("delta") ?: return@forEach
+            if (delta.optString("type") == "text_delta") {
+                finalText.append(delta.optString("text"))
+            }
+        }
+        val text = finalText.toString().trim()
+        if (text.isNotBlank()) return text
+        if (!eventSeen) throw IllegalStateException("Anthropic streaming response contained no data events")
+        throw IllegalStateException("Anthropic streaming response has no text")
+    }
+
+    private fun parseJsonCompletion(value: String): String {
+        val content = JSONObject(value).optJSONArray("content")
+            ?: throw IllegalStateException("Anthropic response has no content")
+        return buildString {
+            for (i in 0 until content.length()) {
+                val part = content.optJSONObject(i) ?: continue
+                if (part.optString("type") == "text") append(part.optString("text"))
+            }
+        }.trim().ifBlank { throw IllegalStateException("Anthropic response has no text") }
+    }
+
     private fun executeAttempt(
         body: JSONObject,
         timings: MutableList<CorrectionAttemptTiming>,
     ): TimedHttpResponse {
-        val deadlineMs = CorrectionTimeoutPolicy.networkReadTimeoutMs(reasoningEffort)
+        val idleTimeoutMs = CorrectionTimeoutPolicy.networkIdleTimeoutMs(reasoningEffort)
         val connection = try {
             connectionFactory(URL(endpoint)).apply {
                 requestMethod = "POST"
                 connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = deadlineMs
+                readTimeout = idleTimeoutMs
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Accept", "text/event-stream, application/json")
                 setRequestProperty("x-api-key", apiKey)
                 setRequestProperty("anthropic-version", "2023-06-01")
             }
@@ -133,7 +172,7 @@ class AnthropicCorrector(
             throw transportFailure(failure, timings)
         }
         return try {
-            TimedHttpTransport.execute(connection, body.toString(), 1, deadlineMs.toLong()).also {
+            TimedHttpTransport.execute(connection, body.toString(), 1, idleTimeoutMs.toLong()).also {
                 timings += it.timing
             }
         } catch (failure: TimedHttpTransportFailure) {

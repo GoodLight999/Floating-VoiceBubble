@@ -35,6 +35,7 @@ class NativeProviderWireBodyTest {
         val body = capture.body()
         assertEquals("adaptive", body.getJSONObject("thinking").getString("type"))
         assertEquals("xhigh", body.getJSONObject("output_config").getString("effort"))
+        assertTrue(body.getBoolean("stream"))
         assertTrue(body.has("system"))
         assertTrue(body.has("messages"))
     }
@@ -53,8 +54,31 @@ class NativeProviderWireBodyTest {
         ).correctDetailed(request)
 
         val body = capture.body()
+        assertTrue(body.getBoolean("stream"))
         assertFalse(body.has("thinking"))
         assertFalse(body.has("output_config"))
+    }
+
+    @Test
+    fun anthropicStreamingTextDeltasAreJoinedWhileThinkingIsIgnored() {
+        val stream = listOf(
+            "data: {\"type\":\"message_start\",\"message\":{}}",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"内部思考\"}}",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"今日は\"}}",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"テストです。\"}}",
+            "data: {\"type\":\"message_stop\"}",
+        ).joinToString("\n\n")
+        val capture = CaptureConnection(stream)
+        val result = AnthropicCorrector(
+            endpoint = "https://api.anthropic.com/v1/messages",
+            model = "claude-opus-5",
+            apiKey = "secret",
+            reasoningEffort = ReasoningEffort.HIGH,
+            connectionFactory = { capture },
+        ).correctDetailed(request)
+
+        assertEquals("今日はテストです。", result.text)
+        assertTrue(capture.body().getBoolean("stream"))
     }
 
     @Test
@@ -105,6 +129,43 @@ class NativeProviderWireBodyTest {
         ).correctDetailed(request)
 
         assertFalse(capture.body().getJSONObject("generationConfig").has("thinkingConfig"))
+    }
+
+    @Test
+    fun geminiStreamingTargetUsesOfficialSseEndpoint() {
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:streamGenerateContent?alt=sse",
+            GeminiApiCorrector.streamingTargetUrl(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "gemini-3.7-flash",
+            ),
+        )
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:streamGenerateContent?key=ignored&alt=sse",
+            GeminiApiCorrector.streamingTargetUrl(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key=ignored",
+                "gemini-3.7-flash",
+            ),
+        )
+    }
+
+    @Test
+    fun geminiStreamingChunksJoinTextAndIgnoreThoughtParts() {
+        val stream = listOf(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"内部思考\"}]}}]}",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"今日は\"}]}}]}",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"テストです。\"}]}}]}",
+        ).joinToString("\n\n")
+        val capture = CaptureConnection(stream)
+        val result = GeminiApiCorrector(
+            endpoint = "https://generativelanguage.googleapis.com/v1beta",
+            model = "gemini-3.7-flash",
+            apiKey = "secret",
+            reasoningEffort = ReasoningEffort.HIGH,
+            connectionFactory = { capture },
+        ).correctDetailed(request)
+
+        assertEquals("今日はテストです。", result.text)
     }
 
     private fun geminiResponse() =
