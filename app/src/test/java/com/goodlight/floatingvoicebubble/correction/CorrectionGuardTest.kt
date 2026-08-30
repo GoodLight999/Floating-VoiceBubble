@@ -1,5 +1,6 @@
 package com.goodlight.floatingvoicebubble.correction
 
+import com.goodlight.floatingvoicebubble.RecognitionRepairMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -15,6 +16,19 @@ class CorrectionGuardTest {
         val raw = "現人の洗濯と温泉式の海鮮方針を原始と相談した"
         val repaired = "エンジンの設計と音声認識の改善方針をチームと相談した"
         val decision = CorrectionGuard.choose(raw, repaired)
+        assertTrue(decision.accepted)
+        assertEquals(repaired, decision.text)
+        assertTrue(decision.normalizedDistance > 0.0)
+    }
+
+    @Test fun maximumRepairAcceptsClauseScaleReconstructionWithoutTreatingDistanceAsFailure() {
+        val raw = "音声入力の取り合いが変換を間違えて今日の開戦を続けたいと言った"
+        val repaired = "音声入力の聞き取りAIが変換を間違えて今日の改善を続けたいと言った"
+        val decision = CorrectionGuard.choose(
+            raw = raw,
+            modelOutput = repaired,
+            recognitionRepairMode = RecognitionRepairMode.MAXIMUM,
+        )
         assertTrue(decision.accepted)
         assertEquals(repaired, decision.text)
         assertTrue(decision.normalizedDistance > 0.0)
