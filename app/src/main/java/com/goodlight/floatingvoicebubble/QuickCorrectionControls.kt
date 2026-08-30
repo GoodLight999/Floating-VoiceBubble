@@ -298,8 +298,11 @@ private fun correctionModeLabel(mode: CorrectionMode): String = when (mode) {
 
 private fun repairLabel(mode: RecognitionRepairMode): String = when (mode) {
     RecognitionRepairMode.OFF -> "語句は直さない"
-    RecognitionRepairMode.NORMAL -> "明らかな間違いだけ"
+    RecognitionRepairMode.CONSERVATIVE -> "確信できる誤認だけ"
+    RecognitionRepairMode.NORMAL -> "明らかな誤認を修復"
     RecognitionRepairMode.STRONG -> "文脈・候補から積極修復"
+    RecognitionRepairMode.AGGRESSIVE -> "音と文脈から大胆に置換"
+    RecognitionRepairMode.MAXIMUM -> "誤認と判断した語句を最大限修復"
 }
 
 private fun lineBreakLabel(mode: LineBreakMode): String = when (mode) {
