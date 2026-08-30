@@ -164,41 +164,6 @@ wait_for_overlay_windows() {
   return 1
 }
 
-tap_overlay_center() {
-  local dump_file="$1"
-  local x1 y1 x2 y2
-  read -r x1 y1 x2 y2 < <(overlay_bounds "$dump_file")
-  adb shell input tap "$(((x1 + x2) / 2))" "$(((y1 + y2) / 2))"
-}
-
-verify_overlay_expanded_geometry() {
-  local idle_file="$1"
-  local expanded_file="$2"
-  python3 - "$idle_file" "$expanded_file" <<'PY'
-import re
-import sys
-
-def bounds(path):
-    for line in open(path, encoding="utf-8", errors="replace"):
-        if "type=TYPE_ACCESSIBILITY_OVERLAY" not in line:
-            continue
-        m = re.search(r"region=SkRegion\(\((\d+),(\d+),(\d+),(\d+)\)\)", line)
-        if m:
-            return tuple(map(int, m.groups()))
-    raise SystemExit(f"overlay bounds missing from {path}")
-
-idle = bounds(sys.argv[1])
-expanded = bounds(sys.argv[2])
-wi, hi = idle[2] - idle[0], idle[3] - idle[1]
-we, he = expanded[2] - expanded[0], expanded[3] - expanded[1]
-if wi <= 0 or hi <= 0 or we <= 0 or he <= 0:
-    raise SystemExit(f"invalid overlay geometry idle={idle} expanded={expanded}")
-if we * he < wi * hi * 3:
-    raise SystemExit(f"overlay did not materially expand after mic tap: idle={idle} expanded={expanded}")
-print(f"overlay expansion PASS: idle={wi}x{hi}, expanded={we}x{he}")
-PY
-}
-
 stage "build debug + androidTest + R8 release"
 $GRADLE_CMD --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease
 
@@ -292,13 +257,9 @@ adb shell am start -W -n "$TEST_HOST_ACTIVITY" | tee "$REPORT_ROOT/overlay-host-
 sleep 1
 capture_ui "overlay-idle-api${API_LEVEL}"
 wait_for_overlay_windows "overlay-idle-windows"
-IDLE_ACCESSIBILITY="$REPORT_ROOT/overlay-idle-windows-api${API_LEVEL}.txt"
-tap_overlay_center "$IDLE_ACCESSIBILITY"
-sleep 0.25
-capture_ui "overlay-expanded-api${API_LEVEL}"
-wait_for_overlay_windows "overlay-expanded-windows"
-EXPANDED_ACCESSIBILITY="$REPORT_ROOT/overlay-expanded-windows-api${API_LEVEL}.txt"
-verify_overlay_expanded_geometry "$IDLE_ACCESSIBILITY" "$EXPANDED_ACCESSIBILITY"
+# Coordinate injection from `adb shell input` is not a reliable way to target
+# TYPE_ACCESSIBILITY_OVERLAY on hosted API 33/36 images. The connected instrumentation below
+# performs ACTION_CLICK on the actual overlay nodes and verifies expansion/actions semantically.
 adb shell am force-stop "$TEST_APP_ID" || true
 sleep 0.25
 launch_main
