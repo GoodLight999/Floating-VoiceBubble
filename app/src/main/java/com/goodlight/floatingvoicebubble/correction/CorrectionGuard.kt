@@ -59,6 +59,8 @@ object CorrectionGuard {
         val newLength = newPoints.size
         val expansionLimit = when {
             allowRegisterRewrite -> max(rawLength * 6, rawLength + 96)
+            recognitionRepairMode == RecognitionRepairMode.MAXIMUM -> max(rawLength * 6, rawLength + 96)
+            recognitionRepairMode == RecognitionRepairMode.AGGRESSIVE -> max(rawLength * 5, rawLength + 80)
             recognitionRepairMode == RecognitionRepairMode.STRONG -> max(rawLength * 5, rawLength + 80)
             else -> max(rawLength * 4, rawLength + 64)
         }
@@ -66,11 +68,14 @@ object CorrectionGuard {
             return Decision(raw, false, normalized, "output-expanded-too-much")
         }
 
-        // Only very large, long-utterance content loss is rejected. Normal filler removal, concise
-        // punctuation repair and sentence restructuring must never trigger this check.
+        // Only very large, long-utterance content loss is rejected. Aggressive modes may legitimately
+        // reconstruct a broken clause, so their structural floor is looser while still rejecting
+        // obvious summary/truncation responses.
         if (rawLength >= 80) {
             val minimum = when {
                 allowRegisterRewrite -> (rawLength * 0.18).toInt()
+                recognitionRepairMode == RecognitionRepairMode.MAXIMUM -> (rawLength * 0.14).toInt()
+                recognitionRepairMode == RecognitionRepairMode.AGGRESSIVE -> (rawLength * 0.18).toInt()
                 recognitionRepairMode == RecognitionRepairMode.STRONG -> (rawLength * 0.22).toInt()
                 else -> (rawLength * 0.25).toInt()
             }.coerceAtLeast(1)
