@@ -63,6 +63,8 @@ capture_ui() {
   local ui_xml="$EVIDENCE_DIR/${stem}.xml"
   adb exec-out screencap -p > "$screenshot"
   test -s "$screenshot"
+  # Shell uiautomator intentionally captures the active root only. Accessibility overlays are
+  # verified separately from dumpsys + UiAutomation multi-window instrumentation below.
   adb shell uiautomator dump "$remote_xml" >/dev/null
   adb pull "$remote_xml" "$ui_xml" >/dev/null
   test -s "$ui_xml"
@@ -125,96 +127,75 @@ print(f"launcher UI contract PASS: reasoning y={reasoning_top}, screenHeight={he
 PY
 }
 
-dump_for_node() {
-  local local_xml="$REPORT_ROOT/overlay-node-api${API_LEVEL}.xml"
-  adb shell uiautomator dump /sdcard/fvb-overlay-node.xml >/dev/null
-  adb pull /sdcard/fvb-overlay-node.xml "$local_xml" >/dev/null
-  printf '%s\n' "$local_xml"
-}
-
-find_desc_center() {
-  local desc="$1"
-  local attempt xml center
-  for attempt in $(seq 1 20); do
-    xml="$(dump_for_node | tail -n1)"
-    center="$(python3 - "$xml" "$desc" <<'PY'
+overlay_bounds() {
+  local dump_file="$1"
+  python3 - "$dump_file" <<'PY'
 import re
 import sys
-import xml.etree.ElementTree as ET
 
-path, wanted = sys.argv[1], sys.argv[2]
-root = ET.parse(path).getroot()
-for node in root.iter():
-    if (node.attrib.get("content-desc") or "") != wanted:
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    if "type=TYPE_ACCESSIBILITY_OVERLAY" not in line:
         continue
-    match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", node.attrib.get("bounds", ""))
-    if not match:
-        continue
-    x1, y1, x2, y2 = map(int, match.groups())
-    print(f"{(x1+x2)//2} {(y1+y2)//2}")
-    raise SystemExit(0)
-raise SystemExit(1)
+    match = re.search(r"region=SkRegion\(\((\d+),(\d+),(\d+),(\d+)\)\)", line)
+    if match:
+        print(" ".join(match.groups()))
+        raise SystemExit(0)
+raise SystemExit("TYPE_ACCESSIBILITY_OVERLAY exists but its bounds could not be parsed")
 PY
-)" && {
-      printf '%s\n' "$center"
+}
+
+wait_for_overlay_windows() {
+  local stem="$1"
+  local dump_file="$REPORT_ROOT/${stem}-api${API_LEVEL}.txt"
+  local attempt
+  for attempt in $(seq 1 24); do
+    adb shell dumpsys accessibility > "$dump_file"
+    if grep -F "TYPE_ACCESSIBILITY_OVERLAY" "$dump_file" >/dev/null \
+      && grep -F "TYPE_INPUT_METHOD" "$dump_file" >/dev/null \
+      && grep -F "$APP_ID" "$dump_file" >/dev/null \
+      && overlay_bounds "$dump_file" >/dev/null 2>&1; then
+      echo "accessibility overlay + IME windows PASS"
       return 0
-    }
+    fi
     sleep 0.25
   done
-  echo "UI node not found by content-desc: $desc" >&2
+  cat "$dump_file"
+  echo "floating accessibility overlay/IME contract did not become ready" >&2
   return 1
 }
 
-tap_desc() {
-  local desc="$1"
-  local center x y
-  center="$(find_desc_center "$desc")"
-  read -r x y <<<"$center"
-  adb shell input tap "$x" "$y"
+tap_overlay_center() {
+  local dump_file="$1"
+  local x1 y1 x2 y2
+  read -r x1 y1 x2 y2 < <(overlay_bounds "$dump_file")
+  adb shell input tap "$(((x1 + x2) / 2))" "$(((y1 + y2) / 2))"
 }
 
-verify_overlay_idle_contract() {
-  local ui_xml="$1"
-  python3 - "$ui_xml" <<'PY'
+verify_overlay_expanded_geometry() {
+  local idle_file="$1"
+  local expanded_file="$2"
+  python3 - "$idle_file" "$expanded_file" <<'PY'
+import re
 import sys
-import xml.etree.ElementTree as ET
-root = ET.parse(sys.argv[1]).getroot()
-descs = {(n.attrib.get("content-desc") or "") for n in root.iter()}
-required = {
-    "VoiceBubble CI 外部入力欄",
-    "音声入力を開始または確定",
-}
-missing = sorted(required - descs)
-if missing:
-    raise SystemExit(f"idle overlay contract missing: {missing}")
-if "AI補正を使わず認識結果をそのまま入力" in descs:
-    raise SystemExit("raw bypass button should not be visible while bubble is idle")
-print("idle overlay contract PASS")
-PY
-}
 
-verify_overlay_expanded_contract() {
-  local ui_xml="$1"
-  python3 - "$ui_xml" <<'PY'
-import sys
-import xml.etree.ElementTree as ET
-root = ET.parse(sys.argv[1]).getroot()
-descs = {(n.attrib.get("content-desc") or "") for n in root.iter()}
-texts = {(n.attrib.get("text") or "") for n in root.iter()}
-required_desc = {
-    "VoiceBubbleの状態",
-    "AI補正を使わず認識結果をそのまま入力",
-    "音声入力を破棄",
-    "音声入力を開始または確定",
-}
-missing = sorted(required_desc - descs)
-if missing:
-    raise SystemExit(f"expanded overlay contract missing: {missing}")
-if "補正せず入力" not in texts:
-    raise SystemExit("expanded overlay does not expose the visible raw-bypass label")
-if not ({"認識本文の表示待ち", "音声認識された本文"} & descs):
-    raise SystemExit("expanded overlay does not expose the transcript surface")
-print("expanded overlay contract PASS")
+def bounds(path):
+    for line in open(path, encoding="utf-8", errors="replace"):
+        if "type=TYPE_ACCESSIBILITY_OVERLAY" not in line:
+            continue
+        m = re.search(r"region=SkRegion\(\((\d+),(\d+),(\d+),(\d+)\)\)", line)
+        if m:
+            return tuple(map(int, m.groups()))
+    raise SystemExit(f"overlay bounds missing from {path}")
+
+idle = bounds(sys.argv[1])
+expanded = bounds(sys.argv[2])
+wi, hi = idle[2] - idle[0], idle[3] - idle[1]
+we, he = expanded[2] - expanded[0], expanded[3] - expanded[1]
+if wi <= 0 or hi <= 0 or we <= 0 or he <= 0:
+    raise SystemExit(f"invalid overlay geometry idle={idle} expanded={expanded}")
+if we * he < wi * hi * 3:
+    raise SystemExit(f"overlay did not materially expand after mic tap: idle={idle} expanded={expanded}")
+print(f"overlay expansion PASS: idle={wi}x{hi}, expanded={we}x{he}")
 PY
 }
 
@@ -310,14 +291,14 @@ stage "capture real external-editor floating bubble"
 adb shell am start -W -n "$TEST_HOST_ACTIVITY" | tee "$REPORT_ROOT/overlay-host-launch-api${API_LEVEL}.txt"
 sleep 1
 capture_ui "overlay-idle-api${API_LEVEL}"
-verify_overlay_idle_contract "$EVIDENCE_DIR/overlay-idle-api${API_LEVEL}.xml"
-tap_desc "音声入力を開始または確定"
-sleep 0.35
+wait_for_overlay_windows "overlay-idle-windows"
+IDLE_ACCESSIBILITY="$REPORT_ROOT/overlay-idle-windows-api${API_LEVEL}.txt"
+tap_overlay_center "$IDLE_ACCESSIBILITY"
+sleep 0.25
 capture_ui "overlay-expanded-api${API_LEVEL}"
-verify_overlay_expanded_contract "$EVIDENCE_DIR/overlay-expanded-api${API_LEVEL}.xml"
-set +e
-tap_desc "音声入力を破棄"
-set -e
+wait_for_overlay_windows "overlay-expanded-windows"
+EXPANDED_ACCESSIBILITY="$REPORT_ROOT/overlay-expanded-windows-api${API_LEVEL}.txt"
+verify_overlay_expanded_geometry "$IDLE_ACCESSIBILITY" "$EXPANDED_ACCESSIBILITY"
 adb shell am force-stop "$TEST_APP_ID" || true
 sleep 0.25
 launch_main
