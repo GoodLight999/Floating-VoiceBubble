@@ -34,10 +34,34 @@ class CorrectionPromptRepairTest {
     }
 
     @Test
+    fun aggressivePromptExplicitlyPrefersAsrReconstructionOverRawSurfacePreservation() {
+        val system = CorrectionPrompt.system(request(RecognitionRepairMode.AGGRESSIVE))
+        val user = CorrectionPrompt.user(request(RecognitionRepairMode.AGGRESSIVE))
+        assertTrue(system.contains("RAWを正解として保守的に守らない"))
+        assertTrue(system.contains("同音・類音語"))
+        assertTrue(system.contains("かな漢字変換"))
+        assertTrue(system.contains("N-bestや個人辞書に候補がなくても"))
+        assertTrue(user.contains("RAWの表面文字列を保存することより"))
+        assertTrue(system.contains("話者が言っていない新事実・主張・意見を作らない"))
+    }
+
+    @Test
+    fun maximumPromptTreatsRawAsNoisyHypothesisAndAllowsClauseScaleRepair() {
+        val system = CorrectionPrompt.system(request(RecognitionRepairMode.MAXIMUM))
+        val user = CorrectionPrompt.user(request(RecognitionRepairMode.MAXIMUM))
+        assertTrue(system.contains("RAWをノイズの多いASR仮説として扱い"))
+        assertTrue(system.contains("文または節の単位"))
+        assertTrue(system.contains("複数箇所の誤認、脱落、余計な語"))
+        assertTrue(system.contains("RAWの文字列保存より聞き取りミスの除去を優先"))
+        assertTrue(user.contains("意図された発話を復元することを優先"))
+        assertTrue(system.contains("要約、言い換えによる美文化"))
+    }
+
+    @Test
     fun offPromptForbidsLexicalRepair() {
         val prompt = CorrectionPrompt.system(request(RecognitionRepairMode.OFF))
         assertTrue(prompt.contains("語句そのものは変更しない"))
-        assertFalse(prompt.contains("積極"))
+        assertFalse(prompt.contains("積極修復"))
     }
 
     @Test
