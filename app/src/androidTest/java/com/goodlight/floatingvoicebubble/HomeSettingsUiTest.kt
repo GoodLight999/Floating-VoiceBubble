@@ -3,11 +3,13 @@ package com.goodlight.floatingvoicebubble
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -67,11 +69,21 @@ class HomeSettingsUiTest {
             composeRule.waitForIdle()
 
             composeRule.onNodeWithTag("repair-strength-control").assertIsDisplayed().performClick()
-            composeRule.onNodeWithText("語句は直さない", useUnmergedTree = true).assertIsDisplayed()
-            composeRule.onNodeWithText("確信できる誤認だけ", useUnmergedTree = true).assertIsDisplayed()
-            composeRule.onNodeWithText("明らかな誤認を修復", useUnmergedTree = true).assertIsDisplayed()
-            composeRule.onNodeWithText("文脈・候補から積極修復", useUnmergedTree = true).assertIsDisplayed()
-            composeRule.onNodeWithText("音と文脈から大胆に置換", useUnmergedTree = true).assertIsDisplayed()
+            listOf(
+                "語句は直さない",
+                "確信できる誤認だけ",
+                "明らかな誤認を修復",
+                "文脈・候補から積極修復",
+                "音と文脈から大胆に置換",
+                "誤認と判断した語句を最大限修復",
+            ).forEach { label ->
+                assertTrue(
+                    "repair-strength menu is missing '$label'",
+                    composeRule.onAllNodesWithText(label, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty(),
+                )
+            }
             composeRule.onNodeWithText("誤認と判断した語句を最大限修復", useUnmergedTree = true).performClick()
 
             composeRule.waitUntil(timeoutMillis = 5_000) {

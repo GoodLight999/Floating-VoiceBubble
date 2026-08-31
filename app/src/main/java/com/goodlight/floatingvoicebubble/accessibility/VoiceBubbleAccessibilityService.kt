@@ -82,6 +82,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        if (com.goodlight.floatingvoicebubble.BuildConfig.DEBUG) debugInstance = this
         settings = SettingsStore(this)
         profiles = AppProfileStore(this)
         dictionary = PersonalDictionary(this)
@@ -118,6 +119,7 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = cancel()
 
     override fun onDestroy() {
+        if (debugInstance === this) debugInstance = null
         session?.close()
         cancelAllPendingFinalizations()
         recentVoiceContext.clear()
@@ -745,6 +747,14 @@ class VoiceBubbleAccessibilityService : AccessibilityService() {
         val inputType: Int,
     ) {
         fun contextKey() = VoiceContextKey(packageName, fieldId, fieldName)
+    }
+
+    companion object {
+        @Volatile
+        private var debugInstance: VoiceBubbleAccessibilityService? = null
+
+        internal fun debugInstanceForInstrumentation(): VoiceBubbleAccessibilityService? =
+            if (com.goodlight.floatingvoicebubble.BuildConfig.DEBUG) debugInstance else null
     }
 
     private class TrackingInputMethod(
