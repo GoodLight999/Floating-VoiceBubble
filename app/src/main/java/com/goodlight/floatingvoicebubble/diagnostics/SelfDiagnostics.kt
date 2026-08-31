@@ -26,6 +26,8 @@ import com.goodlight.floatingvoicebubble.correction.CorrectionBackend
 import com.goodlight.floatingvoicebubble.correction.CorrectionBackendResolver
 import com.goodlight.floatingvoicebubble.correction.CorrectionGuard
 import com.goodlight.floatingvoicebubble.correction.CorrectionPostProcessor
+import com.goodlight.floatingvoicebubble.correction.CorrectionPreferences
+import com.goodlight.floatingvoicebubble.correction.CorrectionRequest
 import com.goodlight.floatingvoicebubble.correction.FinalizationEngine
 import com.goodlight.floatingvoicebubble.correction.ReasoningCapabilities
 import com.goodlight.floatingvoicebubble.correction.ReasoningWireDescriptor
@@ -358,6 +360,14 @@ class SelfDiagnostics(
             } else results += skip("final-recognition-model-load", "model not configured")
 
             when (selectedBackend) {
+                CorrectionBackend.BYOK -> results += probe("correction-api-reachability") {
+                    runCorrectionApiReachabilityProbe(settings)
+                }
+                CorrectionBackend.GEMMA -> results += skip("correction-api-reachability", "on-device correction selected")
+                CorrectionBackend.NONE -> results += skip("correction-api-reachability", "correction disabled or unavailable")
+            }
+
+            when (selectedBackend) {
                 CorrectionBackend.NONE -> {
                     results += skip("production-correction-short", "correction disabled or unavailable")
                     results += skip("production-correction-long", "correction disabled or unavailable")
@@ -375,6 +385,7 @@ class SelfDiagnostics(
             results += skip("streaming-recognition-model-load", "external probes disabled")
             results += skip("cloud-recognition-api", "external probes disabled")
             results += skip("final-recognition-model-load", "external probes disabled")
+            results += skip("correction-api-reachability", "external probes disabled")
             results += skip("production-correction-short", "external probes disabled")
             results += skip("production-correction-long", "external probes disabled")
         }
@@ -404,6 +415,37 @@ class SelfDiagnostics(
             }
         }
         return pass("effective-correction-route", detail)
+    }
+
+    private fun runCorrectionApiReachabilityProbe(settings: AppSettings): String {
+        val apiKey = settingsStore.apiKey().trim()
+        check(apiKey.isNotBlank()) { "BYOK credential missing" }
+        check(settings.byokModel.isNotBlank()) { "correction model is blank" }
+        val resolved = ByokEndpointResolver.resolve(settings.byokEndpoint)
+        val request = CorrectionRequest(
+            rawTranscript = "音声入力テスト",
+            alternatives = emptyList(),
+            surroundingContext = "",
+            dictionaryTerms = emptyList(),
+            preferences = CorrectionPreferences(
+                addCommas = false,
+                addPeriods = false,
+                removeFillers = false,
+                recognitionRepairMode = RecognitionRepairMode.OFF,
+            ),
+        )
+        val corrector = CloudCorrectorFactory.create(
+            settings.byokEndpoint,
+            settings.byokModel,
+            apiKey,
+            settings.reasoningEffort,
+        )
+        val started = System.nanoTime()
+        val result = corrector.correctDetailed(request)
+        val latencyMs = (System.nanoTime() - started) / 1_000_000L
+        check(result.text.isNotBlank()) { "provider returned no final text" }
+        val timing = result.metadata.attemptTimings.joinToString(" | ") { it.redactedSummary() }.ifBlank { "n/a" }
+        return "provider=${resolved.protocol}; endpoint=${resolved.generationUrl.substringBefore('?')}; model=${settings.byokModel}; attempts=${result.metadata.attempts}; http=${result.metadata.httpStatus ?: -1}; latency=${latencyMs}ms; timing=$timing"
     }
 
     private fun runProductionCorrectionProbe(settings: AppSettings, longVector: Boolean): String {
