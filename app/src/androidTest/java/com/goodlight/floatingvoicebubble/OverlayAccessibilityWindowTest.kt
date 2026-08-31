@@ -11,7 +11,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.goodlight.floatingvoicebubble.accessibility.VoiceBubbleAccessibilityService
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -194,12 +193,13 @@ class OverlayAccessibilityWindowTest {
     private fun fieldUnsafe(target: Any, name: String): Any? {
         var type: Class<*>? = target.javaClass
         while (type != null) {
-            val field = runCatching { type.getDeclaredField(name) }.getOrNull()
+            val currentType = type
+            val field = runCatching { currentType.getDeclaredField(name) }.getOrNull()
             if (field != null) {
                 field.isAccessible = true
                 return field.get(target)
             }
-            type = type.superclass
+            type = currentType.superclass
         }
         throw AssertionError("field '$name' not found on ${target.javaClass.name}")
     }
