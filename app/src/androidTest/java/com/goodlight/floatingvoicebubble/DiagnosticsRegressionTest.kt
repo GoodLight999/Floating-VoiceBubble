@@ -32,6 +32,21 @@ class DiagnosticsRegressionTest {
     }
 
     @Test
+    fun correctionDiagnosticsKeepReachabilitySeparateFromProductionPaths() {
+        val report = SelfDiagnostics(context).run(includeExternalProbes = false)
+        val reachability = report.items.firstOrNull { it.id == "correction-api-reachability" }
+        val short = report.items.firstOrNull { it.id == "production-correction-short" }
+        val long = report.items.firstOrNull { it.id == "production-correction-long" }
+
+        assertNotNull(reachability)
+        assertNotNull(short)
+        assertNotNull(long)
+        assertEquals(DiagnosticStatus.SKIP, reachability!!.status)
+        assertEquals(DiagnosticStatus.SKIP, short!!.status)
+        assertEquals(DiagnosticStatus.SKIP, long!!.status)
+    }
+
+    @Test
     fun effectiveCorrectionRouteShowsExactRedactedReasoningWireSetting() {
         val store = SettingsStore(context)
         val previous = store.load()
