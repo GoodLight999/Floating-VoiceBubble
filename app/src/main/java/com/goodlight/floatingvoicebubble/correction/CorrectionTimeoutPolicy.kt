@@ -28,8 +28,16 @@ object CorrectionTimeoutPolicy {
         ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 60_000
     }
 
-    /** Compatibility alias for older diagnostics/tests; total cloud calls must not use this. */
-    fun correctionTimeoutMs(effort: ReasoningEffort): Long = localCorrectionTimeoutMs(effort)
+    /**
+     * Broad outer finalization safety cap. Cloud adapters still fail much sooner when response
+     * progress actually stops; this cap only prevents a pathological continuously-active request
+     * from occupying a finalization slot forever.
+     */
+    fun correctionTimeoutMs(effort: ReasoningEffort): Long = when (effort) {
+        ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW -> 180_000L
+        ReasoningEffort.DEFAULT, ReasoningEffort.MEDIUM -> 240_000L
+        ReasoningEffort.HIGH, ReasoningEffort.XHIGH, ReasoningEffort.MAX -> 300_000L
+    }
 
     /** Compatibility alias. Semantics are now idle-between-bytes, not total response time. */
     fun networkReadTimeoutMs(effort: ReasoningEffort): Int = networkIdleTimeoutMs(effort)
