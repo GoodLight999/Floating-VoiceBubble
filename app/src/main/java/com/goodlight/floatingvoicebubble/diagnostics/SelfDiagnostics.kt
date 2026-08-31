@@ -419,7 +419,6 @@ class SelfDiagnostics(
 
     private fun runCorrectionApiReachabilityProbe(settings: AppSettings): String {
         val apiKey = settingsStore.apiKey().trim()
-        check(apiKey.isNotBlank()) { "BYOK credential missing" }
         check(settings.byokModel.isNotBlank()) { "correction model is blank" }
         val resolved = ByokEndpointResolver.resolve(settings.byokEndpoint)
         val request = CorrectionRequest(
