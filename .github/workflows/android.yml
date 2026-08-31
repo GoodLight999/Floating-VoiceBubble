@@ -1,0 +1,266 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  FVB_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  model-catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.FVB_CANDIDATE_SHA }}
+      - name: Verify exact candidate source head
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$FVB_CANDIDATE_SHA"
+      - name: Probe pinned official model URLs
+        run: bash scripts/verify-model-catalog.sh
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      FVB_SIGNING_STORE_FILE: ${{ github.workspace }}/.ci/fvb-signing.jks
+      FVB_SIGNING_STORE_PASSWORD: ${{ secrets.FVB_SIGNING_STORE_PASSWORD }}
+      FVB_SIGNING_KEY_ALIAS: ${{ secrets.FVB_SIGNING_KEY_ALIAS }}
+      FVB_SIGNING_KEY_PASSWORD: ${{ secrets.FVB_SIGNING_KEY_PASSWORD }}
+      FVB_SIGNING_CERT_SHA256: ${{ secrets.FVB_SIGNING_CERT_SHA256 }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.FVB_CANDIDATE_SHA }}
+      - name: Verify exact candidate source head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FVB_CANDIDATE_SHA"
+          printf '%s\n' "$FVB_CANDIDATE_SHA" | tee candidate-source-sha.txt
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+      - name: Prepare stable APK signer when configured
+        env:
+          FVB_SIGNING_KEYSTORE_B64: ${{ secrets.FVB_SIGNING_KEYSTORE_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${FVB_SIGNING_KEYSTORE_B64:-}" && -n "${FVB_SIGNING_STORE_PASSWORD:-}" && -n "${FVB_SIGNING_KEY_ALIAS:-}" && -n "${FVB_SIGNING_KEY_PASSWORD:-}" ]]; then
+            mkdir -p "$(dirname "$FVB_SIGNING_STORE_FILE")"
+            printf '%s' "$FVB_SIGNING_KEYSTORE_B64" | base64 --decode > "$FVB_SIGNING_STORE_FILE"
+            chmod 600 "$FVB_SIGNING_STORE_FILE"
+            keytool -list -keystore "$FVB_SIGNING_STORE_FILE" -storepass "$FVB_SIGNING_STORE_PASSWORD" -alias "$FVB_SIGNING_KEY_ALIAS" >/dev/null
+            echo "Stable APK signer loaded from GitHub Actions secrets."
+          else
+            echo "::warning::Stable signing secrets are not configured; debug uses the runner-local signer and release remains unsigned for later stable signing."
+          fi
+      - name: Lint, JVM tests, androidTest compile, debug and release/R8
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --stacktrace \
+            :app:lintDebug \
+            :app:testDebugUnitTest \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest \
+            :app:assembleRelease 2>&1 | tee gradle-verify.log
+      - name: Verify debug and R8 release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+
+          DEBUG=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$DEBUG"
+          unzip -t "$DEBUG" >/dev/null
+          unzip -l "$DEBUG" > apk-contents.txt
+          grep -F "lib/x86_64/libsherpa-onnx-jni.so" apk-contents.txt
+          grep -F "lib/arm64-v8a/libsherpa-onnx-jni.so" apk-contents.txt
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$DEBUG" | tee zipalign-16k.log
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$DEBUG" | tee apksigner.log
+          DEBUG_BADGING="$("$BUILD_TOOLS/aapt" dump badging "$DEBUG")"
+          printf '%s\n' "$DEBUG_BADGING" | tee apk-badging.txt
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "versionCode='26082801'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "versionName='0.1.0-rc.1'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "sdkVersion:'33'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "targetSdkVersion:'36'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "application-label:'Floating VoiceBubble'"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "application-icon"
+          printf '%s\n' "$DEBUG_BADGING" | grep -F "launchable-activity: name='com.goodlight.floatingvoicebubble.MainActivity'"
+
+          DEBUG_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner.log | head -n1 | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
+          test -n "$DEBUG_CERT"
+          printf '%s\n' "$DEBUG_CERT" | tee apk-signing-cert-sha256.txt
+          if [[ -n "${FVB_SIGNING_CERT_SHA256:-}" ]]; then
+            EXPECTED_CERT="$(printf '%s' "$FVB_SIGNING_CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
+            test "$DEBUG_CERT" = "$EXPECTED_CERT"
+          fi
+
+          mapfile -t RELEASES < <(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' | sort)
+          test "${#RELEASES[@]}" -eq 1
+          RELEASE="${RELEASES[0]}"
+          test -s "$RELEASE"
+          printf '%s\n' "$RELEASE" | tee release-candidate-path.txt
+          unzip -t "$RELEASE" >/dev/null
+          unzip -l "$RELEASE" > release-apk-contents.txt
+          grep -F "lib/x86_64/libsherpa-onnx-jni.so" release-apk-contents.txt
+          grep -F "lib/arm64-v8a/libsherpa-onnx-jni.so" release-apk-contents.txt
+
+          COROUTINES_ANDROID="$(unzip -p "$RELEASE" META-INF/kotlinx_coroutines_android.version | tr -d '\r\n')"
+          COROUTINES_CORE="$(unzip -p "$RELEASE" META-INF/kotlinx_coroutines_core.version | tr -d '\r\n')"
+          printf 'android=%s\ncore=%s\n' "$COROUTINES_ANDROID" "$COROUTINES_CORE" | tee release-coroutines-versions.txt
+          test "$COROUTINES_ANDROID" = "1.11.0"
+          test "$COROUTINES_CORE" = "1.11.0"
+
+          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$RELEASE" | tee release-zipalign-16k.log
+          RELEASE_BADGING="$("$BUILD_TOOLS/aapt" dump badging "$RELEASE")"
+          printf '%s\n' "$RELEASE_BADGING" | tee release-apk-badging.txt
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "package: name='com.goodlight.floatingvoicebubble'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "versionCode='26082801'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "versionName='0.1.0-rc.1'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "sdkVersion:'33'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "targetSdkVersion:'36'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "application-label:'Floating VoiceBubble'"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "application-icon"
+          printf '%s\n' "$RELEASE_BADGING" | grep -F "launchable-activity: name='com.goodlight.floatingvoicebubble.MainActivity'"
+
+          "$BUILD_TOOLS/aapt" dump xmltree "$RELEASE" AndroidManifest.xml | tee release-manifest.xmltree.txt
+          grep -F "com.goodlight.floatingvoicebubble.SOURCE_SHA" release-manifest.xmltree.txt
+          grep -F "$FVB_CANDIDATE_SHA" release-manifest.xmltree.txt
+          sha256sum "$RELEASE" | tee release-candidate-sha256.txt
+
+          if [[ -f "$FVB_SIGNING_STORE_FILE" ]]; then
+            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$RELEASE" | tee apksigner-release.log
+            RELEASE_CERT="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' apksigner-release.log | head -n1 | tr '[:upper:]' '[:lower:]' | tr -d ': ')"
+            test "$RELEASE_CERT" = "$DEBUG_CERT"
+          else
+            if "$BUILD_TOOLS/apksigner" verify "$RELEASE" >/dev/null 2>&1; then
+              echo "Unsigned release candidate unexpectedly verifies as signed" >&2
+              exit 1
+            fi
+            echo "Stable signer absent; R8 release candidate verified structurally and intentionally remains unsigned." | tee apksigner-release.log
+          fi
+      - name: Bundle official Android APK signing tool for reproducible verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-tools/lib
+          cp "$ANDROID_HOME/build-tools/36.0.0/apksigner" ci-tools/apksigner
+          cp "$ANDROID_HOME/build-tools/36.0.0/lib/apksigner.jar" ci-tools/lib/apksigner.jar
+          chmod 755 ci-tools/apksigner
+          sha256sum ci-tools/apksigner ci-tools/lib/apksigner.jar > ci-tools/SHA256SUMS
+      - name: Upload CI diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatingVoiceBubble-ci-diagnostics-${{ env.FVB_CANDIDATE_SHA }}
+          path: |
+            candidate-source-sha.txt
+            gradle-verify.log
+            apk-contents.txt
+            zipalign-16k.log
+            apksigner.log
+            apksigner-release.log
+            apk-signing-cert-sha256.txt
+            apk-badging.txt
+            release-candidate-path.txt
+            release-candidate-sha256.txt
+            release-apk-contents.txt
+            release-coroutines-versions.txt
+            release-manifest.xmltree.txt
+            release-zipalign-16k.log
+            release-apk-badging.txt
+            ci-tools/**
+            app/build/reports/**
+            app/build/test-results/**
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatingVoiceBubble-debug-${{ env.FVB_CANDIDATE_SHA }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload R8 release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatingVoiceBubble-release-candidate-${{ env.FVB_CANDIDATE_SHA }}
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  emulator:
+    needs: [model-catalog, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [33, 36]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.FVB_CANDIDATE_SHA }}
+      - name: Verify exact candidate source head
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$FVB_CANDIDATE_SHA"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+      - name: Install, launch, bind accessibility, run instrumentation
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -no-metrics
+          disable-animations: true
+          script: GRADLE_CMD=gradle bash scripts/verify-emulator.sh
+      - name: Upload emulator reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FloatingVoiceBubble-emulator-api${{ matrix.api-level }}-${{ env.FVB_CANDIDATE_SHA }}
+          path: |
+            app/build/reports/androidTests/**
+            app/build/outputs/androidTest-results/**
+          if-no-files-found: warn
+          retention-days: 14
